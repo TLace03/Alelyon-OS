@@ -134,6 +134,11 @@ _PILLARS: tuple[tuple[str, str, int], ...] = (
     ("web/", "web", 1),
 )
 
+#: Every pillar a path can actually resolve to. Derived from the table rather
+#: than written twice, so a new pillar cannot be accepted by one and rejected by
+#: the other. `Area.known` is the only thing that should consult this.
+KNOWN_PILLARS: frozenset[str] = frozenset(p for _prefix, p, _depth in _PILLARS)
+
 #: Whole pillars that are Tier 3 under AGENTS.md §3, withheld from any surface
 #: that offers work to an agent. §1 forbids a probationary model from changing
 #: them at all, so offering one as a free slot points a session that asked
@@ -181,6 +186,25 @@ class Area:
         return self.pillar != UNMAPPED
 
     @property
+    def known(self) -> bool:
+        """Whether a path could ever actually resolve to this area.
+
+        `mapped` only says "not the UNMAPPED sentinel", which any string
+        satisfies — `parse_area` partitions on `/` and hands back whatever it was
+        given. So a typo produced a well-formed Area on a pillar that appears in
+        no path, and anything keyed on it was invisible for ever after.
+
+        That is not hypothetical. A session claimed `platform.gateway` — the
+        dotted form, because pillars like `runtime.common` really do contain
+        dots — while routing derives `platform/gateway`. The claim was accepted
+        and reported as success, the session was never reachable, and four
+        findings published at the real area reported REACHED NOBODY. Creating a
+        coordinate must therefore be checked against the table; reading one back
+        must not, so a bad record can still be inspected and released.
+        """
+        return self.pillar in KNOWN_PILLARS
+
+    @property
     def tier3(self) -> bool:
         """Work here needs explicit owner authority. See AGENTS.md §3.
 
@@ -203,6 +227,37 @@ def parse_area(text: str) -> Area:
         return UNMAPPED_AREA
     pillar, _, surface = raw.partition("/")
     return Area(pillar, surface)
+
+
+def suggest_area(text: str) -> "Area | None":
+    """A known area the caller plausibly meant, or None.
+
+    Exists for one confusion specifically, because it is the one that actually
+    happened and it is built into the vocabulary rather than being carelessness:
+    a pillar may contain a dot (`runtime.common`), and a pillar and its surface
+    are joined by a slash (`platform/gateway`). Both separators are legitimate,
+    so `platform.gateway` looks entirely reasonable and resolves to nothing.
+
+    Refusing without a suggestion would leave the caller re-reading a vocabulary
+    list to spot a single character.
+    """
+    raw = (text or "").strip()
+    if not raw or parse_area(raw).known:
+        return None
+
+    candidates: list[str] = []
+    if "/" not in raw and "." in raw:
+        head, _, tail = raw.rpartition(".")        # platform.gateway
+        candidates.append(f"{head}/{tail}")        # -> platform/gateway
+    if "/" in raw:
+        candidates.append(raw.replace("/", ".", 1))  # runtime/common -> runtime.common
+        candidates.append(raw.partition("/")[0])     # bare pillar
+
+    for candidate in candidates:
+        area = parse_area(candidate)
+        if area.known:
+            return area
+    return None
 
 
 def area_of(path: str) -> Area:

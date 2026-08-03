@@ -42,13 +42,17 @@ from alelyon.runtime.vector.lattice.contracts import (
 from alelyon.runtime.vector.lattice.transforms import (
     MAX_TRANSFORM_CHAIN_DEPTH,
     MAX_LABEL_REINDEX_ITEMS,
+    AxisOrderingTransform,
     AxisOrientationTransform,
+    AxisReferenceShift,
     AxisPermutationTransform,
     AxisTimezoneOffset,
     AxisUnitConversion,
+    CalendarTransform,
     ExactTransform,
     IdentityTransform,
     LabelReindexTransform,
+    ReferenceBasisTransform,
     TimezoneTransform,
     TransformChain,
     TransformDirection,
@@ -458,6 +462,21 @@ def _permutation_parameters(transform: AxisPermutationTransform) -> bytes:
     return _sequence(_u32(index) for index in transform.source_order)
 
 
+def _ordering_parameters(transform: AxisOrderingTransform) -> bytes:
+    # Which axes are stored back to front. There is nothing else to commit: the
+    # reversal has no parameter, and which ordering each side declares is
+    # already committed by the two coordinate spaces the header names.
+    return _sequence(_u32(index) for index in transform.axis_indexes)
+
+
+def _calendar_parameters(transform: CalendarTransform) -> bytes:
+    # Which axes were re-spelled, and nothing else. The declaration asserts that
+    # two calendars admit the same instants; it has no magnitude, and the two
+    # calendar names it relates are already committed by the spaces the header
+    # binds. These bytes are the whole record of the assertion.
+    return _sequence(_u32(index) for index in transform.axis_indexes)
+
+
 def _orientation_parameters(transform: AxisOrientationTransform) -> bytes:
     # The whole parameter set: which axes were reflected. There is no factor to
     # commit to because the map is negation and nothing else, so these bytes are
@@ -481,6 +500,16 @@ def _unit_affine_parameters(transform: UnitAffineTransform) -> bytes:
         + _string(conversion.scale)
         + _string(conversion.offset)
         for conversion in transform.conversions
+    )
+
+
+def _reference_basis_parameters(transform: ReferenceBasisTransform) -> bytes:
+    # The declared offset is committed as its canonical reduced string, for the
+    # same reason a unit factor is: re-deriving it through Fraction would let two
+    # spellings share one encoding.
+    return _sequence(
+        _u32(shift.axis_index) + _string(shift.offset)
+        for shift in transform.shifts
     )
 
 
@@ -515,9 +544,12 @@ _TRANSFORM_ENCODERS = MappingProxyType(
     {
         IdentityTransform: _identity_parameters,
         AxisPermutationTransform: _permutation_parameters,
+        AxisOrderingTransform: _ordering_parameters,
         AxisOrientationTransform: _orientation_parameters,
+        CalendarTransform: _calendar_parameters,
         LabelReindexTransform: _label_reindex_parameters,
         UnitAffineTransform: _unit_affine_parameters,
+        ReferenceBasisTransform: _reference_basis_parameters,
         TimezoneTransform: _timezone_parameters,
     }
 )
@@ -666,6 +698,17 @@ def _read_permutation(
     return AxisPermutationTransform(target_space, source_space, order)
 
 
+def _read_ordering(
+    reader: _Reader,
+    target_space: CoordinateSpace,
+    source_space: CoordinateSpace,
+) -> AxisOrderingTransform:
+    indexes = tuple(
+        reader.u32() for _ in range(reader.count("axis_indexes", MAX_AXES))
+    )
+    return AxisOrderingTransform(target_space, source_space, indexes)
+
+
 def _read_orientation(
     reader: _Reader,
     target_space: CoordinateSpace,
@@ -675,6 +718,17 @@ def _read_orientation(
         reader.u32() for _ in range(reader.count("axis_indexes", MAX_AXES))
     )
     return AxisOrientationTransform(target_space, source_space, indexes)
+
+
+def _read_calendar(
+    reader: _Reader,
+    target_space: CoordinateSpace,
+    source_space: CoordinateSpace,
+) -> CalendarTransform:
+    indexes = tuple(
+        reader.u32() for _ in range(reader.count("axis_indexes", MAX_AXES))
+    )
+    return CalendarTransform(target_space, source_space, indexes)
 
 
 def _read_label_reindex(
@@ -700,6 +754,18 @@ def _read_unit_affine(
         for _ in range(reader.count("conversions", MAX_AXES))
     )
     return UnitAffineTransform(target_space, source_space, conversions)
+
+
+def _read_reference_basis(
+    reader: _Reader,
+    target_space: CoordinateSpace,
+    source_space: CoordinateSpace,
+) -> ReferenceBasisTransform:
+    shifts = tuple(
+        AxisReferenceShift(reader.u32(), reader.string())
+        for _ in range(reader.count("shifts", MAX_AXES))
+    )
+    return ReferenceBasisTransform(target_space, source_space, shifts)
 
 
 def _read_signed_minutes(reader: _Reader, field_name: str) -> int:
@@ -744,9 +810,12 @@ _TRANSFORM_DECODERS = MappingProxyType(
     {
         "IDENTITY": _read_identity,
         "AXIS_PERMUTATION": _read_permutation,
+        "AXIS_ORDERING": _read_ordering,
         "AXIS_ORIENTATION": _read_orientation,
+        "CALENDAR": _read_calendar,
         "LABEL_REINDEX": _read_label_reindex,
         "UNIT_AFFINE": _read_unit_affine,
+        "REFERENCE_BASIS": _read_reference_basis,
         "TIMEZONE": _read_timezone,
     }
 )

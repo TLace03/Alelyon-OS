@@ -537,6 +537,9 @@ class CoordinateAxis:
         include_unit: bool = True,
         include_timezone: bool = True,
         include_orientation: bool = True,
+        include_ordering: bool = True,
+        include_reference_frame: bool = True,
+        include_calendar: bool = True,
     ) -> tuple[object, ...]:
         """Fields that must agree for an exact coordinate correspondence.
 
@@ -548,16 +551,25 @@ class CoordinateAxis:
         change on its own — the transform still has to be declared, admitted by
         both axis policies, and exact.
 
-        ``calendar`` is deliberately not relaxable here. A calendar decides which
-        instants exist on an axis at all, so changing it is a different rung with
-        a different admissibility question, not a re-spelling of one instant.
+        ``calendar`` is relaxable, and the admissibility question it used to be
+        held out for has an answer that depends on this slice's other limits. A
+        calendar decides which instants exist on an axis, not where one sits, so
+        relaxing it is admissible exactly when the two calendars admit the same
+        instants — and then no coordinate moves. What a caller's declaration
+        asserts is that set equality and nothing more. It does *not* assert that
+        both calendars **number** those instants alike, which is the separate
+        claim an origin, bound or resolution would rest on; this slice refuses
+        every axis carrying one of those, so no such claim can arise here. If
+        that refusal is ever lifted, this one is no longer sufficient.
 
-        ``ordering`` is not relaxable either, and for a different reason: it
-        describes the axis's own storage direction, which no transform in this
-        slice reads. Correspondence here is by coordinate *value*, so two spaces
-        differing only in ``ordering`` still hold the same coordinates and are
-        still refused. Relaxing it would require deciding whether by-position
-        iteration is part of this contract, which it does not currently state.
+        ``ordering`` is relaxable, and it is the one field whose difference
+        cannot move a coordinate at all: §11.5 derives a cell address from
+        coordinate *values*, so an axis stored back to front holds the same
+        coordinates at the same addresses. It stays in this key by default
+        anyway, because two spaces that disagree about storage direction do
+        differ and §8.4 requires that difference to be explicit — an
+        `AxisOrderingTransform` states it rather than a silent equality hiding
+        it from a consumer that walks an axis by position.
         """
 
         return (
@@ -565,15 +577,15 @@ class CoordinateAxis:
             self.kind,
             self.scalar_type,
             self.unit if include_unit else None,
-            self.reference_frame,
-            self.calendar,
+            self.reference_frame if include_reference_frame else None,
+            self.calendar if include_calendar else None,
             self.timezone if include_timezone else None,
             self.orientation if include_orientation else None,
             self.origin,
             self.resolution,
             self.bounds,
             self.periodicity,
-            self.ordering,
+            self.ordering if include_ordering else None,
             self.labels_ref if include_labels else None,
             self.labels if include_labels else None,
             self.missingness_policy,

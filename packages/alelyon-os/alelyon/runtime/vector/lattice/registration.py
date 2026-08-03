@@ -19,13 +19,17 @@ from alelyon.runtime.vector.lattice.contracts import (
 )
 from alelyon.runtime.vector.lattice.transforms import (
     MAX_LABEL_REINDEX_ITEMS,
+    AxisOrderingTransform,
     AxisOrientationTransform,
     AxisPermutationTransform,
+    AxisReferenceShift,
     AxisTimezoneOffset,
     AxisUnitConversion,
+    CalendarTransform,
     IdentityTransform,
     LabelReindexTransform,
     ProhibitedTransformError,
+    ReferenceBasisTransform,
     TimezoneTransform,
     TransformChain,
     UnitAffineTransform,
@@ -46,9 +50,12 @@ MAX_MATCHING_EDGE_VISITS = 1 << 20
 class CompatibilityCode(str, Enum):
     EXACT_IDENTITY = "EXACT_IDENTITY"
     EXACT_AXIS_PERMUTATION = "EXACT_AXIS_PERMUTATION"
+    EXACT_AXIS_ORDERING = "EXACT_AXIS_ORDERING"
     EXACT_AXIS_ORIENTATION = "EXACT_AXIS_ORIENTATION"
+    EXACT_REFERENCE_BASIS = "EXACT_REFERENCE_BASIS"
     EXACT_UNIT_AFFINE = "EXACT_UNIT_AFFINE"
     EXACT_TIMEZONE = "EXACT_TIMEZONE"
+    EXACT_CALENDAR = "EXACT_CALENDAR"
     EXACT_LABEL_REINDEX = "EXACT_LABEL_REINDEX"
     EXACT_COMPOSED_CHAIN = "EXACT_COMPOSED_CHAIN"
     AMBIGUOUS_MAPPING = "AMBIGUOUS_MAPPING"
@@ -62,6 +69,8 @@ class CompatibilityCode(str, Enum):
     UNDECLARED_TIMEZONE_CONVERSION = "UNDECLARED_TIMEZONE_CONVERSION"
     UNDECLARED_LABEL_REINDEX = "UNDECLARED_LABEL_REINDEX"
     UNDECLARED_ORIENTATION_FLIP = "UNDECLARED_ORIENTATION_FLIP"
+    UNDECLARED_REFERENCE_SHIFT = "UNDECLARED_REFERENCE_SHIFT"
+    UNDECLARED_CALENDAR_ALIAS = "UNDECLARED_CALENDAR_ALIAS"
     PROHIBITED_TRANSFORM = "PROHIBITED_TRANSFORM"
     RESOURCE_BUDGET_EXCEEDED = "RESOURCE_BUDGET_EXCEEDED"
 
@@ -70,13 +79,74 @@ _SUCCESS_CODES = frozenset(
     {
         CompatibilityCode.EXACT_IDENTITY,
         CompatibilityCode.EXACT_AXIS_PERMUTATION,
+        CompatibilityCode.EXACT_AXIS_ORDERING,
         CompatibilityCode.EXACT_AXIS_ORIENTATION,
+        CompatibilityCode.EXACT_REFERENCE_BASIS,
         CompatibilityCode.EXACT_UNIT_AFFINE,
+        CompatibilityCode.EXACT_CALENDAR,
         CompatibilityCode.EXACT_TIMEZONE,
         CompatibilityCode.EXACT_LABEL_REINDEX,
         CompatibilityCode.EXACT_COMPOSED_CHAIN,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredCalendarAlias:
+    """One caller-declared assertion that two calendars admit the same instants.
+
+    Parameterless, like `DeclaredOrientationFlip` and for the same structural
+    reason: the map has no magnitude. Here it has no *content* either — the
+    coordinates do not move, because an instant admitted by both calendars is
+    one instant. The whole of this record is the claim that the two named
+    calendars admit the same set, and its absence is the refusal.
+
+    Nothing here can derive that claim. A calendar identifier is free text —
+    "XNYS", "NYSE", "gregorian", "noleap" — an open vocabulary with no algebra,
+    so nothing can tell an alias for one exchange session from two calendars
+    that genuinely close on different days. §7 puts alias resolution in Nexus,
+    whose answer carries a confidence; a registration carries a correspondence
+    that is exact or absent, so the claim is declared, committed and attributed
+    rather than looked up.
+
+    **This is the weakest declaration on the ladder, and by some distance.** A
+    wrong unit factor is uniformly wrong — every coordinate is off by the same
+    bad ratio. A wrong calendar alias is not: it silently pairs instants that
+    are not the same instant, on the days the two calendars disagree about and
+    nowhere else, and the two spaces may not even hold the same number of them.
+    Nothing in the data can contradict it, so a false claim here produces a
+    certificate that replays perfectly. What the record buys is attribution, not
+    verification.
+
+    A caller who wants the claim *checked* should not be here. An axis that
+    enumerates its sessions as a committed LABEL domain gets
+    `DeclaredLabelReindex`, whose map is verified for bijectivity against both
+    dictionaries. This declaration is for the axis whose instant set was never
+    committed, where the two names are the only evidence there is.
+    """
+
+    semantic_id: str
+    target_calendar: str
+    source_calendar: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "semantic_id",
+            _text(self.semantic_id, "semantic_id", identifier=True, maximum=1024),
+        )
+        for name in ("target_calendar", "source_calendar"):
+            object.__setattr__(
+                self, name, _text(getattr(self, name), name, identifier=True)
+            )
+        if self.target_calendar == self.source_calendar:
+            raise ValueError(
+                "a declared calendar alias must name two different calendars"
+            )
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.semantic_id, self.target_calendar, self.source_calendar)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +192,50 @@ class DeclaredOrientationFlip:
     @property
     def key(self) -> tuple[str, str, str]:
         return (self.semantic_id, self.target_orientation, self.source_orientation)
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredReferenceShift:
+    """One caller-declared exact origin shift between two reference frames.
+
+    A reference-frame identifier is free text -- "mean-sea-level",
+    "drill-floor", "EPSG:4326" -- and nothing here can compute how far apart two
+    origins are, so the distance between them is declared and committed. Read as
+    ``source = target + offset``, matching the stored target-to-source
+    direction, with the offset expressed in the **target axis's own unit**: the
+    origin moves while the coordinate is still in that unit, which is why the
+    reference stage runs before the unit stage in a composed chain.
+    """
+
+    semantic_id: str
+    target_frame: str
+    source_frame: str
+    offset: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "semantic_id",
+            _text(self.semantic_id, "semantic_id", identifier=True, maximum=1024),
+        )
+        for name in ("target_frame", "source_frame"):
+            object.__setattr__(
+                self, name, _text(getattr(self, name), name, identifier=False)
+            )
+        if self.target_frame == self.source_frame:
+            raise ValueError(
+                "a declared reference shift must name two different frames"
+            )
+        object.__setattr__(
+            self, "offset", _text(self.offset, "offset", identifier=True, maximum=513)
+        )
+        # Validated by the same record the transform will carry, so a
+        # declaration cannot describe a shift the transform would refuse.
+        AxisReferenceShift(0, self.offset)
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.semantic_id, self.target_frame, self.source_frame)
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,8 +455,11 @@ class CompatibilityReport:
 EXACT_CHAIN_SHAPES: Mapping[CompatibilityCode, tuple[str, ...]] = MappingProxyType({
     CompatibilityCode.EXACT_IDENTITY: ("IDENTITY",),
     CompatibilityCode.EXACT_AXIS_PERMUTATION: ("AXIS_PERMUTATION",),
+    CompatibilityCode.EXACT_AXIS_ORDERING: ("AXIS_ORDERING",),
     CompatibilityCode.EXACT_AXIS_ORIENTATION: ("AXIS_ORIENTATION",),
     CompatibilityCode.EXACT_LABEL_REINDEX: ("LABEL_REINDEX",),
+    CompatibilityCode.EXACT_REFERENCE_BASIS: ("REFERENCE_BASIS",),
+    CompatibilityCode.EXACT_CALENDAR: ("CALENDAR",),
     CompatibilityCode.EXACT_TIMEZONE: ("TIMEZONE",),
     CompatibilityCode.EXACT_UNIT_AFFINE: ("UNIT_AFFINE",),
 })
@@ -651,27 +768,53 @@ class _RelaxableField:
     #: A per-axis family needs one stage — and so one derived intermediate space
     #: — per differing axis, because its transform record names a single axis.
     per_axis: bool = False
+    #: Whether a caller has to supply the relationship between the two declared
+    #: values. True for every open vocabulary — a unit, a zone, a label domain,
+    #: an orientation code — because nothing here can compute how two of them
+    #: relate. False only where the vocabulary is a closed enum this contract
+    #: defines, which makes the relationship a fact about the schema.
+    declared: bool = True
 
 
 # In §14.2 ladder order: orientation correction is rung 3, label reindexing 4,
 # unit conversion 5, temporal conversion 6. Iteration order here is what decides
 # which rung a pair of spaces takes, so it is this tuple's order, not a dict's.
 _RELAXABLE_FIELDS = (
+    _RelaxableField(
+        "ordering", "include_ordering", "AXIS_ORDERING", declared=False
+    ),
     _RelaxableField("orientation", "include_orientation", "AXIS_ORIENTATION"),
     _RelaxableField("labels_ref", "include_labels", "LABEL_REINDEX", per_axis=True),
+    _RelaxableField("calendar", "include_calendar", "CALENDAR"),
     _RelaxableField("timezone", "include_timezone", "TIMEZONE"),
+    # Rung 5 is "unit and reference conversion". The reference shift runs
+    # first because its offset is declared in the *target* axis's unit, so
+    # the origin moves while the coordinate is still expressed in it;
+    # converting first would leave the declared number ambiguous about
+    # which unit it was measured in.
+    _RelaxableField(
+        "reference_frame", "include_reference_frame", "REFERENCE_BASIS"
+    ),
     _RelaxableField("unit", "include_unit", "UNIT_AFFINE"),
 )
 
 # Read-only views for the reason canonical.py's dispatch tables are: an installed
 # entry would decide which transform a composed stage becomes, with no refusal.
 _COMPOSED_STAGE_ITEM: Mapping[str, object] = MappingProxyType({
+    "AXIS_ORDERING": lambda index, declared: index,
     # The declaration has no parameters, so the item is the axis position and
     # the presence of `declared` is the whole of what it contributed.
     "AXIS_ORIENTATION": lambda index, declared: index,
     "LABEL_REINDEX": lambda index, declared: (index, declared.label_map),
+    # Parameterless for the same reason orientation is: the declaration is
+    # the assertion that two calendars admit the same instants, and an
+    # assertion has no magnitude. The axis position is the whole item.
+    "CALENDAR": lambda index, declared: index,
     "TIMEZONE": lambda index, declared: AxisTimezoneOffset(
         index, declared.target_offset_minutes, declared.source_offset_minutes
+    ),
+    "REFERENCE_BASIS": lambda index, declared: AxisReferenceShift(
+        index, declared.offset
     ),
     "UNIT_AFFINE": lambda index, declared: AxisUnitConversion(
         index, declared.scale, declared.offset
@@ -687,9 +830,12 @@ def _build_label_reindex(current, following, items):
 
 
 _COMPOSED_STAGE_TRANSFORM: Mapping[str, object] = MappingProxyType({
+    "AXIS_ORDERING": AxisOrderingTransform,
     "AXIS_ORIENTATION": AxisOrientationTransform,
     "LABEL_REINDEX": _build_label_reindex,
+    "CALENDAR": CalendarTransform,
     "TIMEZONE": TimezoneTransform,
+    "REFERENCE_BASIS": ReferenceBasisTransform,
     "UNIT_AFFINE": UnitAffineTransform,
 })
 
@@ -697,21 +843,32 @@ _COMPOSED_STAGE_TRANSFORM: Mapping[str, object] = MappingProxyType({
 # fields — the ordered domain and its commitment — and `CoordinateAxis` refuses a
 # pair that disagrees, so both move together or neither does.
 _COMPOSED_STAGE_OVERRIDE: Mapping[str, object] = MappingProxyType({
+    "AXIS_ORDERING": lambda axis: {"ordering": axis.ordering},
     "AXIS_ORIENTATION": lambda axis: {"orientation": axis.orientation},
     "LABEL_REINDEX": lambda axis: {
         "labels_ref": axis.labels_ref,
         "labels": axis.labels,
     },
+    "CALENDAR": lambda axis: {"calendar": axis.calendar},
     "TIMEZONE": lambda axis: {"timezone": axis.timezone},
+    "REFERENCE_BASIS": lambda axis: {"reference_frame": axis.reference_frame},
     "UNIT_AFFINE": lambda axis: {"unit": axis.unit},
 })
 
 _UNDECLARED_CODES: Mapping[str, "CompatibilityCode"] = MappingProxyType({
     "AXIS_ORIENTATION": CompatibilityCode.UNDECLARED_ORIENTATION_FLIP,
     "LABEL_REINDEX": CompatibilityCode.UNDECLARED_LABEL_REINDEX,
+    "CALENDAR": CompatibilityCode.UNDECLARED_CALENDAR_ALIAS,
     "TIMEZONE": CompatibilityCode.UNDECLARED_TIMEZONE_CONVERSION,
+    "REFERENCE_BASIS": CompatibilityCode.UNDECLARED_REFERENCE_SHIFT,
     "UNIT_AFFINE": CompatibilityCode.UNDECLARED_UNIT_CONVERSION,
 })
+
+
+#: Stands in for a caller's declaration where a family needs none. Never read:
+#: the families that use it build their item from the axis position alone. It
+#: exists so the two planners keep one shape instead of growing a second path.
+_DERIVED = object()
 
 
 def _single_field_differences(
@@ -758,9 +915,16 @@ def _single_field_differences(
 #: target position; the permutation is last and moves the whole tuple into the
 #: source's order. A chain is always a subsequence of this.
 COMPOSED_STAGE_ORDER = (
+    "AXIS_ORDERING",
     "AXIS_ORIENTATION",
     "LABEL_REINDEX",
+    # Rung 6, and first of its two families: a calendar settles which
+    # instants the axis holds, which is prior to how any one of them is
+    # spelled under a zone. It moves no coordinate, so the order is a
+    # statement rather than a constraint — but it has to be a fixed one.
+    "CALENDAR",
     "TIMEZONE",
+    "REFERENCE_BASIS",
     "UNIT_AFFINE",
     "AXIS_PERMUTATION",
 )
@@ -896,11 +1060,14 @@ def _plan_field_steps(
                 evidence=(f"axis:{axis.axis_id}",),
                 can_retry=True,
             )
-        key = (axis.semantic_id, here, there)
-        declared = tables[field.policy].get(key)
-        if declared is None:
-            missing.append(f"{key[0]}:{key[1]}->{key[2]}")
-            continue
+        if field.declared:
+            key = (axis.semantic_id, here, there)
+            declared = tables[field.policy].get(key)
+            if declared is None:
+                missing.append(f"{key[0]}:{key[1]}->{key[2]}")
+                continue
+        else:
+            declared = _DERIVED
         item = _COMPOSED_STAGE_ITEM[field.policy](target_index, declared)
         override = {
             target_index: _COMPOSED_STAGE_OVERRIDE[field.policy](partner_axis)
@@ -1184,6 +1351,12 @@ def _declared_rung(
                 evidence=(f"axis:{target_axis.axis_id}",),
                 can_retry=True,
             )
+        if not relaxable.declared:
+            # A closed vocabulary: the relationship between the two declared
+            # values is fixed by this contract, so there is nothing for a caller
+            # to supply and nothing that could be missing.
+            items.append(build_item(index, _DERIVED))
+            continue
         key = (target_axis.semantic_id, here, there)
         declared = table.get(key)
         if declared is None:
@@ -1250,6 +1423,24 @@ def _relaxable(policy: str) -> _RelaxableField:
     raise KeyError(policy)  # pragma: no cover - callers pass literals
 
 
+def _ordering_rung(source_space, target_space, table):
+    return _declared_rung(
+        source_space,
+        target_space,
+        _relaxable("AXIS_ORDERING"),
+        table,
+        success_code=CompatibilityCode.EXACT_AXIS_ORDERING,
+        # Unreachable: this family needs no declaration, so nothing can be
+        # missing. `_declared_rung` still wants a code for the branch, and
+        # `test_the_ordering_rung_never_asks_for_a_declaration` asserts the
+        # branch stays unreachable rather than leaving that to be assumed.
+        undeclared_code=CompatibilityCode.INSUFFICIENT_METADATA,
+        noun="ordering",
+        build_item=lambda index, declared: index,
+        build_transform=AxisOrderingTransform,
+    )
+
+
 def _orientation_rung(source_space, target_space, table):
     return _declared_rung(
         source_space,
@@ -1263,6 +1454,23 @@ def _orientation_rung(source_space, target_space, table):
         # correction is negation, so the axis position is the whole item.
         build_item=lambda index, declared: index,
         build_transform=AxisOrientationTransform,
+    )
+
+
+def _calendar_rung(source_space, target_space, table):
+    return _declared_rung(
+        source_space,
+        target_space,
+        _relaxable("CALENDAR"),
+        table,
+        success_code=CompatibilityCode.EXACT_CALENDAR,
+        undeclared_code=CompatibilityCode.UNDECLARED_CALENDAR_ALIAS,
+        noun="calendar",
+        # Nothing to copy across: the declaration asserts that two calendars
+        # admit the same instants, and an assertion has no parameter. The axis
+        # position is the whole item, as it is for an orientation flip.
+        build_item=lambda index, declared: index,
+        build_transform=CalendarTransform,
     )
 
 
@@ -1305,6 +1513,22 @@ def _label_reindex_rung(source_space, target_space, table):
     )
 
 
+def _reference_basis_rung(source_space, target_space, table):
+    return _declared_rung(
+        source_space,
+        target_space,
+        _relaxable("REFERENCE_BASIS"),
+        table,
+        success_code=CompatibilityCode.EXACT_REFERENCE_BASIS,
+        undeclared_code=CompatibilityCode.UNDECLARED_REFERENCE_SHIFT,
+        noun="reference_frame",
+        build_item=lambda index, declared: AxisReferenceShift(
+            index, declared.offset
+        ),
+        build_transform=ReferenceBasisTransform,
+    )
+
+
 def _unit_affine_rung(source_space, target_space, table):
     return _declared_rung(
         source_space,
@@ -1329,6 +1553,8 @@ def analyze_exact_compatibility(
     timezone_conversions: Iterable[DeclaredTimezoneConversion] = (),
     label_reindexes: Iterable[DeclaredLabelReindex] = (),
     orientation_flips: Iterable[DeclaredOrientationFlip] = (),
+    calendar_aliases: Iterable[DeclaredCalendarAlias] = (),
+    reference_shifts: Iterable[DeclaredReferenceShift] = (),
 ) -> CompatibilityReport:
     """Find identity, a unique exact axis permutation, or a declared conversion.
 
@@ -1364,6 +1590,12 @@ def analyze_exact_compatibility(
     )
     orientation_table = _declaration_table(
         orientation_flips, DeclaredOrientationFlip, "orientation_flips"
+    )
+    calendar_table = _declaration_table(
+        calendar_aliases, DeclaredCalendarAlias, "calendar_aliases"
+    )
+    reference_table = _declaration_table(
+        reference_shifts, DeclaredReferenceShift, "reference_shifts"
     )
 
     unsupported = tuple(
@@ -1454,9 +1686,12 @@ def analyze_exact_compatibility(
         # are the next-least-expressive ones that could still be exact, tried in
         # §14.2 order and only against what the caller explicitly declared.
         for rung, rung_table in (
+            (_ordering_rung, None),
             (_orientation_rung, orientation_table),
             (_label_reindex_rung, label_table),
+            (_calendar_rung, calendar_table),
             (_timezone_rung, timezone_table),
+            (_reference_basis_rung, reference_table),
             (_unit_affine_rung, unit_table),
         ):
             report = rung(source_space, target_space, rung_table)
@@ -1466,9 +1701,12 @@ def analyze_exact_compatibility(
             source_space,
             target_space,
             {
+                "AXIS_ORDERING": None,
                 "AXIS_ORIENTATION": orientation_table,
                 "LABEL_REINDEX": label_table,
+                "CALENDAR": calendar_table,
                 "TIMEZONE": timezone_table,
+                "REFERENCE_BASIS": reference_table,
                 "UNIT_AFFINE": unit_table,
             },
         )

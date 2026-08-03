@@ -16,6 +16,7 @@ from uuid import UUID
 
 from alelyon.runtime.vector.lattice.contracts import (
     CoordinateAxis,
+    CoordinateOrdering,
     CoordinateSpace,
     INITIAL_EXACT_TOPOLOGIES,
     MAX_AXES,
@@ -56,6 +57,11 @@ MAX_UTC_OFFSET_MINUTES = 1440
 # nothing can pass a different pair by accident.
 _REFLECTION_SCALE = Fraction(-1)
 _REFLECTION_OFFSET = Fraction(0)
+
+# A reference-basis change is a translation: the coordinate keeps its scale and
+# moves its origin, so the multiplier is fixed at one and only the offset is
+# declared.
+_TRANSLATION_SCALE = Fraction(1)
 
 _CONTENT_REF = re.compile(r"sha256:[0-9a-f]{64}\Z")
 # One coordinate must have exactly one spelling, or byte-distinct coordinates
@@ -456,6 +462,257 @@ class AxisPermutationTransform:
             self.source_space,
             self.target_space,
             tuple(inverse),
+        )
+
+
+#: The two orderings that are each other's reverse. `UNORDERED` has no direction
+#: to reverse and `CANONICAL_LABEL_ORDER` is fixed by the label dictionary, so
+#: neither can take part in a storage-direction correction.
+REVERSIBLE_ORDERINGS = frozenset(
+    {
+        CoordinateOrdering.ASCENDING,
+        CoordinateOrdering.DESCENDING,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AxisOrderingTransform:
+    """Reconcile axes stored in opposite directions. No coordinate moves.
+
+    §11.5 requires a canonical cell address to be derived from "canonical
+    coordinate values or labels" and forbids it depending on "storage chunk
+    placement". Addressing is therefore by *value*, and an axis stored back to
+    front holds the same coordinates at the same addresses. `apply_coordinates`
+    is the identity here, and that is the finding rather than a stub: a
+    difference in `ordering` cannot move a coordinate in this model.
+
+    So why a record at all? §8.4 — every transformation is explicit. Two spaces
+    that disagree about storage direction *do* differ, and a consumer that walks
+    an axis by position rather than by address has to reverse one of them. A
+    chain that silently registered these as identical would take that difference
+    out of the audit trail, which is the one thing it must not do.
+
+    Alone among the families that relax a field, this one needs **no
+    declaration**. `CoordinateOrdering` is a closed enum defined by this
+    contract, and "the reverse of ASCENDING is DESCENDING" is a fact about the
+    schema rather than about the world. The unit, timezone, label and
+    orientation vocabularies are all open and carry no algebra, which is exactly
+    why each of those needs a caller to supply the relationship and this one does
+    not.
+    """
+
+    target_space: CoordinateSpace
+    source_space: CoordinateSpace
+    axis_indexes: tuple[int, ...]
+    direction: TransformDirection = TransformDirection.TARGET_TO_SOURCE
+    transform_type: str = "AXIS_ORDERING"
+
+    # Every coordinate corresponds to itself, unchanged, in the same alphabet.
+    # Only a declared layout attribute differs, so this is as lossless as an axis
+    # permutation — which likewise moves things without changing any of them.
+    loss_class: ClassVar[LossClass] = LossClass.LOSSLESS
+    invertibility: ClassVar[Invertibility] = Invertibility.EXACT
+
+    def __post_init__(self) -> None:
+        if self.direction is not TransformDirection.TARGET_TO_SOURCE:
+            raise ValueError("Lattice stores only TARGET_TO_SOURCE transforms")
+        if self.transform_type != "AXIS_ORDERING":
+            raise ValueError("ordering transform_type must be AXIS_ORDERING")
+        _require_space_values(self.target_space, self.source_space)
+        _require_registration_metadata(self.target_space, self.source_space)
+        if self.target_space.exact_space_key() != self.source_space.exact_space_key():
+            raise ValueError(
+                "INCOMPATIBLE_SEMANTICS: space-wide coordinate metadata differs"
+            )
+        indexes = _bounded_tuple(self.axis_indexes, "axis_indexes", MAX_AXES)
+        if any(
+            type(index) is not int or isinstance(index, bool) for index in indexes
+        ):
+            raise TypeError("axis_indexes must contain only integers")
+        if len(set(indexes)) != len(indexes):
+            raise ValueError("axis_indexes must name each axis at most once")
+        if not indexes:
+            raise ValueError(
+                "an ordering correction must reverse at least one axis; equal "
+                "orderings must use IdentityTransform"
+            )
+        axis_count = len(self.target_space.axes)
+        if any(index < 0 or index >= axis_count for index in indexes):
+            raise ValueError("axis_indexes names an axis outside the target space")
+        reversed_axes = frozenset(indexes)
+        for index, (target_axis, source_axis) in enumerate(
+            zip(self.target_space.axes, self.source_space.axes, strict=True)
+        ):
+            include_ordering = index not in reversed_axes
+            if target_axis.exact_semantics_key(
+                include_ordering=include_ordering
+            ) != source_axis.exact_semantics_key(
+                include_ordering=include_ordering
+            ):
+                raise ValueError(
+                    "INCOMPATIBLE_SEMANTICS: an ordering correction may change "
+                    "only the declared ordering on the axes it names"
+                )
+            if include_ordering:
+                _require_axis_policy("IDENTITY", target_axis, source_axis)
+                continue
+            pair = {target_axis.ordering, source_axis.ordering}
+            if pair != REVERSIBLE_ORDERINGS:
+                raise ValueError(
+                    "UNSUPPORTED_VALUE_SEMANTICS: an ordering correction "
+                    "reverses ASCENDING against DESCENDING; axis "
+                    f"{target_axis.axis_id!r} declares "
+                    f"{target_axis.ordering.value} against "
+                    f"{source_axis.ordering.value}"
+                )
+            _require_axis_policy("AXIS_ORDERING", target_axis, source_axis)
+        object.__setattr__(self, "axis_indexes", tuple(sorted(indexes)))
+
+    def apply_coordinates(
+        self, target_coordinates: tuple[object, ...]
+    ) -> tuple[object, ...]:
+        # Deliberately the identity. §11.5 addresses a cell by coordinate value,
+        # so reversing an axis's storage direction leaves every address where it
+        # was. The record carries the difference; the map has nothing to do.
+        return _coordinates(target_coordinates, self.target_space)
+
+    def invert(self) -> AxisOrderingTransform:
+        return AxisOrderingTransform(
+            self.source_space,
+            self.target_space,
+            self.axis_indexes,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarTransform:
+    """Re-spell the calendar an axis names. No coordinate moves.
+
+    §11.3 makes ``calendar`` one field meaning "calendar/session definition", so
+    a calendar here is the rule deciding **which instants exist** on an axis —
+    an exchange session as much as a leap rule. It does not decide where an
+    instant sits. Two calendars that admit the same instants therefore hold the
+    same coordinates, and `apply_coordinates` is the identity, for the same
+    reason `AxisOrderingTransform`'s is: the record carries a difference the map
+    has nothing to do about. §8.4 still requires that difference to be explicit.
+
+    What this rung refuses is the case the spec names directly — "calendar
+    reindexing without inventing observations on closed days". Two calendars
+    admitting *different* instants do not correspond exactly in either
+    direction: one way invents observations on days the other closes, the other
+    drops them. That is a resampling, rung 11 at best, and this slice does not
+    do it. Nothing here can tell the two cases apart from the names, which is
+    why a caller has to.
+
+    So the declaration asserts set equality of the instants and nothing else.
+    That it can stop there is a consequence of a limit this slice already has:
+    `unsupported_exact_features` refuses any axis carrying `origin`, `bounds`,
+    `resolution` or `periodicity`, which are the fields that would rest on the
+    *separate* claim that both calendars number the same instants alike — Julian
+    and Gregorian admit every real day, and disagree about what "1900-02-28"
+    names. With those fields refused the axis says nothing a calendar
+    reinterprets, so one assertion is sufficient. It would not be if that
+    refusal were lifted, and
+    `test_the_calendar_rung_rests_on_the_unsupported_feature_refusal` fails on
+    purpose if it is.
+
+    Where the instants *are* committed, this is the weaker path and a caller
+    should not be on it: an axis that enumerates its sessions as a LABEL domain
+    gets `LabelReindexTransform`, whose declared map is checked for bijectivity
+    against both committed dictionaries. This family exists for the axis whose
+    instant set is not committed, where the two calendar names are the only
+    evidence and no check is possible.
+    """
+
+    target_space: CoordinateSpace
+    source_space: CoordinateSpace
+    axis_indexes: tuple[int, ...]
+    direction: TransformDirection = TransformDirection.TARGET_TO_SOURCE
+    transform_type: str = "CALENDAR"
+
+    # Every coordinate corresponds to itself, unchanged, in the same alphabet:
+    # the declaration is that both calendars admit exactly these instants, so
+    # there is nothing for a representation change to consist of. Unlike the
+    # timezone rung next to it on rung 6, no number is re-spelled.
+    loss_class: ClassVar[LossClass] = LossClass.LOSSLESS
+    invertibility: ClassVar[Invertibility] = Invertibility.EXACT
+
+    def __post_init__(self) -> None:
+        if self.direction is not TransformDirection.TARGET_TO_SOURCE:
+            raise ValueError("Lattice stores only TARGET_TO_SOURCE transforms")
+        if self.transform_type != "CALENDAR":
+            raise ValueError("calendar transform_type must be CALENDAR")
+        _require_space_values(self.target_space, self.source_space)
+        _require_registration_metadata(self.target_space, self.source_space)
+        if self.target_space.exact_space_key() != self.source_space.exact_space_key():
+            raise ValueError(
+                "INCOMPATIBLE_SEMANTICS: space-wide coordinate metadata differs"
+            )
+        indexes = _bounded_tuple(self.axis_indexes, "axis_indexes", MAX_AXES)
+        if any(
+            type(index) is not int or isinstance(index, bool) for index in indexes
+        ):
+            raise TypeError("axis_indexes must contain only integers")
+        if len(set(indexes)) != len(indexes):
+            raise ValueError("axis_indexes must name each axis at most once")
+        if not indexes:
+            raise ValueError(
+                "a calendar correspondence must re-spell at least one axis; "
+                "equal calendars must use IdentityTransform"
+            )
+        axis_count = len(self.target_space.axes)
+        if any(index < 0 or index >= axis_count for index in indexes):
+            raise ValueError("axis_indexes names an axis outside the target space")
+        respelled = frozenset(indexes)
+        for index, (target_axis, source_axis) in enumerate(
+            zip(self.target_space.axes, self.source_space.axes, strict=True)
+        ):
+            include_calendar = index not in respelled
+            if target_axis.exact_semantics_key(
+                include_calendar=include_calendar
+            ) != source_axis.exact_semantics_key(
+                include_calendar=include_calendar
+            ):
+                raise ValueError(
+                    "INCOMPATIBLE_SEMANTICS: a calendar correspondence may "
+                    "change only the declared calendar on the axes it names"
+                )
+            if include_calendar:
+                _require_axis_policy("IDENTITY", target_axis, source_axis)
+                continue
+            # A calendar declared on one side only leaves nothing to assert set
+            # equality *against*, so there is no correspondence to state.
+            if target_axis.calendar is None or source_axis.calendar is None:
+                raise ValueError(
+                    "UNSUPPORTED_VALUE_SEMANTICS: axis "
+                    f"{target_axis.axis_id!r} declares a calendar on only one "
+                    "side, so no correspondence between them can be exact"
+                )
+            if target_axis.calendar == source_axis.calendar:
+                raise ValueError(
+                    "UNSUPPORTED_VALUE_SEMANTICS: axis "
+                    f"{target_axis.axis_id!r} declares the same calendar on "
+                    "both sides; equal calendars must use IdentityTransform"
+                )
+            _require_axis_policy("CALENDAR", target_axis, source_axis)
+        object.__setattr__(self, "axis_indexes", tuple(sorted(indexes)))
+
+    def apply_coordinates(
+        self, target_coordinates: tuple[object, ...]
+    ) -> tuple[object, ...]:
+        # Deliberately the identity, and this is the finding rather than a stub.
+        # The declaration is that both calendars admit the same instants; an
+        # instant that exists under both is the same instant, so there is
+        # nothing to move. A calendar that moved coordinates would be one that
+        # renumbers them, which this rung does not admit.
+        return _coordinates(target_coordinates, self.target_space)
+
+    def invert(self) -> CalendarTransform:
+        return CalendarTransform(
+            self.source_space,
+            self.target_space,
+            self.axis_indexes,
         )
 
 
@@ -956,6 +1213,163 @@ class UnitAffineTransform:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AxisReferenceShift:
+    """One declared exact origin shift for a single axis, in the target's unit."""
+
+    axis_index: int
+    offset: str
+
+    def __post_init__(self) -> None:
+        if type(self.axis_index) is not int or isinstance(self.axis_index, bool):
+            raise TypeError("axis_index must be an integer")
+        if not 0 <= self.axis_index < MAX_AXES:
+            raise ValueError("axis_index is outside the supported axis range")
+        offset = _rational_value(self.offset, "offset")
+        # A zero shift means the two frames put their origin in the same place,
+        # so no coordinate changes and the only difference is the frame's name.
+        # That is a metadata change, and this slice does not carry one — the
+        # same boundary `AxisTimezoneOffset` draws for two zone names at one
+        # offset.
+        if offset == 0:
+            raise ValueError(
+                "offset must not be zero; two frames sharing an origin differ "
+                "only in name, which is a metadata change rather than a "
+                "coordinate transform"
+            )
+
+    @property
+    def exact_offset(self) -> Fraction:
+        return Fraction(self.offset)
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceBasisTransform:
+    """Re-express a coordinate against a different declared reference frame.
+
+    The map is `source = target + offset`: a translation, and nothing else.
+    §8.6 asks for the least-expressive sufficient transform, and "measured from
+    a different origin" has no scaling in it. A frame change that also rescales
+    is a *unit* change as well, and the two compose — one record per thing said,
+    which is also what keeps the offset unambiguous, because it is declared in
+    the target axis's own unit and the shift happens while the coordinate is
+    still expressed in it.
+
+    Declared, like every family whose vocabulary is open. A reference-frame
+    identifier is free text — "mean-sea-level", "drill-floor", "EPSG:4326" —
+    and nothing here can compute how far apart two origins are. Ranked against
+    the others by how much the data can push back, this sits with the unit rung:
+    nothing in the coordinates can contradict a declared origin offset.
+    """
+
+    target_space: CoordinateSpace
+    source_space: CoordinateSpace
+    shifts: tuple[AxisReferenceShift, ...]
+    direction: TransformDirection = TransformDirection.TARGET_TO_SOURCE
+    transform_type: str = "REFERENCE_BASIS"
+
+    # Every coordinate survives and a translation inverts exactly, but the datum
+    # the numbers are quoted against changed, so the numbers changed with it.
+    loss_class: ClassVar[LossClass] = LossClass.EXACT_WITH_REPRESENTATION_CHANGE
+    invertibility: ClassVar[Invertibility] = Invertibility.EXACT
+
+    def __post_init__(self) -> None:
+        if self.direction is not TransformDirection.TARGET_TO_SOURCE:
+            raise ValueError("Lattice stores only TARGET_TO_SOURCE transforms")
+        if self.transform_type != "REFERENCE_BASIS":
+            raise ValueError("reference transform_type must be REFERENCE_BASIS")
+        _require_space_values(self.target_space, self.source_space)
+        _require_registration_metadata(self.target_space, self.source_space)
+        if self.target_space.exact_space_key() != self.source_space.exact_space_key():
+            raise ValueError(
+                "INCOMPATIBLE_SEMANTICS: space-wide coordinate metadata differs"
+            )
+        shifts = _bounded_tuple(self.shifts, "shifts", MAX_AXES)
+        if any(type(shift) is not AxisReferenceShift for shift in shifts):
+            raise TypeError("shifts must contain only AxisReferenceShift values")
+        if not shifts:
+            raise ValueError(
+                "a reference conversion must shift at least one axis; equal "
+                "frames must use IdentityTransform"
+            )
+        shifted = [shift.axis_index for shift in shifts]
+        if len(set(shifted)) != len(shifted):
+            raise ValueError("shifts must name each axis at most once")
+        axis_count = len(self.target_space.axes)
+        if any(index >= axis_count for index in shifted):
+            raise ValueError("a shift names an axis outside the target space")
+        shifted_indexes = frozenset(shifted)
+        for index, (target_axis, source_axis) in enumerate(
+            zip(self.target_space.axes, self.source_space.axes, strict=True)
+        ):
+            include_reference_frame = index not in shifted_indexes
+            if target_axis.exact_semantics_key(
+                include_reference_frame=include_reference_frame
+            ) != source_axis.exact_semantics_key(
+                include_reference_frame=include_reference_frame
+            ):
+                raise ValueError(
+                    "INCOMPATIBLE_SEMANTICS: a reference conversion may change "
+                    "only the declared reference_frame on the axes it names"
+                )
+            if include_reference_frame:
+                _require_axis_policy("IDENTITY", target_axis, source_axis)
+                continue
+            if target_axis.scalar_type not in EXACT_NUMERIC_SCALAR_TYPES:
+                raise ValueError(
+                    "UNSUPPORTED_VALUE_SEMANTICS: reference conversion requires "
+                    "an INTEGER, RATIONAL or DECIMAL axis, not "
+                    f"{target_axis.scalar_type.value}"
+                )
+            if (
+                target_axis.reference_frame is None
+                or source_axis.reference_frame is None
+            ):
+                raise ValueError(
+                    "INSUFFICIENT_METADATA: a shifted axis must declare a "
+                    "reference_frame on both sides"
+                )
+            if target_axis.reference_frame == source_axis.reference_frame:
+                raise ValueError(
+                    "INCOMPATIBLE_SEMANTICS: axis "
+                    f"{target_axis.axis_id!r} declares the same reference_frame "
+                    "on both sides, so no reference conversion applies"
+                )
+            _require_axis_policy("REFERENCE_BASIS", target_axis, source_axis)
+        object.__setattr__(
+            self,
+            "shifts",
+            tuple(sorted(shifts, key=lambda item: item.axis_index)),
+        )
+
+    def apply_coordinates(
+        self, target_coordinates: tuple[object, ...]
+    ) -> tuple[object, ...]:
+        coordinates = list(_coordinates(target_coordinates, self.target_space))
+        for shift in self.shifts:
+            index = shift.axis_index
+            source_axis = self.source_space.axes[index]
+            shifted = _exact_source_coordinate(
+                coordinates[index],
+                _TRANSLATION_SCALE,
+                shift.exact_offset,
+                source_axis,
+            )
+            _validate_coordinate_value(shifted, source_axis)
+            coordinates[index] = shifted
+        return tuple(coordinates)
+
+    def invert(self) -> ReferenceBasisTransform:
+        return ReferenceBasisTransform(
+            self.source_space,
+            self.target_space,
+            tuple(
+                AxisReferenceShift(shift.axis_index, str(-shift.exact_offset))
+                for shift in self.shifts
+            ),
+        )
+
+
 def _reexpressed_instant(
     value: object,
     target_offset: int,
@@ -1148,8 +1562,11 @@ class TimezoneTransform:
 ExactTransform: TypeAlias = (
     IdentityTransform
     | AxisPermutationTransform
+    | AxisOrderingTransform
     | AxisOrientationTransform
+    | CalendarTransform
     | LabelReindexTransform
+    | ReferenceBasisTransform
     | UnitAffineTransform
     | TimezoneTransform
 )
@@ -1172,8 +1589,11 @@ class TransformChain:
         supported_types = {
             IdentityTransform,
             AxisPermutationTransform,
+            AxisOrderingTransform,
             AxisOrientationTransform,
+            CalendarTransform,
             LabelReindexTransform,
+            ReferenceBasisTransform,
             UnitAffineTransform,
             TimezoneTransform,
         }

@@ -354,10 +354,27 @@ class FleetBus:
         out: list[Delivery] = []
         wanted = set(finding.areas)
         if finding.to_session:
+            # An explicit address is not checked against anything, which means a
+            # typo or a half-remembered id reports "reached 1 session" for a
+            # session that has never existed. Caught by making exactly that
+            # mistake: an 8-character prefix padded with zeros was accepted,
+            # counted as delivered, and sat in the table addressed to nobody.
+            #
+            # Not refused, because a real session can be invisible here -- it may
+            # work outside every path convention the mesh knows. Named instead,
+            # so the publisher can tell "delivered" from "filed against a string".
+            unknown = ""
+            if mesh is not None:
+                known = {w.session for w in mesh.worktrees
+                         if w.session != UNATTRIBUTED}
+                if finding.to_session not in known:
+                    unknown = (". NOTE: this session id matches no worktree the "
+                               "mesh can see, so it may be a typo, or a session "
+                               "working outside every known convention")
             out.append(Delivery(
                 finding, finding.to_session, DECLARED,
                 "addressed explicitly by the publisher; not derived from any "
-                "observed work"))
+                "observed work" + unknown))
 
         # A claim doubles as a subscription, and it has to, because derived
         # routing has one blind spot big enough to make the feature useless
