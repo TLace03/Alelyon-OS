@@ -161,15 +161,45 @@ jobs:
         with:
           python-version: "3.12.13"
 
+      # `setuptools` is NOT optional here, and its absence is not obvious.
+      #
+      # Python 3.12 dropped setuptools from `ensurepip`, so a fresh interpreter no
+      # longer has it. Every build step below runs WITHOUT build isolation, which
+      # means pip does not create a scratch environment from
+      # `build-system.requires` -- it uses whatever is installed here. Miss it and
+      # the failure is `BackendUnavailable: Cannot import 'setuptools.build_meta'`,
+      # thrown from deep inside pip's resolver with no mention of the real cause.
+      #
+      # Isolation is off deliberately rather than by inheritance: the sdist-rebuild
+      # step runs `--no-index` to prove the sdist is self-contained, and an isolated
+      # build there would need to fetch its backend from the index that flag just
+      # blocked. One mode everywhere beats two that differ per step.
+      #
+      # The floor matches `build-system.requires` in the package's own manifest;
+      # PEP 639 `license-files` needs >= 77.
       - name: Install build tooling
-        run: python -m pip install --upgrade build pytest "httpx>=0.27"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "setuptools>=77" wheel build
+          python -c "import setuptools; print('setuptools', setuptools.__version__)"
 
       # Test THIS tree, from the exported source, before anything is built from it.
-      # `--no-deps` plus an editable local path means the distribution under test
-      # cannot be quietly satisfied by an index package of the same name.
+      #
+      # Installed WITH its dependencies, deliberately. The predecessor workflow used
+      # `--no-deps` because it published three interdependent distributions and the
+      # flag stopped pip satisfying one of them from the index instead of from the
+      # local path. `alelyon-os` is a single distribution with no such sibling, so
+      # here `--no-deps` bought nothing and cost the whole check: the runtime
+      # dependencies were never installed and every test errored at collection on
+      # `ModuleNotFoundError: No module named 'numpy'`.
+      #
+      # Resolving them properly also makes this step assert something it could not
+      # before -- that `dependencies` in the manifest is COMPLETE. A module that
+      # imports something the manifest forgot now fails here rather than on a user's
+      # machine. `[dev]` adds pytest and httpx on top.
       - name: Test the tree being released
         run: |
-          python -m pip install --no-deps --no-build-isolation -e "${PKG_DIR}[dev]"
+          python -m pip install --no-build-isolation -e "${PKG_DIR}[dev]"
           python -m pytest "${PKG_DIR}/tests" -q
 
       - name: Build wheel and sdist
