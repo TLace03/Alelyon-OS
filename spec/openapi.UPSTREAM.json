@@ -1,0 +1,8 @@
+{
+  "files": {
+    "spec/openapi.json": "6b95d3fd6367503daf9c47d7365d65c0673b6a0fc41fe3ff77b74727ec63fa51"
+  },
+  "schema": "alelyon.openapi-export/v1",
+  "source_commit": "5cecd53e63374cd699b20af601762d73ddf348e2",
+  "source_repository": "TLace03/famMain"
+}

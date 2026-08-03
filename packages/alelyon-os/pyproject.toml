@@ -1,0 +1,128 @@
+# alelyon-os — the open Alelyon developer surface, packaged for PyPI.
+#
+# This manifest is not used in place: `build_wheel.py` STAGES an explicit allowlist of
+# modules from the monorepo beside a copy of this file, then builds. Staging rather than
+# building in place is deliberate — it is the only way to make the open/proprietary
+# boundary a checked property of the artifact instead of a claim in a document. The
+# build fails if the wheel's contents differ from the allowlist by even one file.
+#
+#   python packaging/alelyon-os/build_wheel.py
+#   python packaging/alelyon-os/build_wheel.py --verify-clean-install
+#
+# WHAT SHIPS is declared per subsystem in `subsystems.py`, which is the file to read
+# and review. In summary: the CNE verifier, the lattice registration engine and Model
+# Morphometry, the fleet/worktree coordination layer, the compute DAG, and the API SDK.
+#
+# WHAT DOES NOT SHIP: the capture engine, the history store, DataService, the GUI, the
+# HTTP API service, identity/auth/gateway, the DSL-authoring model, and every signing
+# key. `FORBIDDEN_SEGMENTS` and `FORBIDDEN_PREFIXES` in `subsystems.py` enforce it, and
+# `tests/oracle/test_alelyon_os_packaging.py` asserts those guards name real things.
+#
+# ONE DISTRIBUTION, AND WHAT THAT COSTS. Extras below gate DEPENDENCIES, not files:
+# every install receives every module. The predecessor `alelyon-verify` was a wheel
+# containing only the verifier and its README said so; that sentence is not true of
+# this artifact and has been retired rather than inherited (docs/cne/CLAIMS.md). The
+# boundary claim — "the wheel contains exactly the reviewed allowlist" — is unchanged
+# and still machine-checked.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alelyon-os"
+version = "0.1.0"
+description = "The open Alelyon developer surface: CNE verification, exact coordinate registration, worktree coordination, uncertainty-propagating compute, and the API client."
+readme = "README.md"
+requires-python = ">=3.10"
+# Dual licensed at the recipient's option (owner decision, 2026-08-03), the
+# arrangement the Rust ecosystem standardised on. Apache-2.0 carries an explicit
+# patent grant; MIT is short and is accepted by organisations whose policy rejects
+# Apache. Offering both removes a licence-compatibility objection without weakening
+# either. BOTH texts ship in the wheel -- an `A OR B` expression naming a file the
+# artifact does not carry offers a choice nobody can exercise.
+license = "Apache-2.0 OR MIT"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+authors = [{ name = "Alelyon" }]
+keywords = ["transparency-log", "attestation", "merkle", "ed25519",
+            "verifiable-computation", "rfc6962", "conformance",
+            "registration", "morphometry", "uncertainty-propagation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Intended Audience :: Science/Research",
+  # No `License ::` classifier: PEP 639 supersedes them by the `license` SPDX
+  # expression above, and setuptools>=77 refuses a manifest carrying both.
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Topic :: Security :: Cryptography",
+  "Typing :: Typed",
+]
+
+# Base, not convenience. Every one of these is imported at MODULE SCOPE by a module
+# that ships to every user, so making any of them optional would mean `import
+# alelyon.verify` failing for someone who opted out of nothing. Kept in step with
+# `subsystems.BASE_REQUIRES`, which the packaging test asserts.
+dependencies = [
+  "cryptography>=42",   # ed25519 verification
+  "numpy>=1.26",
+  "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+# The ONE subsystem needing something beyond the base. `alelyon.platform.sdk.client`
+# imports httpx at module scope, so `import alelyon.platform.sdk` raises
+# ModuleNotFoundError without this extra. That sharp edge is accepted deliberately:
+# someone installing this to check a receipt should not also acquire an HTTP client.
+# Extras that would resolve to nothing are NOT declared — an extra that installs
+# nothing reads as a meaningful choice and is not one.
+sdk = ["httpx>=0.27"]
+
+# A FEATURE extra, not a subsystem: `alelyon.platform.sdk.stream.EngineStream` imports
+# pyzmq lazily and its ModuleNotFoundError names this extra by hand. Declared so that
+# instruction resolves — an install string naming an extra the distribution does not
+# define silently produces a bare install.
+stream = ["pyzmq>=25"]
+
+# Everything needed to run the package's own conformance suite from a checkout of the
+# public mirror. The release workflow installs `[dev]` before testing the tree it is
+# about to publish, so this extra is load-bearing there, not decoration.
+dev = ["pytest>=7", "httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/TLace03/Alelyon-OS"
+Specification = "https://github.com/TLace03/Alelyon-OS/blob/main/spec/cne-v0.md"
+Source = "https://github.com/TLace03/Alelyon-OS"
+
+[project.scripts]
+alelyon-verify = "alelyon.verify.cli:main"
+
+[tool.setuptools]
+# Explicit, never auto-discovered: auto-discovery over a staged tree would happily pick
+# up anything that leaked into it, which is the failure this packaging exists to
+# prevent.
+packages = [
+  "alelyon",
+  "alelyon.platform",
+  "alelyon.platform.sdk",
+  "alelyon.runtime",
+  "alelyon.runtime.atlas",
+  "alelyon.runtime.atlas.data",
+  "alelyon.runtime.common",
+  "alelyon.runtime.oracle",
+  "alelyon.runtime.oracle.dsl",
+  "alelyon.runtime.vector",
+  "alelyon.runtime.vector.compute",
+  "alelyon.runtime.vector.lattice",
+  "alelyon.verify",
+]
+
+[tool.setuptools.package-data]
+"alelyon.verify" = ["SPEC-cne-v0.md", "vectors/*.json"]

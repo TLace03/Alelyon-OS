@@ -1,0 +1,318 @@
+{
+  "cases": [
+    {
+      "category": "golden",
+      "file": "golden-anchored.json",
+      "must": "pass",
+      "slug": "golden-anchored"
+    },
+    {
+      "category": "golden",
+      "file": "golden-authenticated.json",
+      "must": "pass",
+      "slug": "golden-authenticated"
+    },
+    {
+      "category": "golden",
+      "file": "golden-witnessed.json",
+      "must": "pass",
+      "slug": "golden-witnessed"
+    },
+    {
+      "category": "golden",
+      "file": "golden-refusal.json",
+      "must": "pass",
+      "slug": "golden-refusal"
+    },
+    {
+      "category": "golden",
+      "file": "golden-unknown-extra-member.json",
+      "must": "pass",
+      "slug": "golden-unknown-extra-member"
+    },
+    {
+      "category": "partial",
+      "file": "partial-substrate-mismatch.json",
+      "must": "fail",
+      "slug": "partial-substrate-mismatch"
+    },
+    {
+      "category": "partial",
+      "file": "partial-no-pinned-key.json",
+      "must": "fail",
+      "slug": "partial-no-pinned-key"
+    },
+    {
+      "category": "partial",
+      "file": "partial-no-input-data.json",
+      "must": "fail",
+      "slug": "partial-no-input-data"
+    },
+    {
+      "category": "golden",
+      "file": "golden-witness-unpinned.json",
+      "must": "pass",
+      "slug": "golden-witness-unpinned"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-refusal-reason-resigned.json",
+      "must": "fail",
+      "slug": "forgery-refusal-reason-resigned"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-delta-fake-zero.json",
+      "must": "fail",
+      "slug": "forgery-delta-fake-zero"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-delta-omitted.json",
+      "must": "fail",
+      "slug": "forgery-delta-omitted"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-shrunk-delta-resigned.json",
+      "must": "fail",
+      "slug": "forgery-shrunk-delta-resigned"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-tampered-scalar.json",
+      "must": "fail",
+      "slug": "forgery-tampered-scalar"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-tampered-cell.json",
+      "must": "fail",
+      "slug": "forgery-tampered-cell"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-stripped-seed.json",
+      "must": "fail",
+      "slug": "forgery-stripped-seed"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-mismatched-key-id.json",
+      "must": "fail",
+      "slug": "forgery-mismatched-key-id"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-unsigned.json",
+      "must": "fail",
+      "slug": "forgery-unsigned"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-bad-signature.json",
+      "must": "fail",
+      "slug": "forgery-bad-signature"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-program-hash-mismatch.json",
+      "must": "fail",
+      "slug": "forgery-program-hash-mismatch"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-undercounted-uncertified.json",
+      "must": "fail",
+      "slug": "forgery-undercounted-uncertified"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-anchor-scope-substitution.json",
+      "must": "fail",
+      "slug": "forgery-anchor-scope-substitution"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-anchor-sth-scope-substitution.json",
+      "must": "fail",
+      "slug": "forgery-anchor-sth-scope-substitution"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-wrong-index-inclusion-proof.json",
+      "must": "fail",
+      "slug": "forgery-wrong-index-inclusion-proof"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-proof-tree-size-mismatch.json",
+      "must": "fail",
+      "slug": "forgery-proof-tree-size-mismatch"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-leaf-payload-tampered.json",
+      "must": "fail",
+      "slug": "forgery-leaf-payload-tampered"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-cosignature-replay.json",
+      "must": "fail",
+      "slug": "forgery-cosignature-replay"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-cosignature-key-role-collision.json",
+      "must": "fail",
+      "slug": "forgery-cosignature-key-role-collision"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-future-version.json",
+      "must": "fail",
+      "slug": "forgery-future-version"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-runs-undercover.json",
+      "must": "fail",
+      "slug": "forgery-runs-undercover"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-delta-count-mismatch.json",
+      "must": "fail",
+      "slug": "forgery-delta-count-mismatch"
+    },
+    {
+      "category": "golden",
+      "file": "golden-table-anchored.json",
+      "must": "pass",
+      "slug": "golden-table-anchored"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-cents-law-over-fractional-data.json",
+      "must": "fail",
+      "slug": "forgery-cents-law-over-fractional-data"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-cents-law-one-bad-element.json",
+      "must": "fail",
+      "slug": "forgery-cents-law-one-bad-element"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-provider-deleted-silence.json",
+      "must": "fail",
+      "slug": "forgery-provider-deleted-silence"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-provider-rewritten-outcome.json",
+      "must": "fail",
+      "slug": "forgery-provider-rewritten-outcome"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-provider-scope-substitution.json",
+      "must": "fail",
+      "slug": "forgery-provider-scope-substitution"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-unknown-capture-law.json",
+      "must": "fail",
+      "slug": "forgery-unknown-capture-law"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-table-digest-not-captured.json",
+      "must": "fail",
+      "slug": "forgery-table-digest-not-captured"
+    },
+    {
+      "category": "golden",
+      "file": "golden-key-in-service.json",
+      "must": "pass",
+      "slug": "golden-key-in-service"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-revoked.json",
+      "must": "fail",
+      "slug": "forgery-key-revoked"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-manifest-unrooted.json",
+      "must": "fail",
+      "slug": "forgery-key-manifest-unrooted"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-manifest-checkpoint-missing.json",
+      "must": "fail",
+      "slug": "forgery-key-manifest-checkpoint-missing"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-manifest-checkpoint-role-collision.json",
+      "must": "fail",
+      "slug": "forgery-key-manifest-checkpoint-role-collision"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-manifest-rollback.json",
+      "must": "fail",
+      "slug": "forgery-key-manifest-rollback"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-manifest-checkpoint-equivocation.json",
+      "must": "fail",
+      "slug": "forgery-key-manifest-checkpoint-equivocation"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-key-not-in-manifest.json",
+      "must": "fail",
+      "slug": "forgery-key-not-in-manifest"
+    },
+    {
+      "category": "golden",
+      "file": "golden-tier-floor-refusal.json",
+      "must": "pass",
+      "slug": "golden-tier-floor-refusal"
+    }
+  ],
+  "counts": {
+    "forgery": 36,
+    "golden": 9,
+    "partial": 3,
+    "total": 48
+  },
+  "generated_by": "tools/gen_cne_vectors.py",
+  "not_envelope_expressible": [
+    {
+      "covered_by": "tests/oracle/test_witnessed_envelope.py",
+      "property": "rollback-head",
+      "why": "the witness refuses to co-sign a head smaller than the last it saw; a refusal produces no co-signature, so there is no artifact to carry"
+    },
+    {
+      "covered_by": "tests/oracle/test_witnessed_envelope.py",
+      "property": "same-size-fork",
+      "why": "the witness refuses a second, different root at an already-seen tree_size; again a refusal, not an artifact"
+    },
+    {
+      "covered_by": "tests/oracle/test_witnessed_envelope.py",
+      "property": "unproven-growth",
+      "why": "the witness demands an RFC-6962 consistency proof for growth beyond the head it last saw and refuses without one"
+    }
+  ],
+  "spec_version": "alelyon.cne-spec/0.3.0",
+  "suite": "alelyon.cne conformance vectors"
+}

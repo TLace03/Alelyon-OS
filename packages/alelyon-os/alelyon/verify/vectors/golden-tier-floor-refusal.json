@@ -1,0 +1,121 @@
+{
+  "category": "golden",
+  "description": "A SIGNED REFUSAL produced by an issuer's tier floor. The program is smooth (a ratio), which the engine would happily certify one tier down with an approximate level — correct in general, and wrong for a product whose claim is that the level is a theorem. Under `params.require_tier: linear-exact` it is refused instead, and the refusal verifies: the floor is in the SIGNED params, so replay reproduces it rather than reporting a replay mismatch.",
+  "envelope": {
+    "created": 1000.0,
+    "error_budget": {
+      "quantization": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 0.0,
+          "n": 2,
+          "uncertified_idx": []
+        },
+        "digest": "ebe2e1afa567ae1b08153bb04c32a1ddce816e072509b5fa95d615d89097b82f",
+        "key": "A|b",
+        "kind": "table",
+        "n": 2,
+        "uncertified": 0
+      },
+      {
+        "deltas": {
+          "const": 0.0,
+          "n": 2,
+          "uncertified_idx": []
+        },
+        "digest": "ebe2e1afa567ae1b08153bb04c32a1ddce816e072509b5fa95d615d89097b82f",
+        "key": "A|c",
+        "kind": "table",
+        "n": 2,
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "require_tier": "linear-exact",
+      "strict": true
+    },
+    "program": "show sum(table(\"A|b\")) / sum(table(\"A|c\"))\n",
+    "program_class": "smooth-first-order",
+    "program_hash": "99a6a84093b60cdf0b9487310b52235f60d6f7e3eacbadba1199615ce7449856",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": "program classifies 'smooth-first-order' but this issuer requires 'linear-exact': /. Outside 'linear-exact' the conformal level is no longer exact, so the result would carry a weaker claim than the one asked for",
+    "refused": true,
+    "scalar": null,
+    "signature": "cc19869accbde02dd7ec8aa38dad38347dbe9d38cabbc76dd8a25794c91822e16b5da2559a7cf2eb90863f31e191c8f3d4d07897b444fd7d3b2ea8eff69d2d01",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": null,
+      "width": null,
+      "witness": null
+    },
+    "ok": true,
+    "reason_classes": [],
+    "width_trust": "refusal"
+  },
+  "expect_classes": [],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": null,
+      "width": null,
+      "witness": null
+    },
+    "ok": true,
+    "reason_classes": [],
+    "width_trust": "refusal"
+  },
+  "inputs": {
+    "table|A|b": {
+      "keys": [
+        "CLM-00000",
+        "CLM-00001"
+      ],
+      "name": "GL_2024Q1|paid_loss",
+      "values": [
+        100.0,
+        200.0
+      ]
+    },
+    "table|A|c": {
+      "keys": [
+        "CLM-00000",
+        "CLM-00001"
+      ],
+      "name": "GL_2024Q1|paid_loss",
+      "values": [
+        100.0,
+        200.0
+      ]
+    }
+  },
+  "must": "pass",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "golden-tier-floor-refusal",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}

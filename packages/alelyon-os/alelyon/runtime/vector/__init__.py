@@ -1,0 +1,1 @@
+"""Vector — ALL mathematics. Statistics, optimization, dynamics, linear algebra, PCA/spectral, Kalman/Markov, Monte-Carlo, RL, compression, certificates, forecasting, state estimation. The legacy engines/ directory dissolves into here."""

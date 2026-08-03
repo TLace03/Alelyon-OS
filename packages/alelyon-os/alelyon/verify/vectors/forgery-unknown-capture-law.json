@@ -1,0 +1,168 @@
+{
+  "category": "forgery",
+  "description": "A PRESENT anchor whose proven capture leaf names a law no implementation recognises. It must fail CLOSED — the column is unusable — never fall through to a permissive default. A signer who could name an unimplemented law and have its Δ read anyway would hold the same free pass the fake-zero forgery exploited, one level up. The signer has to hand-attach the bundle here, because the producer's own anchoring already refuses to build one it cannot read — that DOWNGRADE (width stays signer-authenticated) is the honest path; this vector is the adversary declining to take it.",
+  "envelope": {
+    "assumptions": [
+      "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
+      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms",
+      "every consumed input was stored EXACTLY (Δ = 0 on every row — e.g. the exact-cents monetary capture law), so the storage-quantization term is genuinely zero rather than merely small. This bounds STORAGE only: floating-point rounding in the computation itself (the division in a mean, say) is a compute-side error this certificate does not cover, and the aggregate was checked to lie within f64's exact-integer range"
+    ],
+    "created": 1000.0,
+    "error_budget": {
+      "model": null,
+      "provider": {
+        "inputs": {},
+        "origins": {},
+        "reason": "no data layer supplied — nothing was asked about the sources; NOT a finding that they agree",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "status": "unmeasured",
+        "trust": "signer-attested"
+      },
+      "quantization": {
+        "exact": true,
+        "level": 0.953125,
+        "tier": "linear-exact",
+        "width": 0.0
+      },
+      "sampling": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 0.0,
+          "n": 2,
+          "uncertified_idx": []
+        },
+        "digest": "89cf22b924f34a502441c005e7db9a0f61f4d4d320d760e17a02b600237ed029",
+        "key": "GL_2024Q1|paid_loss",
+        "kind": "table",
+        "n": 2,
+        "transparency": {
+          "column": "paid_loss",
+          "leaves": [
+            {
+              "bits": 0,
+              "hi_ts": 0.0,
+              "inclusion_proof": {
+                "index": 0,
+                "leaf_hash": "61aaff82ed6d05dc91f12af49d62c2fd08a342cb72ed958e2f9561645c9017db",
+                "proof": [],
+                "root": "77484aa3af816a0aa64c489358151c2960b5c84602957dc216103ba9ba75e7a2",
+                "tree_size": 1,
+                "value_digest": "89cf22b924f34a502441c005e7db9a0f61f4d4d320d760e17a02b600237ed029"
+              },
+              "lo_ts": 0.0,
+              "n": 2,
+              "payload": "[{\"column\": \"paid_loss\", \"n\": 2, \"delta\": 0.0, \"seed\": 0, \"error_var\": 0.0, \"law\": \"exact-cents/v99\"}]",
+              "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "seq": 0,
+              "value_digest": "89cf22b924f34a502441c005e7db9a0f61f4d4d320d760e17a02b600237ed029"
+            }
+          ],
+          "scope": [
+            "GL_2024Q1",
+            "paid_loss"
+          ],
+          "sth": {
+            "head_leaf": "61aaff82ed6d05dc91f12af49d62c2fd08a342cb72ed958e2f9561645c9017db",
+            "key_id": "ed25519:ba2655652874c66c",
+            "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "root": "77484aa3af816a0aa64c489358151c2960b5c84602957dc216103ba9ba75e7a2",
+            "scope": [
+              "GL_2024Q1",
+              "paid_loss"
+            ],
+            "signature": "7afdb5701cbc1593dcb0cfb5d102beda57fc8212dad7b2c042f51c014fb69159279943896b0c69800bd3ad11a772825747abf169902a0c1c2df652db654f020a",
+            "table": "table",
+            "timestamp": 1000.0,
+            "tree_size": 1,
+            "type": "alelyon.sth/v0"
+          },
+          "table": "table"
+        },
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "strict": true
+    },
+    "program": "show sum(table(\"GL_2024Q1|paid_loss\"))",
+    "program_class": "linear-exact",
+    "program_hash": "2c4c9c921d807655152a9423720e0c1cd8d3ce21104ef4d0e3fa0ae3224690ce",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": null,
+    "refused": false,
+    "scalar": 153375.0,
+    "seed": 7,
+    "signature": "0b6a9c1f49fba3b87389bbeca13af357540d6b1f8ae425b18e7ed75b8ce59e88e023f4e1c4a6c0290be81929961d16b996dfb4a7825473e684e1f237f7106e09",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "anchor-delta-unusable"
+    ],
+    "width_trust": "authenticated"
+  },
+  "expect_classes": [
+    "anchor-delta-unusable"
+  ],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "anchor-delta-unusable",
+      "width-substrate-independent"
+    ],
+    "width_trust": "authenticated"
+  },
+  "inputs": {
+    "table|GL_2024Q1|paid_loss": {
+      "keys": [
+        "CLM-00000",
+        "CLM-00001"
+      ],
+      "name": "GL_2024Q1|paid_loss",
+      "values": [
+        120050.0,
+        33325.0
+      ]
+    }
+  },
+  "must": "fail",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "forgery-unknown-capture-law",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}

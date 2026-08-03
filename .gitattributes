@@ -1,0 +1,10 @@
+# Normalise to LF in the repository. Contributors on Windows still get CRLF in
+# their working tree; what lands in a commit is always LF, so diffs stay clean
+# across platforms.
+* text=auto eol=lf
+
+# Never touch these: a byte-for-byte change would invalidate a signature or a
+# recorded hash.
+*.pem   binary
+*.der   binary
+*.sig   binary

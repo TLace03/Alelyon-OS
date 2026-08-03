@@ -1,0 +1,2170 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Alelyon API",
+    "description": "Machine-facing surface of the Alelyon platform. Read-only in v1. Successfully covered stored market values are dither-quantized under a persisted capture certificate; endpoints serve coverage evidence next to the data. Fresh market/FRED responses expose only their exact committed capture outcome; fresh failures expose null. Store reads may expose a labeled aggregate history view, which is not itself a response-value commitment. Certificate semantics: aggregate `delta_max`/`error_var_max` span ALL columns of a scope (for bars, Volume dominates) \u2014 use the per-column `columns` block for the quantization step \u0394; the tight storage-only absolute-error bound is |error| <= \u0394/2. A fail-open capture (rare, logged) stores raw values that show up as `uncovered_rows`, never as falsely-certified. Live-engine status is observed through the engine's own published state \u2014 this service can never act on the engine.\n\nAUTH \u2014 with no API key configured the server runs in OPEN mode and serves loopback clients only; any non-local peer gets 403. Set ALELYON_API_KEY and every request must carry `Authorization: Bearer <key>`. Keys are 32-512 visible-ASCII tokens (generate one with `secrets.token_urlsafe(32)`). Open mode also validates Host, a present browser Origin, and present Fetch Metadata; omitted Fetch Metadata is not an authentication boundary. Behind a reverse proxy the peer address is the proxy's, so open mode cannot see through it: if you terminate remotely, SET A KEY.\n\nERRORS \u2014 most non-2xx replies carry a `detail` string; FastAPI request-validation 422 replies carry a structured `detail` array. 400 means malformed HTTP framing; 413 means a request body exceeded 64 KiB. 401 means an invalid or missing key; 403 means open mode refused a non-loopback peer or remote plaintext bearer request; 404 means the scope holds no data; 422 means the request was malformed or could not be expressed; 503 means invalid server auth configuration, an upstream engine, or an unconfigured LLM author is unavailable. A 503 means unavailable, never 'the answer is zero'.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/system/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health",
+        "description": "Service + data-layer health: store stats (incl. certificate count),\nprovider chain state, certification status. Internal failures are logged\nserver-side; the response carries only the exception TYPE.",
+        "operationId": "health_v1_system_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health V1 System Health Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/system/certificates/{table}/{scope1}/{scope2}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Certificate",
+        "description": "Aggregate capture certificate for ('bars', TICKER, interval) or\n('series', kind, key). delta_max/error_var_max span ALL columns of the\nscope; the `columns` block carries each per-column quantization step \u0394 and\nerror variance (for bars, use columns.close; the tight storage-only bound is\n|error| <= \u0394/2 \u2014 Volume dominates the scope-wide number).\n\ndelta_max/error_var_max are NULL when no column committed a usable \u0394 \u2014 read\nthat as \"not measured\", never as \"measured as zero\". A \u0394 of 0.0 is a real and\nmeaningful value (the capture quantizer emits it only for an all-zero column),\nwhich is exactly why an unknown one must not be rendered as one.\n\nScope lookup retries the conventional casing (lowercase kind, uppercase key)\nso a certified scope never 404s on case.",
+        "operationId": "certificate_v1_system_certificates__table___scope1___scope2__get",
+        "parameters": [
+          {
+            "name": "table",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Table"
+            }
+          },
+          {
+            "name": "scope1",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scope1"
+            }
+          },
+          {
+            "name": "scope2",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scope2"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Certificate V1 System Certificates  Table   Scope1   Scope2  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/market/bars/{ticker}": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "Bars",
+        "description": "OHLCV with evidence applying to the returned frame.\n\nA fresh response carries only its exact committed capture, or null when its\nwrite/audit failed. A store read may carry a stored-scope aggregate whose\nrow coverage fields must be inspected. An older aggregate is never attached\nto a fresh provider response. prefer_store=true reads history only.",
+        "operationId": "bars_v1_market_bars__ticker__get",
+        "parameters": [
+          {
+            "name": "ticker",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticker"
+            }
+          },
+          {
+            "name": "lookback_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 36500,
+              "minimum": 1,
+              "default": 400,
+              "title": "Lookback Days"
+            }
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "1d",
+              "title": "Interval"
+            }
+          },
+          {
+            "name": "prefer_store",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Prefer Store"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Bars V1 Market Bars  Ticker  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/market/quote/{ticker}": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "Quote",
+        "description": "Last price. Successfully covered values are certified at capture. On a\nfail-open/raw capture the certificate is null; an older aggregate is never\nattached as if it covered the returned price.",
+        "operationId": "quote_v1_market_quote__ticker__get",
+        "parameters": [
+          {
+            "name": "ticker",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticker"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Quote V1 Market Quote  Ticker  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/market/quotes": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "Quotes",
+        "description": "Batched last prices. Successfully covered prices carry the exact\nsame-call capture certificate; a missing certificate is never replaced with\na stale scope aggregate. Certificates are not attached by default (a batch\nwould double the payload) \u2014 pass include_certs=true for per-symbol current\ncapture evidence. The separate /v1/system/certificates route reports stored\nscope history, not proof for this response.\n\nAt most 100 symbols are priced per call; anything beyond that is dropped.\n`requested`/`returned`/`truncated` in the reply say whether that happened \u2014\nchunk the request rather than trusting a short answer.",
+        "operationId": "quotes_v1_market_quotes_get",
+        "parameters": [
+          {
+            "name": "tickers",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "comma-separated symbols",
+              "title": "Tickers"
+            },
+            "description": "comma-separated symbols"
+          },
+          {
+            "name": "include_certs",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Certs"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Quotes V1 Market Quotes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/macro/series/{series_id}": {
+      "get": {
+        "tags": [
+          "macro"
+        ],
+        "summary": "Fred Series",
+        "description": "A FRED series with evidence applying to the returned values.",
+        "operationId": "fred_series_v1_macro_series__series_id__get",
+        "parameters": [
+          {
+            "name": "series_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Series Id"
+            }
+          },
+          {
+            "name": "lookback_days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 36500,
+              "minimum": 1,
+              "default": 3650,
+              "title": "Lookback Days"
+            }
+          },
+          {
+            "name": "prefer_store",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Prefer Store"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Fred Series V1 Macro Series  Series Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/macro/indicators": {
+      "get": {
+        "tags": [
+          "macro"
+        ],
+        "summary": "Indicators",
+        "description": "The curated economic-indicator catalog (id, name, description).",
+        "operationId": "indicators_v1_macro_indicators_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Indicators V1 Macro Indicators Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/macro/pulse": {
+      "get": {
+        "tags": [
+          "macro"
+        ],
+        "summary": "Pulse",
+        "description": "Cross-asset market pulse: a risk-on / risk-off / mixed regime read\nnetting the equity, rates, credit, commodity and volatility desks.",
+        "operationId": "pulse_v1_macro_pulse_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Pulse V1 Macro Pulse Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desks/rates": {
+      "get": {
+        "tags": [
+          "desks"
+        ],
+        "summary": "Rates",
+        "operationId": "rates_v1_desks_rates_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Rates V1 Desks Rates Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desks/vol/{ticker}": {
+      "get": {
+        "tags": [
+          "desks"
+        ],
+        "summary": "Vol",
+        "operationId": "vol_v1_desks_vol__ticker__get",
+        "parameters": [
+          {
+            "name": "ticker",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticker"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Vol V1 Desks Vol  Ticker  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desks/rotation": {
+      "get": {
+        "tags": [
+          "desks"
+        ],
+        "summary": "Rotation",
+        "operationId": "rotation_v1_desks_rotation_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Rotation V1 Desks Rotation Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desks/crash": {
+      "get": {
+        "tags": [
+          "desks"
+        ],
+        "summary": "Crash",
+        "operationId": "crash_v1_desks_crash_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Crash V1 Desks Crash Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desks/breadth": {
+      "get": {
+        "tags": [
+          "desks"
+        ],
+        "summary": "Breadth",
+        "operationId": "breadth_v1_desks_breadth_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Breadth V1 Desks Breadth Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/analyst/{ticker}": {
+      "get": {
+        "tags": [
+          "intelligence"
+        ],
+        "summary": "Analyst",
+        "description": "The full analyst-engine report: projections, DCF + comps valuation,\n12-month target, two-sided ratings, fundamental breakdown.",
+        "operationId": "analyst_v1_analyst__ticker__get",
+        "parameters": [
+          {
+            "name": "ticker",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ticker"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Analyst V1 Analyst  Ticker  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/screener/board": {
+      "get": {
+        "tags": [
+          "intelligence"
+        ],
+        "summary": "Screener",
+        "description": "The L/S screener board (anchored-VWAP z, RSI, rel-vol) \u2014 a LIST of\ntiles, one per symbol. An unrecognized `timeframe` falls back to Daily.",
+        "operationId": "screener_v1_screener_board_get",
+        "parameters": [
+          {
+            "name": "symbols",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Comma-separated market symbols. Empty selects the default board. The selected decoded value is at most 4,096 characters; after surrounding whitespace is trimmed, at most 100 non-empty entries of 1-32 letters, digits, dot, hyphen, equals, or caret and containing at least one letter or digit are admitted. Symbols are uppercased and stable-deduplicated. Repeat parameters and invalid entries return 422 before provider access.",
+              "default": "",
+              "title": "Symbols"
+            },
+            "description": "Comma-separated market symbols. Empty selects the default board. The selected decoded value is at most 4,096 characters; after surrounding whitespace is trimmed, at most 100 non-empty entries of 1-32 letters, digits, dot, hyphen, equals, or caret and containing at least one letter or digit are admitted. Symbols are uppercased and stable-deduplicated. Repeat parameters and invalid entries return 422 before provider access."
+          },
+          {
+            "name": "timeframe",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Known labels select their interval; other bounded values use Daily. The selected decoded value is at most 32 characters, and repeated parameters return 422 before provider access.",
+              "default": "Daily",
+              "title": "Timeframe"
+            },
+            "description": "Known labels select their interval; other bounded values use Daily. The selected decoded value is at most 32 characters, and repeated parameters return 422 before provider access."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {},
+                  "title": "Response Screener V1 Screener Board Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/answer": {
+      "post": {
+        "tags": [
+          "intelligence"
+        ],
+        "summary": "Answer",
+        "description": "Certified answer: the LLM authors a DSL program ONLY; execution is\ndeterministic. The result carries a calibrated error bar where the\nprogram's estimator supports one (its certificate says which), and the\nengine REFUSES rather than fabricate \u2014 refusals are a normal, successful\nresponse shape. 503 when no LLM author is configured.",
+        "operationId": "answer_v1_answer_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Answer V1 Answer Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/engine/status": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Status",
+        "description": "Engine liveness + last published status. `fam_status_age_s` and\n`fam_status_stale` make freshness explicit \u2014 a `running` pid with a stale\nstatus means the engine process is alive but is no longer publishing, so\ntreat the payload as last-known rather than current.",
+        "operationId": "status_v1_engine_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Status V1 Engine Status Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/certified/pubkey": {
+      "get": {
+        "tags": [
+          "certified"
+        ],
+        "summary": "Pubkey",
+        "description": "The server's signing public key \u2014 PIN THIS out-of-band. A CNE verified\nagainst a key embedded in the same (untrusted) envelope authenticates nothing;\na verifier MUST pin this key. `key_id` is the short fingerprint to match.",
+        "operationId": "pubkey_v1_certified_pubkey_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Pubkey V1 Certified Pubkey Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/certified/witness/pubkey": {
+      "get": {
+        "tags": [
+          "certified"
+        ],
+        "summary": "Witness Pubkey",
+        "description": "The co-signing witness seam's public key. A client that pins this key out of\nband can confirm (via `alelyon.verify` with `witness_key_hex`) that it signed the\nsame complete tree head.\n\nRead the caveat: this reference witness is co-located with the signer (the same\noperator holds both keys), so pinning this key demonstrates the wire format but\nsupplies no operator separation. Equivocation resistance requires a different\nparty to operate the witness and preserve its retained state; this endpoint is\nthe seam such an operator replaces.",
+        "operationId": "witness_pubkey_v1_certified_witness_pubkey_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Witness Pubkey V1 Certified Witness Pubkey Get"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/certified/envelope": {
+      "post": {
+        "tags": [
+          "certified"
+        ],
+        "summary": "Envelope",
+        "description": "Issue a SIGNED CNE for a DSL program (or a question the LLM turns into one).\nWhen the capture store is readable the per-input deltas are transparency-\nanchored to the signed cert_log, so the width becomes third-party-checkable\n(see the reply's `envelope.inputs[].transparency` and the verifier's\n`width_trust`). Each anchored input also carries a witness co-signature over its\ncomplete STH (see `witness_key_id` + `GET /witness/pubkey`). A client that pins\nthat witness key out of band can verify the same-head co-signature; independence\nexists only when a party other than the signer operates the witness and retains\nits state. The reply is portable: verify it with `alelyon.verify` + the pinned\nsigner key. 422 if the request yields no program; 503 if the LLM author is needed\nbut unconfigured.",
+        "operationId": "envelope_v1_certified_envelope_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CertifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Envelope V1 Certified Envelope Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request validation or unsupported request refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request, authentication, transport, or server refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer authentication challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnswerRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Question"
+          }
+        },
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "AnswerRequest"
+      },
+      "CertifyRequest": {
+        "properties": {
+          "program": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Program",
+            "description": "an Alelyon-DSL program to certify (preferred; deterministic)"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question",
+            "description": "a natural-language question \u2014 the LLM authors the DSL ONLY, execution stays deterministic (requires an LLM author)"
+          },
+          "K": {
+            "type": "integer",
+            "maximum": 255.0,
+            "minimum": 15.0,
+            "title": "K",
+            "description": "conformal re-execution count",
+            "default": 63
+          },
+          "alpha": {
+            "type": "number",
+            "exclusiveMaximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Alpha",
+            "description": "1 \u2212 conformal level",
+            "default": 0.05
+          }
+        },
+        "type": "object",
+        "title": "CertifyRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "HTTPError": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque-visible-ASCII",
+        "description": "Required when ALELYON_API_KEY is configured. The key must be 32-512 visible-ASCII characters. Anonymous access is permitted only in loopback-only open mode."
+      }
+    }
+  },
+  "security": [
+    {
+      "BearerAuth": []
+    },
+    {}
+  ]
+}

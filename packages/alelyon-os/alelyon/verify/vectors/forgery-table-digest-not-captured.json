@@ -1,0 +1,174 @@
+{
+  "category": "forgery",
+  "description": "A keyed table whose (key, value) digest matches no signed capture batch. Coverage for the table kind is identity, not approximation, so one altered cent means this is not the batch that was captured and nothing vouches for its Δ.",
+  "envelope": {
+    "assumptions": [
+      "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
+      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms",
+      "every consumed input was stored EXACTLY (Δ = 0 on every row — e.g. the exact-cents monetary capture law), so the storage-quantization term is genuinely zero rather than merely small. This bounds STORAGE only: floating-point rounding in the computation itself (the division in a mean, say) is a compute-side error this certificate does not cover, and the aggregate was checked to lie within f64's exact-integer range"
+    ],
+    "created": 1000.0,
+    "error_budget": {
+      "model": null,
+      "provider": {
+        "inputs": {},
+        "origins": {},
+        "reason": "this data layer publishes no origin catalogue, so the number of upstreams behind these inputs is unknown",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "status": "unmeasured",
+        "trust": "signer-attested"
+      },
+      "quantization": {
+        "exact": true,
+        "level": 0.953125,
+        "tier": "linear-exact",
+        "width": 0.0
+      },
+      "sampling": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 0.0,
+          "n": 3,
+          "uncertified_idx": []
+        },
+        "digest": "8817ee5f4bd03c231ed0fd80ecfad09824166e24932cbe7c95381ab5f8e1fbca",
+        "key": "GL_2024Q1|paid_loss",
+        "kind": "table",
+        "n": 3,
+        "transparency": {
+          "column": "paid_loss",
+          "leaves": [
+            {
+              "bits": 0,
+              "hi_ts": 0.0,
+              "inclusion_proof": {
+                "index": 0,
+                "leaf_hash": "31bfe9af7768ba00366ad05b6462d322ea0f3f6eeadb42767c264fa9b88a972d",
+                "proof": [],
+                "root": "a32a135ff84bc0010329c3918ea2ac4b5bbf12b5f38455f04f445a5d20e1323c",
+                "tree_size": 1,
+                "value_digest": "8817ee5f4bd03c231ed0fd80ecfad09824166e24932cbe7c95381ab5f8e1fbca"
+              },
+              "lo_ts": 0.0,
+              "n": 3,
+              "payload": "[{\"column\": \"paid_loss\", \"n\": 3, \"delta\": 0.0, \"seed\": 0, \"error_var\": 0.0, \"law\": \"exact-cents/v0\"}]",
+              "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "seq": 0,
+              "value_digest": "8817ee5f4bd03c231ed0fd80ecfad09824166e24932cbe7c95381ab5f8e1fbca"
+            }
+          ],
+          "scope": [
+            "GL_2024Q1",
+            "paid_loss"
+          ],
+          "sth": {
+            "head_leaf": "31bfe9af7768ba00366ad05b6462d322ea0f3f6eeadb42767c264fa9b88a972d",
+            "key_id": "ed25519:ba2655652874c66c",
+            "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "root": "a32a135ff84bc0010329c3918ea2ac4b5bbf12b5f38455f04f445a5d20e1323c",
+            "scope": [
+              "GL_2024Q1",
+              "paid_loss"
+            ],
+            "signature": "84c7c409e3f35064339283f575271f3404e95beedfddfc5fc41da29b89e82ec52caa32a8e59de87a878d629cff9d9391d4b0246cb7c3800a26719c5d7eb13204",
+            "table": "table",
+            "timestamp": 1000.0,
+            "tree_size": 1,
+            "type": "alelyon.sth/v0"
+          },
+          "table": "table"
+        },
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "strict": true
+    },
+    "program": "show sum(table(\"GL_2024Q1|paid_loss\"))",
+    "program_class": "linear-exact",
+    "program_hash": "2c4c9c921d807655152a9423720e0c1cd8d3ce21104ef4d0e3fa0ae3224690ce",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": null,
+    "refused": false,
+    "scalar": 163275.0,
+    "seed": 7,
+    "signature": "c06c57c99e47cf129614eb3fa9d924afd1da94d2f8ca327b5702e48b9fbb3dd77e8a75dc07a8a9ef290146f46137a4ac6eb516701e41b1c71f5605aa23198406",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": false,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": false,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "anchor-row-uncovered",
+      "input-digest-mismatch",
+      "scalar-mismatch"
+    ],
+    "width_trust": "authenticated"
+  },
+  "expect_classes": [
+    "input-digest-mismatch"
+  ],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": false,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": false,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "anchor-row-uncovered",
+      "input-digest-mismatch",
+      "scalar-mismatch",
+      "width-substrate-independent"
+    ],
+    "width_trust": "authenticated"
+  },
+  "inputs": {
+    "table|GL_2024Q1|paid_loss": {
+      "keys": [
+        "CLM-00000",
+        "CLM-00001",
+        "CLM-00002"
+      ],
+      "name": "GL_2024Q1|paid_loss",
+      "values": [
+        120051.0,
+        33325.0,
+        9900.0
+      ]
+    }
+  },
+  "must": "fail",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "forgery-table-digest-not-captured",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}

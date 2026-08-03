@@ -1,0 +1,306 @@
+# Release `alelyon-os` from TLace03/Alelyon-OS via Trusted Publishing (OIDC).
+#
+# ─────────────────────────────────────────────────────────────────────────────────
+# THIS FILE DOES NOT LIVE HERE. Copy it to the PUBLIC repository as
+#
+#     Alelyon-OS/.github/workflows/release.yml
+#
+# The filename is load-bearing and must be exactly `release.yml`: PyPI matches a
+# trusted publisher on the repository AND the workflow FILENAME. A publisher
+# registered for `release.yml` will reject a run of `publish.yml`, and the error
+# arrives as `invalid-publisher`, which reads like a credentials problem and is not.
+#
+# It is staged in the private monorepo rather than written straight into the public
+# repo because the public tree is GENERATED (`tools/export_public_os.py`) and this is
+# the reviewed source of the one file in it that holds release authority. Folding it
+# into the generated export is a sensible follow-up and is deliberately not done here:
+# it changes the export contract and its tests.
+# ─────────────────────────────────────────────────────────────────────────────────
+#
+# PRODUCTION PUBLICATION IS OFF, and turning it on is TWO deliberate owner acts.
+#
+# The predecessor workflow shipped with no production job at all, on the stated
+# grounds that historical revisions and external trusted-publisher/environment
+# controls are a release stop-ship until an administrator hardens them independently.
+# That posture is preserved: the production job below exists, but it runs only when
+#
+#   1. a repository variable `ALELYON_OS_PRODUCTION_RELEASE` is set to `enabled`, and
+#   2. a GitHub Environment named `pypi` exists WITH REQUIRED REVIEWERS.
+#
+# Neither is set by this file. Until both are, tagging produces a fully validated
+# artifact and stops — which is the correct outcome for a workflow nobody has yet
+# audited against a live index.
+#
+# THE PUBLISHER TO REGISTER ON PyPI (pending, not project-level):
+#
+#   Owner            TLace03
+#   Repository name  Alelyon-OS
+#   Workflow name    release.yml
+#   Environment      pypi   (leave blank to match any; `testpypi` for the rehearsal)
+#
+# It must be a PENDING publisher. `alelyon-os` has never been published — measured
+# 2026-08-03 it returns 404 — and a project-level registration cannot exist until the
+# first upload succeeds. Run `tools/pypi_oidc_preflight.py --index pypi --dist-name
+# alelyon-os` in the monorepo to see which registration governs, with no credentials.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "alelyon-os-v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        required: true
+        type: choice
+        default: testpypi
+        options: [testpypi]
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+  PACKAGE: alelyon-os
+  PKG_DIR: packages/alelyon-os
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: validate release authority and source
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      target: ${{ steps.resolve.outputs.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12.13"
+
+      - id: resolve
+        name: Resolve the version and index target
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The version comes from the MANIFEST, never from the tag: a tag is a label a
+          # human typed, and letting it name the version means a typo publishes a
+          # version nothing in the tree declares.
+          version="$(python -c "
+          import re,pathlib
+          t=pathlib.Path('${PKG_DIR}/pyproject.toml').read_text(encoding='utf-8')
+          m=re.search(r'^version = \"([^\"]+)\"', t, re.M)
+          assert m, 'pyproject declares no version'
+          print(m.group(1))")"
+          if [ "$EVENT" = "push" ]; then
+            tag_version="${REF_NAME#alelyon-os-v}"
+            if [ "$tag_version" != "$version" ]; then
+              echo "::error::tag ${REF_NAME} does not match the declared version ${version}"
+              exit 1
+            fi
+            target=pypi
+          else
+            target=testpypi
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          echo "resolved ${PACKAGE} ${version} -> ${target}"
+
+      - name: Require an annotated tag reachable from origin/main
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin \
+            refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/*:refs/tags/*"
+          # An annotated tag carries a tagger and can be signed; a lightweight tag is
+          # just a moveable pointer, so requiring the object type is what makes "who
+          # cut this release" answerable afterwards.
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" != "tag" ]; then
+            echo "::error::release tags must be annotated tag objects"
+            exit 1
+          fi
+          event_commit="$(git rev-parse --verify --end-of-options "${SHA}^{commit}")"
+          tag_commit="$(git rev-parse --verify --end-of-options "refs/tags/${TAG}^{commit}")"
+          if [ "$tag_commit" != "$event_commit" ]; then
+            echo "::error::release tag does not resolve to the triggering commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error::release tag commit is not reachable from origin/main"
+            exit 1
+          fi
+
+  build:
+    name: build and check alelyon-os
+    needs: resolve
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12.13"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build pytest "httpx>=0.27"
+
+      # Test THIS tree, from the exported source, before anything is built from it.
+      # `--no-deps` plus an editable local path means the distribution under test
+      # cannot be quietly satisfied by an index package of the same name.
+      - name: Test the tree being released
+        run: |
+          python -m pip install --no-deps --no-build-isolation -e "${PKG_DIR}[dev]"
+          python -m pytest "${PKG_DIR}/tests" -q
+
+      - name: Build wheel and sdist
+        run: python -m build --no-isolation --outdir dist "${PKG_DIR}"
+
+      - name: Validate artifact identity
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          stem="alelyon_os-${VERSION}"
+          test -f "dist/${stem}-py3-none-any.whl" || { echo "::error::missing wheel"; exit 1; }
+          test -f "dist/${stem}.tar.gz"            || { echo "::error::missing sdist"; exit 1; }
+          # Exactly two files. A third would be published alongside them unnoticed.
+          count="$(find dist -type f | wc -l)"
+          test "$count" -eq 2 || { echo "::error::expected 2 artifacts, found ${count}"; find dist -type f; exit 1; }
+
+      # Rebuilding the wheel FROM the sdist is what catches an sdist that omits a file
+      # the wheel had. Users who install from source get the sdist, so an sdist that
+      # cannot produce the wheel is a broken release that a wheel-only check passes.
+      - name: Rebuild the wheel from its own sdist
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p sdist-rebuild
+          python -m pip wheel --no-index --no-cache-dir --no-deps \
+            --no-build-isolation --wheel-dir sdist-rebuild "dist/alelyon_os-${VERSION}.tar.gz"
+          test -f "sdist-rebuild/alelyon_os-${VERSION}-py3-none-any.whl"
+
+      - name: Exercise every subsystem from the built wheel, with the repo unreachable
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          PYTHONPATH: ""
+          PYTHONSAFEPATH: "1"
+        run: |
+          set -euo pipefail
+          python -m venv smoke
+          smoke/bin/python -m pip install --quiet \
+            "dist/alelyon_os-${VERSION}-py3-none-any.whl[sdk,stream]"
+          cd /tmp
+          # One import per subsystem. A missing allowlist entry surfaces here and
+          # nowhere earlier, because here is the first place the source tree is gone.
+          "$GITHUB_WORKSPACE/smoke/bin/python" -c "
+          import alelyon.verify
+          import alelyon.runtime.vector.lattice
+          from alelyon.runtime.vector.lattice import morphometry
+          from alelyon.runtime.common import worktree, worktree_cache
+          import alelyon.runtime.vector.compute
+          from alelyon.platform.sdk import AlelyonClient
+          print('every subsystem imports from the installed wheel')"
+          "$GITHUB_WORKSPACE/smoke/bin/alelyon-verify" selftest
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-alelyon-os-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-testpypi:
+    name: publish rehearsal to TestPyPI
+    if: needs.resolve.outputs.target == 'testpypi'
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/alelyon-os
+    permissions:
+      contents: read
+      id-token: write        # the ONLY thing that authenticates to the index
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-alelyon-os-${{ github.sha }}
+          path: dist/
+
+      - name: Publish rehearsal
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+
+  publish-pypi:
+    name: publish to PyPI
+    # BOTH conditions are required, and neither is set by this file. See the header.
+    if: >-
+      needs.resolve.outputs.target == 'pypi' &&
+      vars.ALELYON_OS_PRODUCTION_RELEASE == 'enabled'
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    environment:
+      # This environment must exist WITH REQUIRED REVIEWERS. Without it the job runs
+      # unattended; with it, a human approves each production upload. Creating it is
+      # the owner's act, not this file's.
+      name: pypi
+      url: https://pypi.org/p/alelyon-os
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist-alelyon-os-${{ github.sha }}
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          print-hash: true
+          # PEP 740 attestations, signed by this workflow run. PLATFORM.md §W1(c)
+          # requires them: a party asked to check a hash "against the release" is
+          # otherwise checking a number the issuer alone controls.
+          attestations: true
+
+  production-gate-closed:
+    name: production publication is gated off
+    if: >-
+      needs.resolve.outputs.target == 'pypi' &&
+      vars.ALELYON_OS_PRODUCTION_RELEASE != 'enabled'
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report the fail-closed gate
+        run: >-
+          echo "::notice::artifacts passed every release check, and production
+          publication is gated off. Set the repository variable
+          ALELYON_OS_PRODUCTION_RELEASE=enabled and create a 'pypi' environment with
+          required reviewers to enable it."
