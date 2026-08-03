@@ -280,6 +280,15 @@ jobs:
           name: dist-alelyon-os-${{ github.sha }}
           path: dist/
 
+      - name: Which registration must authorize this upload
+        env:
+          INDEX_HOST: test.pypi.org
+          TARGET_ENVIRONMENT: testpypi
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/publisher-preflight.sh
+
       - name: Publish rehearsal
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
@@ -309,6 +318,15 @@ jobs:
         with:
           name: dist-alelyon-os-${{ github.sha }}
           path: dist/
+
+      - name: Which registration must authorize this upload
+        env:
+          INDEX_HOST: pypi.org
+          TARGET_ENVIRONMENT: pypi
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/publisher-preflight.sh
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
