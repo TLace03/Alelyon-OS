@@ -36,12 +36,27 @@
 #   Owner            TLace03
 #   Repository name  Alelyon-OS
 #   Workflow name    release.yml
-#   Environment      pypi   (leave blank to match any; `testpypi` for the rehearsal)
+#   Environment      pypi   (or leave blank to match any)
 #
 # It must be a PENDING publisher. `alelyon-os` has never been published — measured
 # 2026-08-03 it returns 404 — and a project-level registration cannot exist until the
 # first upload succeeds. Run `tools/pypi_oidc_preflight.py --index pypi --dist-name
 # alelyon-os` in the monorepo to see which registration governs, with no credentials.
+#
+# NO TESTPYPI REHEARSAL (removed 2026-08-03, owner decision). There was one, and it
+# cost four runs to `invalid-publisher` with a claim set that was correct in every
+# field. The cause is structural rather than a misconfiguration: test.pypi.org is a
+# SEPARATE SERVICE from pypi.org, with its own account, its own login and its own
+# publisher list, so rehearsing there means standing up and maintaining a second
+# registration whose only job is to rehearse. That is a real cost for a step that
+# proves nothing about the production credential path it is standing in for.
+#
+# What replaces it is honest about its own limits: `workflow_dispatch` builds,
+# validates, rebuilds the wheel from its own sdist and smoke-tests every subsystem
+# from a clean install — then stops, holding no `id-token` permission at all. It
+# exercises everything up to the index and nothing at it. The first real exchange
+# with PyPI therefore happens on the first tagged release, and the two production
+# switches are what stand between a mistake and a published artifact.
 
 name: Release
 
@@ -49,14 +64,10 @@ on:
   push:
     tags:
       - "alelyon-os-v*"
+  # Manual dispatch is a DRY RUN: it builds, validates and smoke-tests the artifact
+  # and then stops without a publish target. It takes no inputs, because there is
+  # nothing left to choose — see the TestPyPI note in the header.
   workflow_dispatch:
-    inputs:
-      target:
-        description: Where to publish
-        required: true
-        type: choice
-        default: testpypi
-        options: [testpypi]
 
 permissions:
   contents: read
@@ -113,7 +124,10 @@ jobs:
             fi
             target=pypi
           else
-            target=testpypi
+            # A dispatch validates and stops. `none` is a real target value, not an
+            # empty string: an unset output compares equal to every typo'd `if:`
+            # condition, and a publish job guarded by one would run.
+            target=none
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "target=${target}" >> "$GITHUB_OUTPUT"
@@ -263,53 +277,18 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  publish-testpypi:
-    name: publish rehearsal to TestPyPI
-    if: needs.resolve.outputs.target == 'testpypi'
+  dry-run-complete:
+    name: validated, nothing published
+    if: needs.resolve.outputs.target == 'none'
     needs: [resolve, build]
     runs-on: ubuntu-24.04
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/alelyon-os
-    permissions:
-      contents: read
-      id-token: write        # the ONLY thing that authenticates to the index
     steps:
-      # A PARTIAL checkout, for the preflight script only.
-      #
-      # These jobs hold `id-token: write` — the one permission that can mint an
-      # index credential — so the less present in them the better. Before this they
-      # checked out nothing at all, which was correct for publishing (the artifact
-      # arrives from `build`) and broke the moment a step referenced a repo file:
-      # `bash: .github/publisher-preflight.sh: No such file or directory`, exit 127.
-      #
-      # So: `.github` only, and `persist-credentials: false` so no git credential is
-      # left sitting beside the OIDC token.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          sparse-checkout: .github
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: dist-alelyon-os-${{ github.sha }}
-          path: dist/
-
-      - name: Which registration must authorize this upload
-        env:
-          INDEX_HOST: test.pypi.org
-          TARGET_ENVIRONMENT: testpypi
-        shell: bash
+      # Says what was and was NOT established. A manual run that ends green with no
+      # further comment reads as "the release works", and it does not: this exercises
+      # everything up to the index and nothing at it.
+      - name: Report what a dispatch does and does not prove
         run: |
-          set -euo pipefail
-          bash .github/publisher-preflight.sh
-
-      - name: Publish rehearsal
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: dist/
-          repository-url: https://test.pypi.org/legacy/
-          print-hash: true
+          echo "::notice::alelyon-os ${{ needs.resolve.outputs.version }} built,"               "validated, rebuilt from its own sdist and smoke-tested from a clean"               "install. NOTHING WAS PUBLISHED and no index credential was requested"               "- this run holds no id-token permission at all. Publishing requires an"               "annotated alelyon-os-v* tag reachable from main, plus both production"               "switches. The artifact is attached to this run for inspection."
 
   publish-pypi:
     name: publish to PyPI
