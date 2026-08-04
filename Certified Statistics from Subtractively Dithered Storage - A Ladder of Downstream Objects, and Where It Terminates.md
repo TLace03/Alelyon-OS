@@ -1,16 +1,5 @@
 # Certified Statistics from Subtractively Dithered Storage: A Ladder of Downstream Objects, and Where It Terminates
 
-**Alelyon Quantitative Services**
-Working Paper II of V · Series: *Certified Computation over Compressed and Committed Data*
-
-**Version:** 1.0 · **Date:** 2026-08-04 · **Status:** Working paper; not peer reviewed.
-**Artifacts:** `alelyon.runtime.vector.{codec.certkit, speccert, ditherdmd, qpregret}`.
-**Adversarial review:** the decision-regret construction was refereed (verdict
-*repairable*, repaired; §6.3); the scalar-functional headline was **retracted** in
-review (§3.5).
-**Correspondence:** Alelyon Quantitative Services.
-
----
 
 ## Standing honesty contract
 
