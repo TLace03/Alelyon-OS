@@ -1,17 +1,5 @@
 # Replayable Certificates over Computation: Binding a Program, Its Inputs, and What the Certificate Does Not Establish
 
-**Alelyon Quantitative Services**
-Working Paper I of V · Series: *Certified Computation over Compressed and Committed Data*
-
-**Version:** 1.0 · **Date:** 2026-08-04 · **Status:** Working paper; not peer reviewed.
-**Artifacts:** `alelyon.verify`, `alelyon.runtime.oracle.dsl`,
-`alelyon.runtime.vector.lattice`, distributed in `alelyon-os`.
-**Adversarial review:** two independent referee passes (prior-art, buyer) returned
-*overclaimed* on an earlier framing; a red team on the registration engine
-(2026-08-02) returned two confirmed defects. This paper is written to the claim
-discipline those verdicts produced.
-**Correspondence:** Alelyon Quantitative Services.
-
 ---
 
 ## Standing honesty contract
