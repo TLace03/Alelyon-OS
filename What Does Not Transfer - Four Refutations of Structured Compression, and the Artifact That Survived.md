@@ -1,12 +1,5 @@
 # What Does Not Transfer: Four Refutations of Structured Compression, and the Artifact That Survived
 
-**Alelyon Quantitative Services**
-Working Paper IV of V · Series: *Certified Computation over Compressed and Committed Data*
-
-**Version:** 1.0 · **Date:** 2026-08-04 · **Status:** Working paper; not peer reviewed.
-**Experiments:** EXP-1, EXP-2, EXP-LLM, EXP-KV, conducted 2026-07-19.
-**Correspondence:** Alelyon Quantitative Services.
-
 ---
 
 ## Standing honesty contract
