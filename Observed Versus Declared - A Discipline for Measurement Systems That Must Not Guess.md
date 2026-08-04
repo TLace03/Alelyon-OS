@@ -1,15 +1,5 @@
 # Observed versus Declared: A Discipline for Measurement Systems That Must Not Guess
 
-**Alelyon Quantitative Services**
-Working Paper III of V · Series: *Certified Computation over Compressed and Committed Data*
-
-**Version:** 1.0 · **Date:** 2026-08-04 · **Status:** Working paper; not peer reviewed.
-**Artifacts:** `alelyon.runtime.vector.lattice.morphometry`,
-`alelyon.runtime.common.worktree*`, distributed in `alelyon-os`; operator surface
-`alelyon-fleet`.
-**Field workload:** up to 26 concurrent worktrees in one repository.
-**Correspondence:** Alelyon Quantitative Services.
-
 ---
 
 ## Standing honesty contract
