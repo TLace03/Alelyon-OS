@@ -73,6 +73,18 @@ def __getattr__(name):
 
 
 def __dir__():
-    return list(globals().keys()) + [
-        name for name, target in _LAZY_TARGETS.items() if _lazy_available(target)
-    ]
+    # DEDUPLICATED, and that is not tidiness. `__getattr__` above caches a
+    # resolved name into `globals()`, so after any code path has touched one of
+    # these seven it appears in BOTH halves of this list — and `dir()` sorts its
+    # result without deduplicating it. The advertised surface is checked by
+    # comparing `dir()` against the expected set, so a duplicate breaks that
+    # check for every caller, while the module is working perfectly.
+    #
+    # It stayed latent because it only fires once something has resolved a lazy
+    # name in the same process: the packaging test passed alone and failed after
+    # `tests/atlas` or `tests/integration` ran first.
+    return sorted({
+        *globals(),
+        *(name for name, target in _LAZY_TARGETS.items()
+          if _lazy_available(target)),
+    })

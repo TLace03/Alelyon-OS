@@ -10,8 +10,10 @@
 #   python packaging/alelyon-os/build_wheel.py --verify-clean-install
 #
 # WHAT SHIPS is declared per subsystem in `subsystems.py`, which is the file to read
-# and review. In summary: the CNE verifier, the lattice registration engine and Model
-# Morphometry, the fleet/worktree coordination layer, the compute DAG, and the API SDK.
+# and review. In summary: the CNE verifier and the producer path that feeds it, the
+# lattice registration engine and Model Morphometry, the whole fleet/worktree
+# coordination layer including its CLI, the Workspace conversation, the compute DAG,
+# and the API SDK.
 #
 # WHAT DOES NOT SHIP: the capture engine, the history store, DataService, the GUI, the
 # HTTP API service, identity/auth/gateway, the DSL-authoring model, and every signing
@@ -32,7 +34,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "alelyon-os"
 version = "0.1.0"
-description = "The open Alelyon developer surface: CNE verification, exact coordinate registration, worktree coordination, uncertainty-propagating compute, and the API client."
+description = "The open Alelyon developer surface: certified-number production and verification, exact coordinate registration and model morphometry, multi-session worktree coordination, a local-model conversation with constrained decoding, uncertainty-propagating compute, and the API client."
 readme = "README.md"
 requires-python = ">=3.10"
 # Dual licensed at the recipient's option (owner decision, 2026-08-03), the
@@ -103,6 +105,11 @@ Source = "https://github.com/TLace03/Alelyon-OS"
 
 [project.scripts]
 alelyon-verify = "alelyon.verify.cli:main"
+# The fleet CLI and the Workspace conversation. Both entry points live INSIDE the
+# package: a CLI under `tools/` in the source repo cannot travel with the wheel, and
+# what shipped before was a library with no way to run it.
+alelyon-fleet = "alelyon.runtime.common.fleet_cli:main"
+alelyon-workspace = "alelyon.runtime.oracle.assistant.cli:main"
 
 [tool.setuptools]
 # Explicit, never auto-discovered: auto-discovery over a staged tree would happily pick
@@ -117,6 +124,13 @@ packages = [
   "alelyon.runtime.atlas.data",
   "alelyon.runtime.common",
   "alelyon.runtime.oracle",
+  "alelyon.runtime.oracle.answer",
+  "alelyon.runtime.oracle.assistant",
+  # Partly public: `calc` and `model_self` ship, the market desks do not. Listing
+  # the PACKAGE here does not widen the boundary -- `build_wheel.py` stages an
+  # explicit per-file allowlist and then asserts the built wheel equals it, so a
+  # desk that is not on the list cannot arrive by being in a listed directory.
+  "alelyon.runtime.oracle.assistant.desks",
   "alelyon.runtime.oracle.dsl",
   "alelyon.runtime.vector",
   "alelyon.runtime.vector.compute",

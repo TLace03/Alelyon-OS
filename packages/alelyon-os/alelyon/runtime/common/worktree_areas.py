@@ -1,172 +1,109 @@
-"""Where in the codebase a piece of work is — the mesh's coordinate space.
+"""Where in a codebase a piece of work is — the mesh's coordinate space.
 
 [DYNAMIC-CACHE.md](../../../docs/features/DYNAMIC-CACHE.md) §9 open question 2
 asks for a canonical coordinate vocabulary and warns that it is "the single
 decision most likely to need a version bump later, so it is worth the most care
 now". This module answers it, and the care taken is in *not inventing the axes*.
 
-**The axes are already binding policy.** `AGENTS.md` §2 declares the ownership
-pillars — `runtime.common`, `runtime.atlas`, `runtime.vector`, `runtime.nexus`,
-`runtime.sentinel`, `runtime.oracle`, `products`, `frontend`, `platform`,
-`research`. That matters more than it looks: §5's rule is that attribution must
-be validated against an independently-held invariant rather than against the
-shape of what the writer emitted, and this list is exactly such an invariant. It
-was fixed before this feature existed, it is owner-authored policy this module
-does not get to edit, and `test_pillars_come_from_the_policy_document` fails if
-the table here and the list there ever disagree.
+**The axes belong to the repository being observed, not to this module.**
 
-An invented taxonomy — "backend", "UI", "infra" — would have had none of those
-properties. It would be this module asserting a structure rather than reading one.
+That sentence used to be false. Version 3 of this file carried one hard-coded
+table of path prefixes — `alelyon/runtime/common/`, `research/`, `tools/`,
+`web/` — copied from the ownership pillars declared in this repository's own
+`AGENTS.md`. Inside this repository that was exactly right, and it is why the
+rule "validate attribution against an independently-held invariant rather than
+against the shape of what the writer emitted" was satisfiable at all: the list
+was owner-authored policy the module did not get to edit.
 
-**How strongly it is held, precisely.** `.importlinter` machine-enforces the
-*outer* boundaries (runtime must not import products or the frontend, and so on),
-and AGENTS.md says in the same breath that "intra-runtime direction remains
-partly cyclic and is not yet machine-enforced". So `runtime.oracle` versus
-`runtime.vector` is a policy boundary with a document behind it, **not** a
-checked one. The distinction is worth keeping straight: this coordinate space is
-as reliable as a written ownership rule, which is considerably better than a
-taxonomy invented here and considerably worse than a compiler.
+Outside this repository it was wrong in two directions at once. Every path in a
+stranger's checkout fell through the table and read `UNMAPPED`, so the fleet
+could see no coordinates at all; and the table itself published one particular
+private tree's directory layout as though it were a general vocabulary. The
+module now ships with **no directory table of its own**. What it has instead is
+a resolver:
 
-**Two axes, and the second is deliberately shallow.**
+    declared   `.alelyon/fleet.toml` in the repository root, if present.
+               The repository states its own pillars. This repository does
+               exactly that, which is why nothing about its behaviour changed
+               when the built-in table was removed.
+    discovered otherwise, from the repository's OWN tracked paths — the
+               directories that actually exist in the checkout the user opened.
+    empty      when neither is available. Everything is `UNMAPPED`, which is an
+               answer, and a truthful one: nothing was observed, so nothing is
+               placed.
+
+Nothing is ever placed into a directory that was not observed or declared in the
+repository under observation. There is no ambient list.
+
+Two axes, and the second is deliberately shallow
+------------------------------------------------
 
     Area(pillar="runtime.oracle", surface="assistant")
     Area(pillar="frontend",       surface="desktop.lattice")
 
 `pillar` is the owner. `surface` is the subsystem inside it, taken from the path
-at a depth declared per pillar — because the pillars are not shaped alike. One
-segment under `runtime.oracle` names a subsystem (`assistant`, `dsl`, `desks`);
-one segment under `frontend` names only a *toolkit* (`desktop`), and the thing a
-reader cares about — which product — is one level further down. The depth is a
-table entry rather than a constant for that reason.
+at a depth declared per pillar — because pillars are not shaped alike. One
+segment under a source pillar may name a subsystem; one segment under a UI
+pillar may name only a *toolkit*, and the thing a reader cares about is a level
+further down. Depth is therefore a per-rule field rather than a constant.
 
-**`UNMAPPED` is first-class**, and for the same reason `UNATTRIBUTED` is in
-`worktree.py`: a path that falls outside every rule must say so. Rounding it into
-a nearest-neighbour pillar would put work in an area nobody owns and report the
-fleet as covering ground it is not on.
+`FLAT` (depth 0) is the third shape: a pillar that is a bag of independent
+programs rather than a tree of subsystems, where the FILE is the unit. It exists
+because a directory of unrelated scripts collapsed to one surface makes a single
+session editing a single script read as occupying the whole directory, and
+`open-areas` then hides every other program in it.
+
+**`UNMAPPED` is first-class**, for the same reason `UNATTRIBUTED` is in
+`worktree.py`: a path that falls outside every rule must say so. Rounding it
+into a nearest-neighbour pillar would put work in an area nobody owns and report
+the fleet as covering ground it is not on.
 
 **What an area is not.** It is not a measure of size, difficulty, or importance,
 and two areas being distinct says nothing about whether work in them can conflict
-— that is what the mesh's touched-path contention is for. An area is a coordinate,
-not a judgement.
+— that is what the mesh's touched-path contention is for. An area is a
+coordinate, not a judgement.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import PurePosixPath
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Iterable, Mapping, Optional, Sequence, Tuple
+import os
+import subprocess
 
 #: Extending the pillar table or changing a surface depth changes what an area
 #: *means*, and stored areas from before the change would silently re-point.
 #: DYNAMIC-CACHE.md §4 rule 1 makes that a version bump rather than a refactor.
 #:
-#: 2 — `alelyon/languages/` and `alelyon/studio/` added. Both are real, tracked
-#:     source trees that version 1 could not place: 25 files read `UNMAPPED`,
-#:     including the Rust crates that build the CNE verifier kernel. A session
-#:     working there was invisible to the fleet. This is a re-point, not merely
-#:     an extension — records stored as `UNMAPPED` under version 1 now resolve
-#:     to a real area — which is exactly the case the rule above is for.
-#:
-#: 3 — flat pillars split per file. Found by using the tool: one session had
-#:     `tools/route_split.py` ahead of the mainline, and because every script in
-#:     `tools/` collapsed to the single area `tools`, `open-areas` reported the
-#:     whole directory occupied and hid roughly fifteen unrelated programs. The
-#:     mesh's documented false positive is *path* overlap inside one file; this
-#:     was a coarser one invented here, and it steers work away from ground that
-#:     is genuinely free.
-AREA_SPACE_VERSION = 3
+#: 2 — `alelyon/languages/` and `alelyon/studio/` added.
+#: 3 — flat pillars split per file.
+#: 4 — the built-in table REMOVED. Rules now come from the observed repository:
+#:     declared in `.alelyon/fleet.toml`, or discovered from its tracked paths.
+#:     This is a re-point for every repository that is not this one — they moved
+#:     from "everything UNMAPPED" to real coordinates — which is exactly the case
+#:     the rule above is for. Within this repository the declared config
+#:     reproduces version 3 exactly, and `tests/runtime/test_worktree_areas.py`
+#:     asserts that path-by-path.
+AREA_SPACE_VERSION = 4
 
 #: Surface depth for a pillar that is a bag of files rather than a tree of
-#: subsystems. Named rather than written as a bare 0 at eleven call sites.
+#: subsystems. Named rather than written as a bare 0 at every call site.
 FLAT = 0
 
 #: A path no rule placed. Never an empty string and never a nearest guess.
 UNMAPPED = "UNMAPPED"
 
-#: (path prefix, pillar, surface depth). Ordered; first match wins, so a longer
-#: prefix must precede the shorter one it extends.
-#:
-#: `depth` is how many path segments AFTER the prefix name the surface:
-#:   1 — the segment under the prefix is already a subsystem
-#:       (`alelyon/runtime/oracle/assistant/…` → `assistant`)
-#:   2 — the first segment is a container and the second is the real subject
-#:       (`alelyon/frontend/desktop/lattice/…` → `desktop.lattice`)
-#:   0 — **flat**: the pillar is a bag of independent files, not a tree of
-#:       subsystems, so the FILE is the unit and its stem is the surface
-#:       (`tools/fleet.py` → `tools/fleet`).
-#:
-#: Flat exists because `tools/` and the root of `docs/` hold programs and
-#: documents that share a directory and nothing else. Under depth 1 they all
-#: collapsed to one surface, so a single session editing a single script made
-#: the entire pillar read occupied and `open-areas` hid the rest. Two sessions
-#: in two unrelated scripts do not contend, and a coordinate space that says
-#: they do sends work somewhere else for no reason.
-#:
-#: The pillar names are copied from AGENTS.md §2 verbatim. If that list changes,
-#: this table is wrong and `test_pillars_match_the_import_contracts` fails.
-_PILLARS: tuple[tuple[str, str, int], ...] = (
-    ("alelyon/runtime/common/", "runtime.common", 1),
-    ("alelyon/runtime/atlas/", "runtime.atlas", 1),
-    ("alelyon/runtime/vector/", "runtime.vector", 1),
-    ("alelyon/runtime/nexus/", "runtime.nexus", 1),
-    ("alelyon/runtime/sentinel/", "runtime.sentinel", 1),
-    ("alelyon/runtime/oracle/", "runtime.oracle", 1),
-    # `products/enterprise/` is the live engine composition and `products/api/`
-    # is the read-only service; one segment separates them, which is the
-    # distinction that matters for who is working where.
-    ("alelyon/products/", "products", 1),
-    # `frontend/desktop/` is a toolkit, not a subject. The product under it is.
-    ("alelyon/frontend/", "frontend", 2),
-    ("alelyon/platform/", "platform", 1),
-    ("alelyon/verify/", "verify", 1),
-    # The polyglot trees. Depth 1 because the segment under `languages/` names
-    # the implementation — `cne_verify`, `vector_core`, `axiom` — and those are
-    # not interchangeable: one of them is the verifier kernel and Section 8 of
-    # AGENTS.md governs it.
-    ("alelyon/languages/", "languages", 1),
-    ("alelyon/studio/", "studio", 1),
-    ("research/", "research", 1),
-    # Flat: a bag of independent programs. `tools/route_split.py` and
-    # `tools/fleet.py` share a directory and nothing else.
-    ("tools/", "tools", FLAT),
-    ("scripts/", "tools", FLAT),
-    ("packaging/", "packaging", 1),
-    ("docs/", "docs", 1),
-    ("tests/", "tests", 1),
-    ("web/", "web", 1),
-)
+#: Where a repository declares its own coordinate space, relative to its root.
+CONFIG_PATH = ".alelyon/fleet.toml"
 
-#: Every pillar a path can actually resolve to. Derived from the table rather
-#: than written twice, so a new pillar cannot be accepted by one and rejected by
-#: the other. `Area.known` is the only thing that should consult this.
-KNOWN_PILLARS: frozenset[str] = frozenset(p for _prefix, p, _depth in _PILLARS)
+#: Overrides the config location entirely. A path to a TOML file.
+CONFIG_ENV = "ALELYON_FLEET_CONFIG"
 
-#: Whole pillars that are Tier 3 under AGENTS.md §3, withheld from any surface
-#: that offers work to an agent. §1 forbids a probationary model from changing
-#: them at all, so offering one as a free slot points a session that asked
-#: "where am I needed?" straight at authority it does not have.
-#:
-#: This started as `CAPITAL_BEARING` and held only the two order-path pillars.
-#: That name was narrower than the job: §3's Tier 3 is "capital, destructive,
-#: **trust**, or release authority" and names signing keys, CNE verification
-#: semantics and public package contents in the same breath. Under the old set
-#: `open-areas` offered `verify` and `packaging` as free work — the verifier and
-#: the release path — which is the same mistake as offering an order path, with
-#: a claim boundary instead of a position at the end of it.
-TIER3_PILLARS: frozenset[str] = frozenset({
-    "products",          # live enterprise composition; order paths
-    "runtime.sentinel",  # PnL, intent/fill ledgers, execution records
-    "verify",            # the open verifier: §8 claim discipline
-    "packaging",         # public package contents and release tooling
-})
+#: Discovery walks the repository's own tracked paths. This bounds that read so
+#: an enormous checkout cannot turn a coordinate lookup into a minute of I/O.
+_MAX_DISCOVERY_PATHS = 200_000
 
-#: Individual areas that are Tier 3 while their pillar is not. Needed because
-#: Tier 3 is not always pillar-shaped: `languages/axiom` is an ordinary DSL and
-#: `languages/cne_verify` is the verifier kernel, and withholding the whole
-#: pillar to catch one of them would hide real work.
-TIER3_AREAS: frozenset[tuple[str, str]] = frozenset({
-    ("languages", "cne_verify"),
-    ("languages", "vector_core"),    # the native kernel behind certified widths
-    ("languages", "vector_native"),
-})
+_GIT_TIMEOUT = 30
 
 
 @dataclass(frozen=True, order=True)
@@ -185,34 +122,22 @@ class Area:
     def mapped(self) -> bool:
         return self.pillar != UNMAPPED
 
+    # `known` and `tier3` are properties of an area WITHIN A SPACE, and the
+    # space is what varies between repositories. They are kept on `Area` because
+    # every caller reads them as adjectives of a coordinate, and they consult
+    # the process default — correct for a tool standing in the repository it is
+    # asking about. A caller holding paths from elsewhere must use
+    # `AreaSpace.known` / `AreaSpace.tier3` with that repository's own space.
+
     @property
     def known(self) -> bool:
-        """Whether a path could ever actually resolve to this area.
-
-        `mapped` only says "not the UNMAPPED sentinel", which any string
-        satisfies — `parse_area` partitions on `/` and hands back whatever it was
-        given. So a typo produced a well-formed Area on a pillar that appears in
-        no path, and anything keyed on it was invisible for ever after.
-
-        That is not hypothetical. A session claimed `platform.gateway` — the
-        dotted form, because pillars like `runtime.common` really do contain
-        dots — while routing derives `platform/gateway`. The claim was accepted
-        and reported as success, the session was never reachable, and four
-        findings published at the real area reported REACHED NOBODY. Creating a
-        coordinate must therefore be checked against the table; reading one back
-        must not, so a bad record can still be inspected and released.
-        """
-        return self.pillar in KNOWN_PILLARS
+        """Whether a path in the DEFAULT space could resolve to this area."""
+        return default_space().known(self)
 
     @property
     def tier3(self) -> bool:
-        """Work here needs explicit owner authority. See AGENTS.md §3.
-
-        Covers capital, destructive, **trust** and release authority — not only
-        the order paths. A surface offering free work must withhold these.
-        """
-        return (self.pillar in TIER3_PILLARS
-                or (self.pillar, self.surface) in TIER3_AREAS)
+        """Whether the DEFAULT space declares this area owner-authority-only."""
+        return default_space().tier3(self)
 
 
 #: The single instance every unplaced path resolves to, so callers can compare
@@ -220,8 +145,225 @@ class Area:
 UNMAPPED_AREA = Area(UNMAPPED, "")
 
 
+@dataclass(frozen=True)
+class Rule:
+    """One path prefix, the pillar that owns it, and how deep its surface is.
+
+    `depth` is how many path segments AFTER the prefix name the surface:
+      1 — the segment under the prefix is already a subsystem
+      2 — the first segment is a container and the second is the real subject
+      0 — FLAT: the pillar is a bag of independent files, so the FILE is the
+          unit and its stem is the surface
+    """
+
+    prefix: str
+    pillar: str
+    depth: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.prefix:
+            raise ValueError("a rule prefix cannot be empty")
+        if not self.pillar or self.pillar == UNMAPPED:
+            raise ValueError(f"{self.pillar!r} is not a usable pillar name")
+        if self.depth < 0:
+            raise ValueError("surface depth cannot be negative")
+
+
+@dataclass(frozen=True)
+class AreaSpace:
+    """The coordinate vocabulary of ONE repository.
+
+    Explicit and threadable. A bus, a mesh or a report over repository X should
+    hold X's space; the module-level convenience functions delegate to a default
+    resolved from the current checkout, which is correct for a tool run inside
+    the repository it is asking about and wrong for anything else.
+
+    `evidence` records how the rules were obtained, in the same spirit as
+    `worktree.tool_evidence`: a reader can disagree with a derivation only if it
+    is told which one ran.
+    """
+
+    #: Ordered; first match wins, so a longer prefix must precede the shorter
+    #: one it extends. `normalised()` enforces that rather than trusting it.
+    rules: Tuple[Rule, ...] = ()
+    #: Whole pillars that need explicit owner authority — capital, destructive,
+    #: trust, or release. A surface that offers free work must withhold these.
+    #: Empty by default: this module does not get to decide that a stranger's
+    #: directory is dangerous, and inventing a guess would be worse than none.
+    tier3_pillars: frozenset = frozenset()
+    #: Individual `(pillar, surface)` pairs that are Tier 3 while their pillar
+    #: is not. Needed because danger is not always pillar-shaped.
+    tier3_areas: frozenset = frozenset()
+    evidence: str = "no rules; every path is UNMAPPED"
+
+    @property
+    def known_pillars(self) -> frozenset:
+        """Every pillar a path could actually resolve to.
+
+        Derived from the rules rather than stored twice, so a pillar cannot be
+        accepted by one and rejected by the other.
+        """
+        return frozenset(rule.pillar for rule in self.rules)
+
+    @property
+    def empty(self) -> bool:
+        return not self.rules
+
+    def area_of(self, path: str) -> Area:
+        """The area one repository-relative path belongs to.
+
+        Accepts either slash convention because git reports forward slashes on
+        every platform while `str(Path(...))` does not, and a caller mixing the
+        two is the likeliest way this gets a false `UNMAPPED`.
+        """
+        posix = _normalise(path)
+        if not posix:
+            return UNMAPPED_AREA
+        for rule in self.rules:
+            if not posix.startswith(rule.prefix):
+                continue
+            rest = PurePosixPath(posix[len(rule.prefix):])
+            if rule.depth == FLAT:
+                # The file is the unit. A path with directories under a flat
+                # pillar takes the first directory instead, so `tools/pkg/mod.py`
+                # groups as `tools/pkg` rather than splitting a package apart.
+                parts = list(rest.parts)
+                if not parts:
+                    return Area(rule.pillar, "")
+                if len(parts) > 1:
+                    return Area(rule.pillar, parts[0])
+                return Area(rule.pillar, PurePosixPath(parts[0]).stem)
+            # Segments that name a directory are all parts except the final one
+            # only when the path has a suffix; a caller may pass either, so take
+            # parts and trim the filename when there is one.
+            segments = list(rest.parts)
+            if segments and "." in segments[-1]:
+                segments = segments[:-1]
+            # A dot-directory is configuration, not a subsystem. Left in, it
+            # produces a phantom area with a doubled separator that no session
+            # will ever work in, offered in the free-work list beside real ones.
+            segments = [s for s in segments if not s.startswith(".")]
+            return Area(rule.pillar, ".".join(segments[:rule.depth]))
+        return UNMAPPED_AREA
+
+    def areas_of(self, paths: Optional[Iterable[str]]) -> Tuple[Area, ...]:
+        """Distinct areas covered by a set of paths, in sorted order.
+
+        `UNMAPPED` is included when any path fell outside the rules. Dropping it
+        here is how a fleet report ends up claiming full coverage of work it
+        never placed.
+        """
+        return tuple(sorted({self.area_of(p) for p in (paths or ())}))
+
+    def all_pillars(self) -> Tuple[str, ...]:
+        """Every declared pillar, once, in rule order."""
+        seen: list = []
+        for rule in self.rules:
+            if rule.pillar not in seen:
+                seen.append(rule.pillar)
+        return tuple(seen)
+
+    def surfaces_in(self, pillar: str, paths) -> Tuple[Area, ...]:
+        """The areas of `pillar` that `paths` actually reach."""
+        return tuple(sorted({a for a in self.areas_of(paths)
+                             if a.pillar == pillar}))
+
+    def known(self, area: Area) -> bool:
+        """Whether a path could ever actually resolve to `area`.
+
+        `Area.mapped` only says "not the UNMAPPED sentinel", which any string
+        satisfies — `parse_area` partitions on `/` and hands back whatever it
+        was given. So a typo produces a well-formed Area on a pillar that
+        appears in no path, and anything keyed on it is invisible for ever after.
+
+        That is not hypothetical. A session claimed `platform.gateway` — the
+        dotted form, because pillars really do contain dots — while routing
+        derives `platform/gateway`. The claim was accepted and reported as
+        success, the session was never reachable, and four findings published at
+        the real area reported REACHED NOBODY. Creating a coordinate must
+        therefore be checked against the space; reading one back must not, so a
+        bad record can still be inspected and released.
+        """
+        return area.pillar in self.known_pillars
+
+    def tier3(self, area: Area) -> bool:
+        """Work here needs explicit owner authority.
+
+        Covers capital, destructive, **trust** and release authority — not only
+        order paths. A surface offering free work must withhold these. What
+        counts is declared by the repository; an undeclared space returns False
+        everywhere, and `open-areas` says so rather than implying a clearance.
+        """
+        return (area.pillar in self.tier3_pillars
+                or (area.pillar, area.surface) in self.tier3_areas)
+
+    def suggest(self, text: str) -> Optional[Area]:
+        """A known area the caller plausibly meant, or None.
+
+        Exists for one confusion specifically, because it is the one that
+        actually happened and it is built into the vocabulary rather than being
+        carelessness: a pillar may contain a dot (`runtime.common`), and a
+        pillar and its surface are joined by a slash (`platform/gateway`). Both
+        separators are legitimate, so `platform.gateway` looks entirely
+        reasonable and resolves to nothing.
+
+        Refusing without a suggestion leaves the caller re-reading a vocabulary
+        list to spot a single character.
+        """
+        raw = (text or "").strip()
+        if not raw or self.known(parse_area(raw)):
+            return None
+        candidates: list = []
+        if "/" not in raw and "." in raw:
+            head, _, tail = raw.rpartition(".")          # platform.gateway
+            candidates.append(f"{head}/{tail}")          # -> platform/gateway
+        if "/" in raw:
+            candidates.append(raw.replace("/", ".", 1))  # runtime/common
+            candidates.append(raw.partition("/")[0])     # bare pillar
+        for candidate in candidates:
+            area = parse_area(candidate)
+            if self.known(area):
+                return area
+        return None
+
+    def normalised(self) -> "AreaSpace":
+        """Longest prefix first, so an extending rule cannot be shadowed.
+
+        Order is load-bearing — `first match wins` — and a hand-written config
+        that lists `alelyon/` before `alelyon/runtime/common/` would silently
+        swallow the more specific rule. Sorting by descending prefix length
+        makes the file order irrelevant instead of making it a trap. Ties keep
+        their declared order, so a repository can still express a deliberate
+        preference between two same-length prefixes.
+        """
+        ordered = sorted(enumerate(self.rules),
+                         key=lambda pair: (-len(pair[1].prefix), pair[0]))
+        return AreaSpace(
+            rules=tuple(rule for _index, rule in ordered),
+            tier3_pillars=self.tier3_pillars,
+            tier3_areas=self.tier3_areas,
+            evidence=self.evidence,
+        )
+
+
+#: The space every module-level call falls back to when none was threaded in.
+EMPTY_SPACE = AreaSpace()
+
+
+def _normalise(path: str) -> str:
+    posix = str(path or "").replace("\\", "/").strip()
+    while posix.startswith("./"):
+        posix = posix[2:]
+    return posix.lstrip("/")
+
+
 def parse_area(text: str) -> Area:
-    """Read back what `str(Area)` wrote. `UNMAPPED` round-trips."""
+    """Read back what `str(Area)` wrote. `UNMAPPED` round-trips.
+
+    Deliberately space-free: a stored record must remain readable even when the
+    space that produced it is gone, otherwise a coordinate written yesterday
+    cannot be released today.
+    """
     raw = (text or "").strip()
     if not raw or raw == UNMAPPED:
         return UNMAPPED_AREA
@@ -229,97 +371,237 @@ def parse_area(text: str) -> Area:
     return Area(pillar, surface)
 
 
-def suggest_area(text: str) -> "Area | None":
-    """A known area the caller plausibly meant, or None.
+# ── discovery: the repository's own directories, and nothing else ───────────
 
-    Exists for one confusion specifically, because it is the one that actually
-    happened and it is built into the vocabulary rather than being carelessness:
-    a pillar may contain a dot (`runtime.common`), and a pillar and its surface
-    are joined by a slash (`platform/gateway`). Both separators are legitimate,
-    so `platform.gateway` looks entirely reasonable and resolves to nothing.
 
-    Refusing without a suggestion would leave the caller re-reading a vocabulary
-    list to spot a single character.
+def discover(paths: Sequence[str], *, source: str = "tracked paths") -> AreaSpace:
+    """Build a coordinate space from the paths a repository actually contains.
+
+    Pure: takes path strings, returns a space, reads nothing. `load()` supplies
+    the strings from `git ls-files`, and a caller with its own listing — a
+    directory the user selected, an export manifest — can pass that instead.
+
+    The rules, stated plainly so a reader can disagree with them:
+
+    * **A pillar is a top-level directory.** Files at the repository root are
+      not placed at all rather than being swept into a `(root)` pillar that
+      would then read as somewhere a session could work.
+    * **Depth is 1 by default** — the segment under the pillar names a surface.
+    * **A pillar whose immediate children are all files is FLAT**, because a
+      directory of unrelated programs is a bag, not a tree, and collapsing it
+      to one surface makes one session look like it occupies all of it.
+    * **Dot-directories are skipped.** `.github/` and `.venv/` are
+      configuration and tooling, not subsystems anyone claims.
+
+    Nothing here consults a list of names. A directory is a pillar because it
+    was observed in this checkout, and for no other reason.
     """
-    raw = (text or "").strip()
-    if not raw or parse_area(raw).known:
-        return None
-
-    candidates: list[str] = []
-    if "/" not in raw and "." in raw:
-        head, _, tail = raw.rpartition(".")        # platform.gateway
-        candidates.append(f"{head}/{tail}")        # -> platform/gateway
-    if "/" in raw:
-        candidates.append(raw.replace("/", ".", 1))  # runtime/common -> runtime.common
-        candidates.append(raw.partition("/")[0])     # bare pillar
-
-    for candidate in candidates:
-        area = parse_area(candidate)
-        if area.known:
-            return area
-    return None
-
-
-def area_of(path: str) -> Area:
-    """The area one repository-relative path belongs to.
-
-    Accepts either slash convention because git reports forward slashes on every
-    platform while `str(Path(...))` does not, and a caller mixing the two is the
-    likeliest way this gets a false `UNMAPPED`.
-    """
-    posix = str(path or "").replace("\\", "/").lstrip("./")
-    if not posix:
-        return UNMAPPED_AREA
-    for prefix, pillar, depth in _PILLARS:
-        if not posix.startswith(prefix):
+    immediate_dirs: dict = {}
+    order: list = []
+    seen = 0
+    for raw in paths or ():
+        seen += 1
+        if seen > _MAX_DISCOVERY_PATHS:
+            break
+        posix = _normalise(raw)
+        if not posix:
             continue
-        rest = PurePosixPath(posix[len(prefix):])
-        if depth == FLAT:
-            # The file is the unit. A path with directories under a flat pillar
-            # takes the first directory instead, so `tools/pkg/mod.py` groups as
-            # `tools/pkg` rather than splitting a package across areas.
-            parts = list(rest.parts)
-            if not parts:
-                return Area(pillar, "")
-            if len(parts) > 1:
-                return Area(pillar, parts[0])
-            return Area(pillar, PurePosixPath(parts[0]).stem)
-        # `rest.parts[:-1]` would drop the last directory for a deep path but the
-        # FILE for a shallow one. Segments that name a directory are all parts
-        # except the final one only when the path has a suffix; a caller may pass
-        # either, so take parts and trim the filename when there is one.
-        segments = list(rest.parts)
-        if segments and "." in segments[-1]:
-            segments = segments[:-1]
-        # A dot-directory is configuration, not a subsystem. Left in, it produced
-        # `frontend/web..streamlit` from `alelyon/frontend/web/.streamlit/` — a
-        # phantom area with a doubled separator that no session will ever work
-        # in, offered in the free-work list beside real ones. Dropping it puts
-        # those files in the surface that owns them.
-        segments = [s for s in segments if not s.startswith(".")]
-        surface = ".".join(segments[:depth])
-        return Area(pillar, surface)
-    return UNMAPPED_AREA
+        parts = posix.split("/")
+        if len(parts) < 2:
+            continue                      # a root file names no pillar
+        top = parts[0]
+        if not top or top.startswith("."):
+            continue
+        if top not in immediate_dirs:
+            immediate_dirs[top] = set()
+            order.append(top)
+        if len(parts) > 2:
+            immediate_dirs[top].add(parts[1])
+
+    rules = tuple(
+        Rule(prefix=f"{top}/", pillar=top,
+             depth=1 if immediate_dirs[top] else FLAT)
+        for top in order
+    )
+    return AreaSpace(
+        rules=rules,
+        evidence=(f"discovered from {min(seen, _MAX_DISCOVERY_PATHS)} "
+                  f"{source}: {len(rules)} top-level directories"),
+    ).normalised()
 
 
-def areas_of(paths) -> tuple[Area, ...]:
-    """Distinct areas covered by a set of paths, in sorted order.
+# ── declaration: the repository states its own space ────────────────────────
 
-    `UNMAPPED` is included when any path fell outside the table. Dropping it here
-    is how a fleet report ends up claiming full coverage of work it never placed.
+
+def from_config(data: Mapping, *, source: str = "configuration") -> AreaSpace:
+    """Parse a declared coordinate space.
+
+    The shape, which `.alelyon/fleet.toml` writes as TOML:
+
+        [[area]]
+        prefix = "src/engine/"
+        pillar = "engine"
+        depth  = 1
+
+        [tier3]
+        pillars = ["release"]
+        areas   = [["engine", "keys"]]
+
+    A malformed entry raises rather than being skipped. A rule silently dropped
+    is a directory that stops being tracked without anyone being told, which is
+    the failure this whole module exists to avoid.
     """
-    return tuple(sorted({area_of(p) for p in (paths or ())}))
+    raw_rules = data.get("area") or data.get("areas") or ()
+    if isinstance(raw_rules, Mapping):
+        raw_rules = [raw_rules]
+    rules = []
+    for entry in raw_rules:
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"area entry must be a table, got {entry!r}")
+        prefix = str(entry.get("prefix", "")).replace("\\", "/")
+        if prefix and not prefix.endswith("/") and "." not in Path(prefix).name:
+            prefix += "/"
+        rules.append(Rule(prefix=prefix,
+                          pillar=str(entry.get("pillar", "")),
+                          depth=int(entry.get("depth", 1))))
+    tier3 = data.get("tier3") or {}
+    if not isinstance(tier3, Mapping):
+        raise ValueError("[tier3] must be a table")
+    pillars = frozenset(str(p) for p in (tier3.get("pillars") or ()))
+    areas = frozenset(
+        (str(pair[0]), str(pair[1]))
+        for pair in (tier3.get("areas") or ())
+        if isinstance(pair, (list, tuple)) and len(pair) == 2
+    )
+    return AreaSpace(
+        rules=tuple(rules),
+        tier3_pillars=pillars,
+        tier3_areas=areas,
+        evidence=f"declared in {source}: {len(rules)} rules",
+    ).normalised()
 
 
-def all_pillars() -> tuple[str, ...]:
-    """Every declared pillar, once, in table order."""
-    seen: list[str] = []
-    for _prefix, pillar, _depth in _PILLARS:
-        if pillar not in seen:
-            seen.append(pillar)
-    return tuple(seen)
+def config_path(repo_root: Optional[str] = None) -> Optional[Path]:
+    """The configuration file this repository would use, if it has one."""
+    override = os.environ.get(CONFIG_ENV)
+    if override:
+        candidate = Path(override).expanduser()
+        return candidate if candidate.is_file() else None
+    if repo_root is None:
+        return None
+    candidate = Path(repo_root) / CONFIG_PATH
+    return candidate if candidate.is_file() else None
 
 
-def surfaces_in(pillar: str, paths) -> tuple[Area, ...]:
+def _read_config(path: Path) -> AreaSpace:
+    import tomllib                      # stdlib since 3.11; read-only here
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    return from_config(data, source=str(path))
+
+
+def _tracked_paths(repo_root: str) -> Sequence[str]:
+    try:
+        probe = subprocess.run(
+            ["git", "ls-files"], cwd=repo_root, check=False,
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if probe.returncode != 0:
+        return ()
+    return probe.stdout.splitlines()
+
+
+def repo_root_of(start: Optional[str] = None) -> Optional[str]:
+    """The git checkout containing `start`, or None.
+
+    None rather than a guess: a directory that is not in a repository has no
+    coordinate space, and inventing one from the filesystem would track
+    directories the user never opened.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(start or Path.cwd()), check=False,
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    root = probe.stdout.strip()
+    return root if probe.returncode == 0 and root else None
+
+
+def load(repo_root: Optional[str] = None) -> AreaSpace:
+    """The coordinate space of one repository: declared, else discovered.
+
+    `repo_root=None` means "the checkout this process is standing in", resolved
+    with git. Where there is no checkout the answer is `EMPTY_SPACE` — every
+    path `UNMAPPED` — because the alternative is to place work into directories
+    nobody opened.
+    """
+    root = repo_root if repo_root is not None else repo_root_of()
+    declared = config_path(root)
+    if declared is not None:
+        return _read_config(declared)
+    if root is None:
+        return EMPTY_SPACE
+    listing = _tracked_paths(root)
+    if not listing:
+        return AreaSpace(evidence=f"{root} lists no tracked files; nothing placed")
+    return discover(listing, source=f"tracked paths in {root}")
+
+
+# ── the process default, for callers that hold no space ─────────────────────
+#
+# Module-level `area_of(path)` has to answer without being told which repository
+# the path came from. It resolves the checkout this process is standing in, once,
+# and caches it. That is correct for a tool run inside the repository it is
+# asking about, which is every current caller, and it is wrong for anything
+# holding paths from elsewhere — so a space is threadable everywhere it matters
+# and `set_default_space` exists for a host that knows better.
+
+_DEFAULT: Optional[AreaSpace] = None
+
+
+def default_space() -> AreaSpace:
+    """The space module-level helpers use, resolved on first need."""
+    global _DEFAULT
+    if _DEFAULT is None:
+        _DEFAULT = load()
+    return _DEFAULT
+
+
+def set_default_space(space: Optional[AreaSpace]) -> None:
+    """Install a space (or `None` to force re-resolution on next use)."""
+    global _DEFAULT
+    _DEFAULT = space
+
+
+def area_of(path: str, space: Optional[AreaSpace] = None) -> Area:
+    """The area one repository-relative path belongs to."""
+    return (space or default_space()).area_of(path)
+
+
+def areas_of(paths, space: Optional[AreaSpace] = None) -> Tuple[Area, ...]:
+    """Distinct areas covered by a set of paths, in sorted order."""
+    return (space or default_space()).areas_of(paths)
+
+
+def all_pillars(space: Optional[AreaSpace] = None) -> Tuple[str, ...]:
+    """Every declared pillar, once, in rule order."""
+    return (space or default_space()).all_pillars()
+
+
+def surfaces_in(pillar: str, paths,
+                space: Optional[AreaSpace] = None) -> Tuple[Area, ...]:
     """The areas of `pillar` that `paths` actually reach."""
-    return tuple(sorted({a for a in areas_of(paths) if a.pillar == pillar}))
+    return (space or default_space()).surfaces_in(pillar, paths)
+
+
+def suggest_area(text: str, space: Optional[AreaSpace] = None) -> Optional[Area]:
+    """A known area the caller plausibly meant, or None."""
+    return (space or default_space()).suggest(text)
+
+
+def known_pillars(space: Optional[AreaSpace] = None) -> frozenset:
+    """Every pillar a path in this repository could resolve to."""
+    return (space or default_space()).known_pillars

@@ -142,12 +142,22 @@ class Finding:
     broadcast: bool = False
     severity: str = "info"
 
-    @property
-    def areas(self) -> tuple[Area, ...]:
-        """Where this finding lands in the coordinate space."""
+    def areas_in(self, space=None) -> tuple[Area, ...]:
+        """Where this finding lands in ``space``'s coordinate vocabulary.
+
+        Routing is derived from `subject_paths`, so which rules place them
+        decides who hears the finding. A bus over another repository must pass
+        that repository's space; `areas` below keeps the process default for
+        every caller standing in its own checkout.
+        """
         if self.to_area:
             return (parse_area(self.to_area),)
-        return areas_of(self.subject_paths)
+        return areas_of(self.subject_paths, space)
+
+    @property
+    def areas(self) -> tuple[Area, ...]:
+        """Where this finding lands, in the process-default space."""
+        return self.areas_in(None)
 
     @property
     def urgency(self) -> int:
@@ -268,8 +278,24 @@ class FleetBus:
     caches, one substrate" — with its own tables and its own schema version.
     """
 
-    def __init__(self, database: str | Path) -> None:
+    def __init__(self, database: str | Path, *, space=None) -> None:
+        """``space`` is the coordinate vocabulary of the repository being
+        observed.
+
+        Explicit rather than ambient, because the two can differ and the
+        difference is silent. `worktree_areas` resolves a default from the
+        checkout the PROCESS is standing in, which is right for a tool run
+        inside the repository it is asking about and wrong the moment a caller
+        points at another one -- `--repo` does exactly that, and the public CLI
+        exists so users can point it at directories they select. A bus built
+        over repository X must place X's paths with X's rules, or every path
+        reads UNMAPPED and the fleet sees an empty repository.
+
+        ``None`` keeps the process default, so every existing caller standing in
+        its own checkout is unchanged.
+        """
         self.database = Path(database)
+        self.space = space
         self.database.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             for statement in _DDL:
@@ -288,6 +314,11 @@ class FleetBus:
         """What this bus cannot establish. Carried so no reader can render its
         output without the caveats being available to them."""
         return _BUS_LIMITS
+
+    def _space(self):
+        """This bus's coordinate space, or the process default."""
+        from alelyon.runtime.common.worktree_areas import default_space
+        return self.space if self.space is not None else default_space()
 
     # ── publishing ──────────────────────────────────────────────────────────
     def publish(self, *, kind: str, body: str, from_session: str,
@@ -352,7 +383,7 @@ class FleetBus:
         to choose the recipients. The mesh's observed touched-path sets do.
         """
         out: list[Delivery] = []
-        wanted = set(finding.areas)
+        wanted = set(finding.areas_in(self.space))
         if finding.to_session:
             # An explicit address is not checked against anything, which means a
             # typo or a half-remembered id reports "reached 1 session" for a
@@ -430,7 +461,7 @@ class FleetBus:
             for occupant in sorted(occupants.get(worktree.path, ())):
                 if occupant == finding.from_session or not touched_here:
                     continue
-                overlap = self._overlap(finding, touched_here, wanted)
+                overlap = self._overlap(finding, touched_here, wanted, self.space)
                 if overlap:
                     out.append(Delivery(
                         finding, occupant, DECLARED,
@@ -455,7 +486,7 @@ class FleetBus:
                     f"broadcast; {worktree.label} has {len(touched)} path(s) "
                     f"outstanding, so this session is live"))
                 continue
-            overlap = self._overlap(finding, touched, wanted)
+            overlap = self._overlap(finding, touched, wanted, self.space)
             if overlap:
                 out.append(Delivery(finding, session, DERIVED, overlap))
         # One session may hold several worktrees, and may also have claimed the
@@ -471,7 +502,7 @@ class FleetBus:
         return tuple(best.values())
 
     @staticmethod
-    def _overlap(finding: Finding, touched, wanted) -> str:
+    def _overlap(finding: Finding, touched, wanted, space=None) -> str:
         """Why this session is in the audience, in words a reader can dispute."""
         if finding.subject_paths:
             exact = sorted(set(finding.subject_paths) & set(touched))
@@ -480,7 +511,7 @@ class FleetBus:
                 more = f" (+{len(exact) - 3} more)" if len(exact) > 3 else ""
                 return (f"you have outstanding edits to {shown}{more}, which "
                         f"this finding is about")
-        hit = sorted({a for a in areas_of(touched) if a in wanted})
+        hit = sorted({a for a in areas_of(touched, space) if a in wanted})
         if hit:
             names = ", ".join(str(a) for a in hit[:3])
             return (f"you have outstanding edits in {names}, the area this "
@@ -608,7 +639,7 @@ class FleetBus:
         working: dict[Area, set[str]] = {}
         trees: dict[Area, set[str]] = {}
         for worktree in mesh.worktrees:
-            for area in areas_of(worktree.touched_paths):
+            for area in areas_of(worktree.touched_paths, self.space):
                 trees.setdefault(area, set()).add(worktree.label)
                 if worktree.session != UNATTRIBUTED:
                     working.setdefault(area, set()).add(worktree.session)
@@ -617,7 +648,7 @@ class FleetBus:
             claimed.setdefault(parse_area(claim.area), set()).add(claim.session_id)
         counts: dict[Area, int] = {}
         for finding in self.findings(limit=500):
-            for area in finding.areas:
+            for area in finding.areas_in(self.space):
                 counts[area] = counts.get(area, 0) + 1
 
         out = []
@@ -653,7 +684,7 @@ class FleetBus:
         for area in candidates:
             if area in occupied or not area.mapped:
                 continue
-            if area.tier3 and not include_tier3:
+            if self._space().tier3(area) and not include_tier3:
                 continue
             out.append(area)
         return tuple(sorted(set(out)))
