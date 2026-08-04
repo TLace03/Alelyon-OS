@@ -17,6 +17,7 @@ for the frozen boundary.
 from alelyon.runtime.vector.lattice.canonical import (
     CANONICAL_SCHEMA,
     CanonicalEncodingError,
+    ContractViolationError,
     axis_bytes,
     coordinate_space_bytes,
     coordinate_space_ref,
@@ -121,6 +122,7 @@ __all__ = [
     "CANONICAL_SCHEMA",
     "CERTIFICATE_SCHEMA",
     "CanonicalEncodingError",
+    "ContractViolationError",
     "Cell",
     "CertificateCode",
     "CertificateError",

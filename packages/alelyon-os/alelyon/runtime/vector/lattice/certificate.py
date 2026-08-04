@@ -64,6 +64,7 @@ from types import MappingProxyType
 from alelyon.runtime.atlas.data.attest import KeyStore
 from alelyon.runtime.vector.lattice.canonical import (
     CanonicalEncodingError,
+    ContractViolationError,
     _Reader,
     _content_ref,
     _domain,
@@ -583,7 +584,7 @@ def read_certificate(payload: bytes) -> RegistrationCertificate:
             absences=absences,
         )
     except (TypeError, ValueError) as exc:
-        raise CanonicalEncodingError(
+        raise ContractViolationError(
             f"the recovered certificate violates its own contract: {exc}"
         ) from exc
 
@@ -596,7 +597,7 @@ def _read_absence(reader: _Reader) -> FieldAbsence:
     try:
         return FieldAbsence(field_name, status, reason)
     except (TypeError, ValueError) as exc:
-        raise CanonicalEncodingError(f"absence record is invalid: {exc}") from exc
+        raise ContractViolationError(f"absence record is invalid: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)

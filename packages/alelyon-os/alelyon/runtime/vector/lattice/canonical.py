@@ -81,6 +81,56 @@ class CanonicalEncodingError(ValueError):
     """A record could not be encoded to, or recovered from, canonical bytes."""
 
 
+class ContractViolationError(CanonicalEncodingError):
+    """The bytes decoded, and the record they decoded to refused itself.
+
+    Two failures that look alike and are not: bytes that cannot be parsed at all,
+    and bytes that parse cleanly into a record its own type rejects -- a
+    permutation that is not bijective, a schema version this build does not
+    implement. `verify.py` reports the first as `canonical_decoding` and the
+    second as `contract_invariant`, and a replay report exists to draw exactly
+    that kind of distinction.
+
+    Until this class existed the distinction was carried by *which* `ValueError`
+    escaped: `CanonicalEncodingError` for the first, a raw contract `ValueError`
+    for the second. That worked and was load-bearing, but it was invisible --
+    nothing named it, so wrapping the construction to give callers one exception
+    to catch silently collapsed `contract_invariant` into `canonical_decoding`.
+    That collapse was made, caught by
+    `tests/vector/test_lattice_unit_affine.py::test_a_non_canonical_scale_spelling_cannot_be_decoded`,
+    and is the reason this is a named subclass rather than a wrapper.
+
+    Being a `CanonicalEncodingError`, it is caught by everyone handling that; the
+    ordering in `verify.py` is what keeps the finer report.
+    """
+
+
+def _build(factory, what: str, /, *args, **kwargs):
+    """Construct a record from decoded parts, refusing by name if it will not hold.
+
+    Decoded bytes reach a type's own contract, and those contracts raise
+    `ValueError` and `TypeError`. Escaping raw they are not caught by anyone
+    handling `CanonicalEncodingError` -- the exception these entry points
+    document -- so a caller who handled decode failures correctly still saw a
+    bare `ValueError` from a hostile payload. `read_certificate` has wrapped its
+    own construction since it was written; the two older sibling decoders had no
+    wrapper, which `tests/vector/test_lattice_decoder_fuzz.py` found.
+
+    Wrapping never widens what is accepted: a contract that refused still
+    refuses. Only the exception type changes, and it changes to a subclass that
+    keeps the reason distinguishable.
+    """
+
+    try:
+        return factory(*args, **kwargs)
+    except CanonicalEncodingError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ContractViolationError(
+            f"the recovered {what} violates its own contract: {exc}"
+        ) from exc
+
+
 def _u32(value: int) -> bytes:
     if not 0 <= value <= _U32_MAX:
         raise CanonicalEncodingError(f"length {value} is outside the u32 domain")
@@ -279,7 +329,9 @@ def _read_axis(reader: _Reader) -> CoordinateAxis:
     )
     # Reconstruction runs every contract validator again, so malformed bytes
     # cannot produce an axis that the constructor would have refused.
-    return CoordinateAxis(
+    return _build(
+        CoordinateAxis,
+        "axis",
         axis_id=axis_id,
         semantic_id=semantic_id,
         kind=kind,
@@ -406,7 +458,9 @@ def _read_coordinate_space(reader: _Reader) -> CoordinateSpace:
         (reader.string(), reader.string())
         for _ in range(reader.count("metadata", MAX_METADATA_ITEMS))
     )
-    return CoordinateSpace(
+    return _build(
+        CoordinateSpace,
+        "coordinate space",
         space_id=space_id,
         version=version,
         topology=topology,
@@ -629,7 +683,7 @@ def read_transform_chain(
         for _ in range(reader.count("transforms", MAX_TRANSFORM_CHAIN_DEPTH))
     )
     reader.expect_end()
-    chain = TransformChain(transforms)
+    chain = _build(TransformChain, "transform chain", transforms)
     if strict and transform_chain_bytes(chain) != bytes(payload):
         raise CanonicalEncodingError(
             "the input is not the canonical encoding of the chain it decodes to"
@@ -663,7 +717,9 @@ def _read_transform(
     builder = _TRANSFORM_DECODERS.get(transform_type)
     if builder is None:
         raise CanonicalEncodingError(f"unknown transform type {transform_type!r}")
-    transform = builder(reader, target_space, source_space)
+    # One wrap covers all nine builders: each ends in a transform constructor
+    # whose contract can refuse what the bytes decoded to.
+    transform = _build(builder, transform_type, reader, target_space, source_space)
     if transform.direction is not direction:
         raise CanonicalEncodingError("encoded direction contradicts the transform")
     # The capability surface is recomputed from the reconstructed transform, so

@@ -44,6 +44,7 @@ import hmac
 
 from alelyon.runtime.vector.lattice.canonical import (
     CanonicalEncodingError,
+    ContractViolationError,
     coordinate_space_ref,
     read_transform_chain,
     transform_chain_bytes,
@@ -164,6 +165,16 @@ def verify_transform_chain(
         # non-canonical bytes as MALFORMED_ENCODING, losing the distinction a
         # replay report exists to draw.
         chain = read_transform_chain(chain_bytes, spaces, strict=False)
+    except ContractViolationError as exc:
+        # Bytes that parsed, into a record its own type refused. Ordered before
+        # CanonicalEncodingError because it is a subclass of it; reversing these
+        # two arms silently reports every contract failure as a parse failure.
+        return _refusal(
+            ReplayCode.MALFORMED_ENCODING,
+            f"the recovered chain violates its own contract: {exc}",
+            failing_constraint="contract_invariant",
+            chain_ref=actual_ref,
+        )
     except CanonicalEncodingError as exc:
         return _refusal(
             ReplayCode.MALFORMED_ENCODING,
@@ -172,7 +183,8 @@ def verify_transform_chain(
             chain_ref=actual_ref,
         )
     except (TypeError, ValueError) as exc:
-        # A contract validator refused the reconstructed record.
+        # Backstop for a contract refusal raised outside `_build`. Reachable only
+        # if a construction site is added without going through it.
         return _refusal(
             ReplayCode.MALFORMED_ENCODING,
             f"the recovered chain violates its own contract: {exc}",
