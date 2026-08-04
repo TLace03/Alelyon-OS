@@ -1,13 +1,5 @@
 # The Decoder, Not the Weights: Making Fabrication Unrepresentable Rather Than Detectable
 
-**Alelyon Quantitative Services**
-Working Paper V of V · Series: *Certified Computation over Compressed and Committed Data*
-
-**Version:** 1.0 · **Date:** 2026-08-04 · **Status:** Working paper; not peer reviewed.
-**Artifact:** `alelyon.runtime.oracle.assistant.constrain`, distributed in
-`alelyon-os`; operator surface `alelyon-workspace`.
-**Correspondence:** Alelyon Quantitative Services.
-
 ---
 
 ## Standing honesty contract
