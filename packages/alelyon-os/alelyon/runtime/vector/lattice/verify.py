@@ -59,7 +59,7 @@ from alelyon.runtime.vector.lattice.canonical import (
 from alelyon.runtime.vector.lattice.contracts import CoordinateSpace
 from alelyon.runtime.vector.lattice.inverse import (
     InverseConsistency,
-    measure_inverse_consistency,
+    execute_probes,
 )
 from alelyon.runtime.vector.lattice.transforms import (
     LOSS_CLASS_RANK,
@@ -108,6 +108,11 @@ class ReplayReport:
     #: wrong. This is the round trip actually run. None on a refusal that never
     #: reached a decoded chain.
     inverse_consistency: InverseConsistency | None = None
+    #: The hash of the executions that count tallies. The count says how many
+    #: probes round-tripped; this says which ones did, so a certificate whose
+    #: probes were derived by a different build disagrees here even when the two
+    #: counts match. None on a refusal that never reached a decoded chain.
+    execution_trace_commitment: str | None = None
     cases_replayed: int = 0
     failing_constraint: str | None = None
     evidence: tuple[str, ...] = field(default_factory=tuple)
@@ -285,6 +290,10 @@ def verify_transform_chain(
 
 
 def _chain_facts(chain: TransformChain, chain_ref: str) -> dict[str, object]:
+    # Run the probes once. The tally and the commitment are two views of that one
+    # execution, so the report cannot carry a count from one run beside a
+    # commitment from another.
+    trace = execute_probes(chain)
     return {
         "chain_ref": chain_ref,
         "target_space_ref": coordinate_space_ref(chain.target_space),
@@ -300,7 +309,8 @@ def _chain_facts(chain: TransformChain, chain_ref: str) -> dict[str, object]:
         # Measured here rather than by the caller so that every replay reports
         # it, and so a certificate's declared value is compared against a number
         # this module derived independently rather than one it was handed.
-        "inverse_consistency": measure_inverse_consistency(chain),
+        "inverse_consistency": trace.summary(),
+        "execution_trace_commitment": trace.commitment(),
     }
 
 

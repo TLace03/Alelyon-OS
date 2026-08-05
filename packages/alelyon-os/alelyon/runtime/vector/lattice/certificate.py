@@ -10,23 +10,31 @@ database.
 Scope, stated rather than implied
 ---------------------------------
 The governing specification (MODEL-MORPHOMETRY.md §25.1) declares 34 certificate
-fields. This slice populates 14 of them. The other 20 refer to mechanisms that do
+fields. This slice populates 15 of them. The other 19 refer to mechanisms that do
 not exist here -- there is no artifact manifest, no template registry, no search
-plan, no metric registry, no objective, no payload remapping, no uncertainty
-propagation and no execution trace -- and each is carried in the certificate as a
-named absence with its reason and its kind: NOT_APPLICABLE where the mechanism
-cannot apply to exact registration, UNMEASURED where it could apply and nothing
-measured it. The absences are part of the signed bytes, so a certificate cannot
-understate what it leaves out, and `DECLARED_ABSENCES` is asserted complete
-against the spec's field list by
+plan, no metric registry, no objective, no payload remapping and no uncertainty
+propagation -- and each is carried in the certificate as a named absence with its
+reason and its kind: NOT_APPLICABLE where the mechanism cannot apply to exact
+registration, UNMEASURED where it could apply and nothing measured it. The
+absences are part of the signed bytes, so a certificate cannot understate what it
+leaves out, and `DECLARED_ABSENCES` is asserted complete against the spec's field
+list by
 `tests/vector/test_lattice_certificate.py::test_every_spec_field_is_populated_or_named_absent`.
 
-`inverse_consistency_bounds` was one of the two UNMEASURED absences and is now
-populated: `inverse.measure_inverse_consistency` round-trips a derived probe set
-through the chain and its own `invert()`, and the counts are signed. Read that
-module for the boundary -- a probe sample bounds inverse consistency from below
-and does not prove it over the whole domain. `execution_trace_commitment` remains
-the one UNMEASURED field.
+Both of the fields that were once carried as gaps are now populated, each by a
+measurement rather than by a reclassification:
+
+* `inverse_consistency_bounds` at schema 0.2. `inverse.measure_inverse_consistency`
+  round-trips a derived probe set through the chain and its own `invert()`, and
+  the counts are signed.
+* `execution_trace_commitment` at schema 0.3. The counts above say how many
+  probes round-tripped and not *which*, so `inverse.execute_probes` records every
+  execution and the certificate signs that record's hash.
+
+So no absence in this build is a gap. That is a statement about the declared
+fields and not a claim that everything is known -- read `inverse` for the
+boundary that remains: a probe sample bounds inverse consistency from below and
+does not prove it over the whole domain.
 
 What a CERTIFICATE_VERIFIED report establishes
 ----------------------------------------------
@@ -39,6 +47,12 @@ What a CERTIFICATE_VERIFIED report establishes
 * The chain the caller holds is the one this certificate is about: the declared
   space references, loss class and invertibility are cross-checked against what
   the replay independently re-derived.
+* Registering the two named spaces, under the declarations the verifier was
+  given, produces this exact chain (ADR-0019). That is what closes the gap a
+  replay cannot: a chain over an ambiguous correspondence maps every
+  coordinate, inverts on every probe and replays clean, because each of those
+  asks whether the chain agrees with itself, and it does. Only re-running the
+  ladder asks whether registration would ever have emitted it.
 
 What it does not establish
 --------------------------
@@ -91,6 +105,7 @@ from alelyon.runtime.vector.lattice.contracts import (
 from alelyon.runtime.vector.lattice.inverse import (
     InverseConsistency,
     InverseConsistencyCode,
+    execute_probes,
     measure_inverse_consistency,
 )
 from alelyon.runtime.vector.lattice.registration import (
@@ -98,6 +113,8 @@ from alelyon.runtime.vector.lattice.registration import (
     EXACT_CHAIN_SHAPES,
     CompatibilityCode,
     CompatibilityReport,
+    RegistrationDeclarations,
+    analyze_exact_compatibility,
     chain_shape_refusal,
     composed_intermediate_ids,
 )
@@ -113,11 +130,12 @@ from alelyon.runtime.vector.lattice.verify import (
 
 
 #: Bumped from 0.1 when `inverse_consistency_bounds` stopped being an absence and
-#: became a populated field. The record gained a member and the absence list lost
-#: one, so 0.1 bytes and 0.2 bytes are different encodings of different records; a
-#: reader for one is not a reader for the other, which is what a version is for.
-CERTIFICATE_SCHEMA = "alelyon.lattice.registration-certificate/0.2"
-CERTIFICATE_DOMAIN = "alelyon.lattice.canonical.registration-certificate/0.2"
+#: became a populated field, and from 0.2 when `execution_trace_commitment` did
+#: the same. Each time the record gained a member and the absence list lost one,
+#: so the versions are different encodings of different records; a reader for one
+#: is not a reader for the other, which is what a version is for.
+CERTIFICATE_SCHEMA = "alelyon.lattice.registration-certificate/0.3"
+CERTIFICATE_DOMAIN = "alelyon.lattice.canonical.registration-certificate/0.3"
 ABSENCE_DOMAIN = "alelyon.lattice.canonical.field-absence/0.1"
 INVERSE_CONSISTENCY_DOMAIN = "alelyon.lattice.canonical.inverse-consistency/0.1"
 
@@ -167,6 +185,13 @@ class CertificateCode(str, Enum):
     SIGNATURE_INVALID = "SIGNATURE_INVALID"
     CHAIN_REPLAY_FAILED = "CHAIN_REPLAY_FAILED"
     DECLARATION_MISMATCH = "DECLARATION_MISMATCH"
+    #: The chain is sound and is the one this certificate describes, but running
+    #: the registration ladder on the two spaces the certificate names does not
+    #: produce it. Kept apart from DECLARATION_MISMATCH because it answers a
+    #: different question -- not "is this the chain the certificate is about" but
+    #: "is this a chain registration would ever have emitted" -- and an operator
+    #: reading one of these needs to know which of the two failed. ADR-0019.
+    REGISTRATION_MISMATCH = "REGISTRATION_MISMATCH"
 
 
 class CertificateError(ValueError):
@@ -251,6 +276,10 @@ POPULATED_FIELDS: Mapping[str, str] = MappingProxyType({
     "inverse_consistency_bounds": "inverse_consistency (a measured probe sample: "
                                   "see alelyon.runtime.vector.lattice.inverse for "
                                   "what a sample bounds and what it does not)",
+    "execution_trace_commitment": "execution_trace_commitment (the hash of the "
+                                  "probe executions inverse_consistency tallies, "
+                                  "so the tally is bound to the run that produced "
+                                  "it)",
     "proof_status": "compatibility_code",
     "determinism_profile": "determinism_profile",
     "candidate_generator_build": "candidate_generator_build",
@@ -362,11 +391,6 @@ DECLARED_ABSENCES = (
         "kernel, so no hardware attribute can change its result",
     ),
     FieldAbsence(
-        "execution_trace_commitment",
-        FieldStatus.UNMEASURED,
-        "no execution trace is recorded, so none is committed to",
-    ),
-    FieldAbsence(
         "refusal_or_failure_reason",
         FieldStatus.NOT_APPLICABLE,
         "this schema certifies an exact correspondence only; a compatibility "
@@ -435,6 +459,13 @@ class RegistrationCertificate:
     #: this schema version exists to close, and a reader could not tell an
     #: issuer that measured nothing from one that measured and stayed quiet.
     inverse_consistency: InverseConsistency
+    #: The content reference of the probe executions the measurement above tallies
+    #: (§25.1 `execution_trace_commitment`). Required for the same reason: the
+    #: counts alone do not say *which* probes ran, so two builds whose probe
+    #: derivation had drifted apart would agree on the tally while having
+    #: executed disjoint coordinates. Signing the trace's hash makes that
+    #: disagreement visible instead.
+    execution_trace_commitment: str
     schema_version: str = CERTIFICATE_SCHEMA
     determinism_profile: DeterminismProfile = DeterminismProfile.STRICT_REFERENCE
     candidate_generator_build: str = CANDIDATE_GENERATOR_BUILD
@@ -479,7 +510,12 @@ class RegistrationCertificate:
                 "a measured recovery mismatch cannot be certified: the chain's "
                 "declared invertibility is contradicted by its own round trip"
             )
-        for name in ("source_space_ref", "template_space_ref", "transform_chain_ref"):
+        for name in (
+            "source_space_ref",
+            "template_space_ref",
+            "transform_chain_ref",
+            "execution_trace_commitment",
+        ):
             object.__setattr__(
                 self, name, _content_reference(getattr(self, name), name)
             )
@@ -575,6 +611,7 @@ def certificate_bytes(certificate: RegistrationCertificate) -> bytes:
         + _string(certificate.loss_class.value)
         + _string(certificate.invertibility.value)
         + _inverse_consistency_bytes(certificate.inverse_consistency)
+        + _string(certificate.execution_trace_commitment)
         + _string(certificate.candidate_generator_build)
         + _string(certificate.reference_verifier_build)
         + _sequence(_string(warning) for warning in certificate.warnings)
@@ -630,6 +667,7 @@ def read_certificate(payload: bytes) -> RegistrationCertificate:
     loss_class = _read_enum(reader, LossClass, "loss_class")
     invertibility = _read_enum(reader, Invertibility, "invertibility")
     inverse_consistency = _read_inverse_consistency(reader)
+    execution_trace_commitment = reader.string()
     candidate_generator_build = reader.string()
     reference_verifier_build = reader.string()
     warnings = tuple(
@@ -651,6 +689,7 @@ def read_certificate(payload: bytes) -> RegistrationCertificate:
             loss_class=loss_class,
             invertibility=invertibility,
             inverse_consistency=inverse_consistency,
+            execution_trace_commitment=execution_trace_commitment,
             schema_version=schema_version,
             determinism_profile=determinism_profile,
             candidate_generator_build=candidate_generator_build,
@@ -850,7 +889,11 @@ def issue_registration_certificate(
     # in could pass in a result it did not take, which is the shape of claim
     # `docs/cne/CLAIMS.md` §2.2 forbids. The probe set is derived from the chain,
     # so there is nothing here for an issuer to choose either.
-    measurement = measure_inverse_consistency(chain)
+    # One execution, both products. Taking the trace and then re-measuring would
+    # be two runs that could in principle differ; `summary()` tallies exactly the
+    # executions the commitment covers.
+    trace = execute_probes(chain)
+    measurement = trace.summary()
     if measurement.code is InverseConsistencyCode.RECOVERY_MISMATCH:
         raise CertificateError(
             "the chain declares EXACT invertibility but its own inverse did not "
@@ -868,6 +911,7 @@ def issue_registration_certificate(
         loss_class=chain.loss_class,
         invertibility=chain.invertibility,
         inverse_consistency=measurement,
+        execution_trace_commitment=trace.commitment(),
         warnings=tuple(warnings),
     )
     payload = certificate_bytes(certificate)
@@ -886,6 +930,7 @@ def verify_registration_certificate(
     expected_certificate_ref: str | None = None,
     replay_cases: Iterable[tuple[tuple[object, ...], tuple[object, ...]]] = (),
     maximum_loss_class: LossClass | None = None,
+    declarations: RegistrationDeclarations | None = None,
 ) -> CertificateReport:
     """Check a certificate against a key the caller pinned out of band.
 
@@ -997,6 +1042,11 @@ def verify_registration_certificate(
         # count: an issuer claiming a clean round trip over probes it never ran
         # disagrees here with the verifier's own run and is refused.
         signed.certificate.inverse_consistency,
+        # And the *executions* behind that count, not only its totals. Equal
+        # tallies over disjoint probe sets compare equal; equal commitments do
+        # not, so a probe derivation that drifted between the two builds is
+        # refused here rather than agreed with.
+        signed.certificate.execution_trace_commitment,
     )
     replayed = (
         replay.source_space_ref,
@@ -1004,6 +1054,7 @@ def verify_registration_certificate(
         replay.loss_class,
         replay.invertibility,
         replay.inverse_consistency,
+        replay.execution_trace_commitment,
     )
     # The declared class is checked against the replayed *shape* by the same rule
     # the report side uses, rather than against a fixed tuple: a composed chain's
@@ -1041,6 +1092,7 @@ def verify_registration_certificate(
             "loss_class",
             "invertibility",
             "inverse_consistency",
+            "execution_trace_commitment",
         )
         evidence = [
             f"{name}: declared={declared_value!r} replayed={replayed_value!r}"
@@ -1063,14 +1115,124 @@ def verify_registration_certificate(
             evidence=tuple(evidence),
         )
 
+    # Everything above establishes that the chain is sound and is the one this
+    # certificate is about. None of it asks the question this last check asks:
+    # would registering these two spaces ever have produced this chain? See
+    # ADR-0019 -- a chain over an ambiguous correspondence maps every coordinate,
+    # inverts on every probe and replays clean, because each of those asks whether
+    # the chain agrees with itself, and it does.
+    registration_problem = _registration_refusal(
+        signed.certificate, spaces=spaces, declarations=declarations
+    )
+    if registration_problem is not None:
+        constraint, explanation, evidence = registration_problem
+        return _refusal(
+            CertificateCode.REGISTRATION_MISMATCH,
+            explanation,
+            failing_constraint=constraint,
+            certificate_ref=actual_ref,
+            key_id=pinned_key_id,
+            replay=replay,
+            evidence=evidence,
+        )
+
     return CertificateReport(
         code=CertificateCode.CERTIFICATE_VERIFIED,
         explanation=(
             "the certificate is canonical, hashes to its reference, is signed by "
-            "the pinned key, and its committed chain replayed to every claimed "
-            "source coordinate"
+            "the pinned key, its committed chain replayed to every claimed "
+            "source coordinate, and re-running the registration ladder on the "
+            "two spaces it names produces that same chain"
         ),
         certificate_ref=actual_ref,
         key_id=pinned_key_id,
         replay=replay,
     )
+
+
+def _registration_refusal(
+    certificate: RegistrationCertificate,
+    *,
+    spaces: Mapping[str, CoordinateSpace],
+    declarations: RegistrationDeclarations | None,
+) -> tuple[str, str, tuple[str, ...]] | None:
+    """Re-run registration and compare, or None if it produces this certificate.
+
+    Returns the failing constraint separately from the explanation so a caller
+    that could not re-run at all is told that, rather than handed a mismatch
+    verdict over a check that never ran. A guard that cannot say why it fired is
+    a guard nobody can act on.
+    """
+
+    if declarations is None:
+        declarations = RegistrationDeclarations()
+    elif type(declarations) is not RegistrationDeclarations:
+        raise TypeError("declarations must be a RegistrationDeclarations")
+
+    source_space = spaces.get(certificate.source_space_ref)
+    template_space = spaces.get(certificate.template_space_ref)
+    if source_space is None or template_space is None:
+        # Unreachable by ordering: the replay decoded the chain from this same
+        # table and its ends were just compared against these two references, so
+        # both are present by the time control arrives here. Reported rather than
+        # asserted because the alternative is a KeyError out of a verifier.
+        missing = [
+            ref
+            for ref, value in (
+                (certificate.source_space_ref, source_space),
+                (certificate.template_space_ref, template_space),
+            )
+            if value is None
+        ]
+        return (
+            "registration_inputs",
+            "registration could not be re-run because a coordinate space the "
+            "certificate names was not supplied; nothing was compared",
+            tuple(f"missing:{ref}" for ref in missing),
+        )
+
+    rerun = analyze_exact_compatibility(
+        source_space=source_space,
+        target_space=template_space,
+        **declarations.as_arguments(),
+    )
+
+    if not rerun.compatible:
+        return (
+            "registration_outcome",
+            "registering these two coordinate spaces produces no correspondence "
+            f"at all: the ladder reaches {rerun.code.value}",
+            (
+                f"certificate_code:{certificate.compatibility_code.value}",
+                f"re_derived_code:{rerun.code.value}",
+                f"failing_constraint:{rerun.failing_constraint}",
+            ),
+        )
+    if rerun.code is not certificate.compatibility_code:
+        return (
+            "registration_outcome",
+            "registering these two coordinate spaces produces "
+            f"{rerun.code.value}, not the {certificate.compatibility_code.value} "
+            "this certificate declares",
+            (
+                f"certificate_code:{certificate.compatibility_code.value}",
+                f"re_derived_code:{rerun.code.value}",
+            ),
+        )
+
+    # The strongest form of the comparison, and the reason a class check alone is
+    # not enough: two different chains can carry the same correspondence class.
+    # The chain reference is what the certificate actually binds, so that is what
+    # the re-run is held to.
+    derived_chain_ref = transform_chain_ref(rerun.transform)
+    if not hmac.compare_digest(derived_chain_ref, certificate.transform_chain_ref):
+        return (
+            "registration_output",
+            "registering these two coordinate spaces produces a different chain "
+            "than the one this certificate commits to",
+            (
+                f"certificate_chain:{certificate.transform_chain_ref}",
+                f"re_derived_chain:{derived_chain_ref}",
+            ),
+        )
+    return None

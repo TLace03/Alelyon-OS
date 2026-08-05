@@ -38,10 +38,10 @@ invariant.
 
 It is **not** authentication, and three separate things stop it short:
 
-* `cwd` is where a session **started**, not where it is editing. A session that
-  launches in the primary checkout and then works in a worktree it created still
-  records the primary checkout here. This *over-approximates* occupancy — it
-  names more sessions than are really in the directory, never fewer.
+* the `cwd` a record states is **one reading of a field that changes**, and this
+  module reads the first one it finds. See "Two answers" below — the honest
+  summary is that a stated `cwd` over-approximates and a *head-read* one can
+  also under-approximate, which is why it is no longer the only signal.
 * liveness is inferred from file modification time. A crashed session leaves a
   file that stops being written exactly like an idle one does.
 * it is Claude Code's convention alone. Codex, Copilot, Cursor and Antigravity
@@ -52,6 +52,49 @@ An over-approximate answer is still the right trade here, and the asymmetry is
 the reason: a mailbox that reaches you along with somebody else is a working
 mailbox, while no mailbox reaches nobody. The over-approximation is stated at
 every read so a caller cannot mistake it for occupancy.
+
+Two answers, because the harness writes two things down
+-------------------------------------------------------
+A transcript states a `cwd`, and the harness also *files* the transcript in a
+project directory whose name is that directory with every non-alphanumeric
+character replaced by a dash. Those are different facts, and this module used
+only the first.
+
+The `cwd` field is written on **every record, not once**, and it changes as the
+session's working directory changes. Reading only the head therefore does not
+report "where the session started" as a deliberate simplification — it reports
+*the oldest surviving reading of a moving value*, which is a different and worse
+thing. Measured on this machine at `9533bde`: **4 of 9 project directories name
+a directory that no transcript inside them states a `cwd` for.** All four state
+the primary checkout, because all four sessions were relocated into a worktree
+after their first record was written.
+
+The consequence was not an over-approximation. It was a **hole**: each of those
+worktrees derived *zero* sessions, so `tools/fleet.py inbox` refused there, and
+`--session` fell back to free text in exactly the directories where a closed
+vocabulary was wanted. The claim this module used to make — "names more sessions
+than are really in the directory, never fewer" — was false for the directory a
+session moved *to*. It held only for the directory it moved *from*.
+
+So filing is read as well, and the rule where they disagree is:
+
+    the directory the harness FILED the transcript under is where the session
+    is; the `cwd` a record states is where it has been.
+
+Filing wins on disagreement because it is the harness's current answer while the
+head `cwd` is its stalest one. Where filing and the stated `cwd` agree — every
+session that never moved — nothing changes at all, which is why this is additive
+rather than a reinterpretation of existing records.
+
+The slug is **not invertible**: a directory named `.claude` and one named
+`-claude` beside it collapse to the same dashes, so a directory name cannot be
+turned back into a path. It does not
+need to be. Encoding is total even where decoding is ambiguous, so the target
+directory is encoded and the two names compared — and because every separator
+maps to a dash, the comparison is indifferent to `/` versus `\\`. Two genuinely
+different directories *can* collide onto one slug; that is an over-approximation
+of the kind named above, is labelled in the evidence string, and is preferred to
+the hole it replaces.
 
 Ambiguity is refused by name, not resolved by guessing
 ------------------------------------------------------
@@ -84,10 +127,11 @@ creates nothing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+import re
 import time
 
 #: Returned wherever a session could not be derived. A value, never a blank —
@@ -118,6 +162,14 @@ MAX_HEAD_LINES = 50
 #: whole would pull an arbitrary amount of conversation into memory. Skipped.
 MAX_LINE_BYTES = 1 << 20
 
+#: Every character Claude Code replaces with a dash when it names the project
+#: directory a transcript is filed in. Deliberately the whole complement of
+#: `[A-Za-z0-9]` rather than a list of separators: the drive colon, the path
+#: separator, the dot of `.claude` and the dashes already in a directory name
+#: are all mapped the same way, which is exactly why the result cannot be
+#: decoded back into a path.
+_NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
+
 #: Minutes since a transcript was last written, within which its session is
 #: treated as live. Not a proof of liveness and not presented as one — see
 #: `LIMITS`. Thirty minutes is long enough to span a model's thinking time and
@@ -126,10 +178,17 @@ MAX_LINE_BYTES = 1 << 20
 DEFAULT_ACTIVE_MINUTES = 30.0
 
 LIMITS: tuple[str, ...] = (
-    "This derives where a session STARTED, not where it is editing. A session "
-    "that launched in this checkout and then worked in a worktree it created is "
-    "still counted here, so the answer over-approximates occupancy: it names "
-    "more sessions than are really in the directory, never fewer.",
+    "A session is counted for the directory its transcript is FILED under, and "
+    "for any directory a record in it states as the working directory. Both "
+    "over-approximate occupancy - a session that started here and moved on is "
+    "still named here, and two directories can collide onto one project-folder "
+    "name - so this names more sessions than are really in the directory. It "
+    "is not a claim that they are editing it.",
+    "The directory a transcript is filed under is read as the session's "
+    "current location and the cwd it states as a place it has been, because "
+    "the cwd field is written on every record and only the first is read. "
+    "Where the two disagree the filing wins, which is a rule about which "
+    "reading is FRESHER and not about which is true.",
     "Liveness is inferred from a file's modification time. A crashed session "
     "leaves a transcript that stopped being written exactly like an idle one, "
     "so 'active' means 'written to recently' and nothing stronger.",
@@ -161,6 +220,25 @@ class SessionRecord:
     last_written_at: int | None
     #: The rule that produced this record, so a reader can disagree with it.
     evidence: str
+    #: Name of the project directory the harness filed this transcript in — a
+    #: directory path with every non-alphanumeric character replaced by a dash.
+    #: Not a path and not convertible to one; compare with `filed_under()`.
+    #: Empty for a record built by a caller rather than read off disk, which is
+    #: why the filing rule never fires on one.
+    filed_under: str = ""
+
+    @property
+    def moved(self) -> bool:
+        """Whether the harness filed this somewhere the record does not state.
+
+        True exactly for a session that was relocated after its first record was
+        written — the case that used to leave a worktree with no derived session
+        at all. False where nothing is filed and False where the two agree, so
+        it is never true merely because the answer is unknown.
+        """
+        if not self.filed_under or not self.cwd:
+            return False
+        return not filed_under(self.cwd, self.filed_under)
 
     def idle_minutes(self, now: float | None = None) -> float | None:
         """Minutes since the transcript was last written, or None if unknown."""
@@ -178,6 +256,43 @@ class SessionRecord:
         """
         idle = self.idle_minutes(now)
         return idle is not None and idle <= within_minutes
+
+
+def project_slug(directory: str | Path) -> str:
+    """A directory as Claude Code names the project folder it files it under.
+
+    Every non-alphanumeric character becomes a dash, so this is **lossy and one
+    way**: `c:\\repo\\.claude` and `c:\\repo\\-claude` produce one name and
+    cannot be told apart afterwards. That is why nothing here tries to turn a
+    folder name back into a path, and why a caller compares encodings instead.
+
+    Separators do not survive, which makes the comparison indifferent to `/`
+    versus `\\` for free rather than by normalising first.
+    """
+    if not directory:
+        return ""
+    try:
+        text = str(Path(directory).resolve())
+    except OSError:
+        text = str(directory)
+    return _NON_ALNUM.sub("-", text)
+
+
+def filed_under(directory: str | Path, project: str) -> bool:
+    """Whether `project` is the folder name the harness would file `directory` in.
+
+    Case-insensitive for the same reason `same_directory` is: the drive letter
+    is recorded in whichever case the process was launched with, and it survives
+    into the folder name. Both the resolved and the literal spelling are tried,
+    because a directory that no longer exists cannot be resolved and must still
+    be comparable.
+    """
+    if not directory or not project:
+        return False
+    wanted = project.casefold()
+    if project_slug(directory).casefold() == wanted:
+        return True
+    return _NON_ALNUM.sub("-", str(directory)).casefold() == wanted
 
 
 def same_directory(left: str, right: str) -> bool:
@@ -266,8 +381,41 @@ def _records_in_dir(directory: Path) -> list[SessionRecord]:
             last_written_at=written,
             evidence=("Claude Code transcript index; the harness wrote the "
                       "filename and the cwd field, not the agent" + note),
+            filed_under=directory.name,
         ))
     return out
+
+
+#: Why a record was counted for a directory. Kept apart because they are not
+#: equally strong and a reader must be able to tell which one fired.
+_BY_FILING = ("Claude Code filed this session's transcript in the project "
+              "folder for this directory, which is where the harness "
+              "currently considers the session to be working; the harness "
+              "chose that folder name, not the agent")
+_BY_MOVE = ("Claude Code filed this session's transcript under a DIFFERENT "
+            "directory, so the cwd this record states is a place the session "
+            "has been and not where it is; the harness wrote both, not the "
+            "agent")
+
+
+def _member(record: SessionRecord, target: str) -> tuple[bool, str]:
+    """Whether `record` counts for `target`, and the rule that decided it.
+
+    Three cases, and the third is the one this function exists for:
+
+    * the transcript is filed under `target` — counted, on the harness's own
+      current answer;
+    * it is filed elsewhere, or nowhere, and *agrees* with the `cwd` it states —
+      the original rule, unchanged;
+    * it is filed elsewhere and DISAGREES with the `cwd` it states — the session
+      moved, so the stated `cwd` no longer places it. Without this the session
+      is counted for a directory it left and for none it went to.
+    """
+    if record.filed_under and filed_under(target, record.filed_under):
+        return True, _BY_FILING
+    if record.moved:
+        return False, _BY_MOVE
+    return same_directory(record.cwd, target), record.evidence
 
 
 def sessions_in(directory: str | Path, *,
@@ -297,12 +445,16 @@ def sessions_in(directory: str | Path, *,
     matches: list[SessionRecord] = []
     for project in project_dirs:
         for record in _records_in_dir(project):
-            if not same_directory(record.cwd, target):
+            counts, rule = _member(record, target)
+            if not counts:
                 continue
             if active_within_minutes is not None and not record.active(
                     within_minutes=active_within_minutes, now=now):
                 continue
-            matches.append(record)
+            # The evidence travels with the record, because two records in one
+            # answer can have been placed here by different rules.
+            matches.append(record if rule == record.evidence
+                           else replace(record, evidence=rule))
 
     # Most recently written first; an unknown write time sorts last rather than
     # sorting as 1970 and displacing a real answer.

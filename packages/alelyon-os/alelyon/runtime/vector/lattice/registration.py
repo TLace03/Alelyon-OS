@@ -374,6 +374,60 @@ class DeclaredLabelReindex:
 
 
 @dataclass(frozen=True, slots=True)
+class RegistrationDeclarations:
+    """Everything a caller declared when it ran the ladder, as one value.
+
+    `analyze_exact_compatibility` takes these as six separate keyword arguments,
+    which is what reads well at a registration site. A *verifier* has a different
+    problem: ADR-0019 has it re-run the ladder to check that the chain a
+    certificate names is the one registering those two spaces produces, and to do
+    that it must reproduce the issuer's run — which means carrying the whole
+    declaration set as one thing, and being able to say "none were declared" in a
+    single value.
+
+    Nothing is inferred here. A declaration the verifier was not given is a
+    declaration the ladder does not see, so a certificate issued under
+    declarations and checked without them re-derives a different result and is
+    refused. That is the honest answer: a verifier that was not told what the
+    issuer relaxed cannot confirm the registration.
+    """
+
+    unit_conversions: tuple[DeclaredUnitConversion, ...] = ()
+    timezone_conversions: tuple[DeclaredTimezoneConversion, ...] = ()
+    label_reindexes: tuple[DeclaredLabelReindex, ...] = ()
+    orientation_flips: tuple[DeclaredOrientationFlip, ...] = ()
+    calendar_aliases: tuple[DeclaredCalendarAlias, ...] = ()
+    reference_shifts: tuple[DeclaredReferenceShift, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, expected in (
+            ("unit_conversions", DeclaredUnitConversion),
+            ("timezone_conversions", DeclaredTimezoneConversion),
+            ("label_reindexes", DeclaredLabelReindex),
+            ("orientation_flips", DeclaredOrientationFlip),
+            ("calendar_aliases", DeclaredCalendarAlias),
+            ("reference_shifts", DeclaredReferenceShift),
+        ):
+            items = tuple(getattr(self, name))
+            for item in items:
+                if type(item) is not expected:
+                    raise TypeError(f"{name} must hold {expected.__name__} values")
+            object.__setattr__(self, name, items)
+
+    def as_arguments(self) -> dict[str, tuple[object, ...]]:
+        """The keyword arguments `analyze_exact_compatibility` expects."""
+
+        return {
+            "unit_conversions": self.unit_conversions,
+            "timezone_conversions": self.timezone_conversions,
+            "label_reindexes": self.label_reindexes,
+            "orientation_flips": self.orientation_flips,
+            "calendar_aliases": self.calendar_aliases,
+            "reference_shifts": self.reference_shifts,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CompatibilityReport:
     """A self-consistent exact result or a structured refusal."""
 

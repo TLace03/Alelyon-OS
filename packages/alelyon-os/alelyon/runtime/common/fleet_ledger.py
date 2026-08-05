@@ -159,6 +159,9 @@ SCORE_LIMITS: tuple[str, ...] = (
     "The ratchet guarantees the standing never moves to a candidate that "
     "scored worse on the evidence available. It cannot guarantee the standing "
     "is the best model, because a model nobody ran has no evidence at all.",
+    "A career's pooled score mixes coordinates. Work kinds are not one scale, "
+    "so a model that mostly ran mechanical jobs and one that mostly refereed "
+    "designs are not comparable on it - only their per-coordinate cards are.",
     "Nothing here dispatches. A standing is a recommendation a caller may read "
     "before naming a model, and a session is free to ignore it.",
 )
@@ -293,6 +296,56 @@ class Scorecard:
     @property
     def completion(self) -> float:
         return self.settled / self.runs if self.runs else 0.0
+
+
+@dataclass(frozen=True)
+class Career:
+    """Everything one model has done across the whole layer space.
+
+    A `Scorecard` answers "how did this model do at this coordinate"; a career
+    answers "what has this model done at all", which is the question a reader
+    asks first and which no reader could ask before. It is an aggregate over
+    coordinates and therefore weaker than its parts: `mean_score` pools runs
+    from work of different kinds, so a model that ran mostly cheap mechanical
+    jobs is not comparable on it to one that ran mostly design reviews. The
+    per-coordinate cards are carried alongside precisely so the pooled number
+    never has to be the only thing on screen.
+    """
+
+    model: str
+    runs: int
+    settled: int
+    contested: int
+    mean_score: float
+    mean_tokens: float
+    last_at: int
+    landed: int
+    abandoned: int
+    #: Every coordinate this model has a run at, best-scoring first.
+    cards: tuple[Scorecard, ...] = ()
+    #: Coordinates it currently holds, as `(layer, work_kind)`.
+    holds: tuple[tuple[str, str], ...] = ()
+    #: What its NAME declares it is, and what the ledger has MEASURED it into.
+    #: Kept apart because the first is a dated convention and the second is a
+    #: record of runs — collapsing them would hide which one is speaking.
+    declared_class: str = ""
+    measured_class: str | None = None
+
+    @property
+    def undecided(self) -> int:
+        """Runs whose branch has told us nothing yet. Named, never implied."""
+        return max(0, self.runs - self.landed - self.abandoned)
+
+    @property
+    def completion(self) -> float:
+        return self.settled / self.runs if self.runs else 0.0
+
+    @property
+    def layers(self) -> tuple[str, ...]:
+        """Layers it currently holds a standing at, highest rank first."""
+        ranked = sorted({layer for layer, _kind in self.holds},
+                        key=lambda key: getattr(H.layer(key), "rank", 99))
+        return tuple(ranked)
 
 
 @dataclass(frozen=True)
@@ -490,6 +543,94 @@ class FleetLedger:
                              for m in models) if c is not None]
         return tuple(sorted(cards, key=lambda c: (-c.mean_score, c.model)))
 
+    def runs(self, *, layer: str | None = None, work_kind: str | None = None,
+             model: str | None = None, limit: int = 50) -> tuple[Run, ...]:
+        """The individual runs behind the scores, newest first.
+
+        Every other reader here aggregates, and an aggregate is where a wrong
+        number is hardest to disbelieve: a coordinate reading 0.448 over 12 runs
+        gives a reader nothing to check it against. These are the rows those
+        figures were computed from, so the evidence can be looked at rather than
+        taken.
+
+        The filters are three fixed columns and the values are bound, never
+        interpolated — the vocabulary a caller may filter on is closed by this
+        signature rather than by what a caller happens to pass.
+        """
+        clauses = ["space=?"]
+        values: list[object] = [H.LAYER_SPACE_VERSION]
+        for column, value in (("layer", layer), ("work_kind", work_kind),
+                              ("model", model)):
+            if value:
+                clauses.append(f"{column}=?")
+                values.append(value)
+        values.append(max(0, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM runs WHERE {' AND '.join(clauses)}
+                     ORDER BY at DESC, run_id LIMIT ?""", values).fetchall()
+        return tuple(Run(
+            run_id=r["run_id"], at=int(r["at"]), layer=r["layer"],
+            work_kind=r["work_kind"], model=r["model"], agent_id=r["agent_id"],
+            fleet_id=r["fleet_id"], session_id=r["session_id"],
+            settled=bool(r["settled"]), turns=int(r["turns"]),
+            out_tokens=int(r["out_tokens"]),
+            seconds=None if r["seconds"] is None else int(r["seconds"]),
+            contested=bool(r["contested"]), branch=r["branch"] or "",
+            cwd=r["cwd"] or "", landed=r["landed"] or O.UNKNOWN) for r in rows)
+
+    def careers(self) -> tuple[Career, ...]:
+        """What every model has done across the space, most-run first.
+
+        The ledger is keyed on coordinates, so the model is the one axis it
+        could not be read along: answering "what has this model done, and where
+        does it hold anything" meant walking every coordinate by hand, and a
+        caller doing that in a panel would be computing a fact rather than
+        drawing one.
+
+        Ordered by runs and not by score, deliberately. Sorting models by a
+        pooled mean would present a ranking the number cannot support — the
+        runs behind it are of different kinds — whereas how much a model has
+        actually done here is a fact about the record itself.
+        """
+        by_model: dict[str, list[Scorecard]] = {}
+        current: dict[str, list[tuple[str, str]]] = {}
+        for layer_key, kind in self.coordinates():
+            # `candidates` rather than a scorecard per (model, coordinate) pair:
+            # one query per coordinate for the models that actually ran there,
+            # instead of the full product against models that never did.
+            for card in self.candidates(layer_key, kind):
+                by_model.setdefault(card.model, []).append(card)
+            standing = self.standing(layer_key, kind)
+            if standing is not None:
+                current.setdefault(standing.model, []).append((layer_key, kind))
+
+        out: list[Career] = []
+        for model, found in by_model.items():
+            cards = tuple(sorted(
+                found, key=lambda c: (-c.mean_score, c.layer, c.work_kind)))
+            runs = sum(c.runs for c in cards)
+            declared, _evidence = H.entry_class(model)
+            out.append(Career(
+                model=model,
+                runs=runs,
+                settled=sum(c.settled for c in cards),
+                contested=sum(c.contested for c in cards),
+                mean_score=round(
+                    sum(c.mean_score * c.runs for c in cards) / runs, 6)
+                if runs else 0.0,
+                mean_tokens=round(
+                    sum(c.mean_tokens * c.runs for c in cards) / runs, 1)
+                if runs else 0.0,
+                last_at=max(c.last_at for c in cards),
+                landed=sum(c.landed for c in cards),
+                abandoned=sum(c.abandoned for c in cards),
+                cards=cards,
+                holds=tuple(current.get(model, ())),
+                declared_class=declared,
+                measured_class=self.measured_class(model)))
+        return tuple(sorted(out, key=lambda c: (-c.runs, c.model)))
+
     def standing(self, layer: str, work_kind: str) -> Standing | None:
         """The current standing, or None where nothing has been promoted."""
         with self._connect() as conn:
@@ -529,14 +670,65 @@ class FleetLedger:
         return tuple((r["layer"], r["work_kind"]) for r in rows)
 
     # ── the ratchet ──────────────────────────────────────────────────────────
+    def assess(self, layer: str, work_kind: str, model: str) -> Verdict:
+        """What `propose()` would answer, **without writing anything**.
+
+        Every rule the gate applies lives here and `propose()` calls it, so
+        there is one statement of "may this model take this coordinate" rather
+        than two that can drift. That direction matters: the copy a reader
+        consults must be the copy the ratchet obeys, or a surface showing the
+        distance to the bar would be describing a gate nobody passes through.
+
+        It exists because asking the question used to require answering it. A
+        panel wanting to show *why* a candidate does not hold a coordinate had
+        only `propose()`, which appends a standing when the answer is yes — so
+        reading the gate could promote a model, and the only safe surface was
+        one that did not ask. An accepted verdict here is a statement about the
+        record as it stands; nothing is appended, and the standing does not
+        move until somebody calls `propose()`.
+
+        It takes no clock, and that is a property of the gate rather than an
+        omission: every condition is decided against the incumbent's own
+        `set_at`, so the answer does not depend on when it is asked. Only the
+        append `propose()` performs needs a moment.
+        """
+        return self._assess(layer, work_kind, model)
+
     def propose(self, layer: str, work_kind: str, model: str, *,
                 now: int | None = None) -> Verdict:
         """Offer `model` as the standing for a coordinate. Usually refuses.
 
         Every refusal names the condition and the number that failed it, so a
-        caller can act on the answer rather than guess at it.
+        caller can act on the answer rather than guess at it. The decision is
+        `assess()`'s; what this adds is the append that makes it durable.
         """
         moment = int(now if now is not None else time.time())
+        verdict = self._assess(layer, work_kind, model)
+        if not verdict.accepted:
+            return verdict
+
+        card, incumbent = verdict.challenger, verdict.incumbent
+        assert card is not None      # an accepted verdict always carries one
+        if incumbent is not None and incumbent.model == model:
+            # Re-affirming an incumbent is not a promotion. It is recorded so
+            # the standing carries a current score rather than a stale one, and
+            # it can still be DEMOTED later.
+            self._append(layer, work_kind, model, LIVE, card.mean_score,
+                         card.runs, moment, "incumbent re-affirmed on later runs")
+            return verdict
+        if incumbent is not None:
+            self._append(layer, work_kind, incumbent.model, DEMOTED,
+                         incumbent.score, incumbent.runs, moment,
+                         f"beaten by {model} at {card.mean_score:.3f}")
+        self._append(layer, work_kind, model, LIVE, card.mean_score, card.runs,
+                     moment,
+                     (f"beat {incumbent.model} by "
+                      f"{card.mean_score - incumbent.score:.3f}" if incumbent
+                      else f"first standing at this coordinate over "
+                           f"{card.runs} run(s)"))
+        return verdict
+
+    def _assess(self, layer: str, work_kind: str, model: str) -> Verdict:
         target = H.layer(layer)
         if target is None or work_kind not in H.WORK_KINDS:
             return Verdict(False, NOT_A_COORDINATE,
@@ -576,12 +768,6 @@ class FleetLedger:
 
         if incumbent is not None:
             if incumbent.model == model:
-                # Re-affirming an incumbent is not a promotion. It is recorded
-                # so the standing carries a current score rather than a stale
-                # one, and it can still be DEMOTED below.
-                self._append(layer, work_kind, model, LIVE, card.mean_score,
-                             card.runs, moment,
-                             "incumbent re-affirmed on later runs")
                 return Verdict(True, ACCEPTED,
                                f"{model} remains the standing at "
                                f"{card.mean_score:.3f} over {card.runs} later "
@@ -610,17 +796,7 @@ class FleetLedger:
                     f"{MARGIN_FRACTION:.0%} of the {headroom:.3f} still "
                     f"available above the incumbent",
                     challenger=card, incumbent=incumbent)
-            self._append(layer, work_kind, incumbent.model, DEMOTED,
-                         incumbent.score, incumbent.runs, moment,
-                         f"beaten by {model} at {card.mean_score:.3f}")
 
-        state = LIVE
-        self._append(layer, work_kind, model, state, card.mean_score, card.runs,
-                     moment,
-                     (f"beat {incumbent.model} by "
-                      f"{card.mean_score - incumbent.score:.3f}" if incumbent
-                      else f"first standing at this coordinate over "
-                           f"{card.runs} run(s)"))
         return Verdict(True, ACCEPTED,
                        f"{model} is now the standing at {layer}/{work_kind} "
                        f"with {card.mean_score:.3f} over {card.runs} run(s)",
@@ -889,7 +1065,7 @@ def _is_contested(touched, at: int, always: set[str],
 
 __all__ = [
     "ABANDONED_PENALTY",
-    "ACCEPTED", "BELOW_FLOOR", "DEMOTED", "FleetLedger",
+    "ACCEPTED", "BELOW_FLOOR", "Career", "DEMOTED", "FleetLedger",
     "LEDGER_SCHEMA_VERSION", "LIVE", "MARGIN_FRACTION", "MAX_SCORE",
     "MIN_RUNS", "NOT_A_COORDINATE", "SCORE_CEILING",
     "NOT_HELD_OUT", "NO_MARGIN", "OBSERVATION", "PAPER", "Run", "SCORE_LIMITS",

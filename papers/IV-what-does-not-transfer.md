@@ -361,11 +361,38 @@ this series.
 
 ## Appendix A — Reproduction
 
-Experiment scripts and full result tables are recorded in the research ledger at
-`docs/RESEARCH.md`, under the sections EXP-1, EXP-2, EXP-LLM and EXP-KV, with
-figures under `docs/research/`. The certificate component that survived is
-implemented in `alelyon.runtime.vector.compute` and in the decomposed error
-budget described in Paper I.
+Full result tables are recorded in the research ledger at `docs/RESEARCH.md`,
+under the sections EXP-1, EXP-2, EXP-LLM and EXP-KV, with figures under
+`docs/research/`. The certificate component that survived is implemented in
+`alelyon.runtime.vector.compute` and in the decomposed error budget described in
+Paper I.
+
+> **Correction, 2026-08-05 — the scripts are not in the repository.** This
+> appendix previously read "Experiment scripts and full result tables are
+> recorded in the research ledger", which a reader would take as an offer to
+> re-run the experiments. The ledger records the result tables and the method in
+> detail, but it names the scripts as scratchpad files — the four exp1 pull,
+> analyze, wall and figure scripts, the two exp2 codec and check scripts, the two
+> exp_kv scripts, the instrumented qwen2 forward pass, and the tecert gate
+> benchmark — and **none of the ten is tracked here.** They were run inline,
+> outside version control, and are gone. They are described rather than named in
+> backticks on purpose: a backticked filename reads as an artifact you can open,
+> and these are not.
+>
+> What survives is therefore the ledger's prose: the construction of each panel,
+> the baselines, the bit accounting and the measured numbers, which are enough to
+> re-implement an experiment but not to re-run one. That is a materially weaker
+> claim than this appendix made, and the distinction is exactly the one the
+> program's own structural audit drew when it found a regression gate specified
+> against 78 fixtures that were never committed: **do not leave a reproduction
+> documented that the repository cannot execute.**
+>
+> This is recorded rather than repaired because reconstructing the scripts would
+> produce *new* code attributed to a 2026-07-19 measurement it did not produce.
+> The papers whose scripts ARE committed — Papers I and II, under
+> `research/papers/` — are unaffected, and
+> `tests/regression/test_paper_reproduction_claims.py` now fails if a paper names
+> a script the repository does not carry.
 
 **Environment.** Python 3.12; the canonical interpreter for this repository is
 `.venv312/Scripts/python.exe`. Experiments used NumPy for the decompositions and a

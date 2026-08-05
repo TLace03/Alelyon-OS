@@ -45,8 +45,23 @@ reproduced on both sides rather than caught, which is the same boundary
 catch is a chain whose declared invertibility is not borne out by its own
 implementation on its own coordinates.
 
-Pillar note: pure core. This module imports from `contracts` and `transforms`
-only -- no key, no signature, no filesystem, no clock.
+What the counts do *not* bind, and the trace does
+-------------------------------------------------
+A tally of "4 offered, 4 admitted, 4 recovered" says nothing about *which* four.
+Two builds whose probe derivation had drifted apart would each produce that
+tally, compare equal, and report a verified certificate while having executed
+disjoint sets of coordinates -- the verifier vouching for a round trip it never
+reproduced. `ExecutionTrace` closes that: it records every probe, its forward
+image and what came back, and the certificate carries the hash of that record as
+§25.1's `execution_trace_commitment`. The verifier regenerates the trace from
+the chain it decoded and compares commitments, so a derivation that drifted is a
+refusal rather than a silent agreement about a number.
+
+Pillar note: pure core. This module imports from `canonical`, `contracts` and
+`transforms` only -- no key, no signature, no filesystem, no clock. The
+`canonical` import is the encoding primitives the trace commitment hashes over,
+so a trace is committed by the same length-prefixed, domain-separated rules as
+every other record rather than by a second spelling of them.
 """
 from __future__ import annotations
 
@@ -54,6 +69,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as fixed_timezone
 from enum import Enum
 
+from alelyon.runtime.vector.lattice.canonical import (
+    CanonicalEncodingError,
+    _content_ref,
+    _domain,
+    _sequence,
+    _string,
+)
 from alelyon.runtime.vector.lattice.contracts import (
     CoordinateAxis,
     CoordinateSpace,
@@ -65,6 +87,10 @@ from alelyon.runtime.vector.lattice.transforms import (
     TransformChain,
 )
 
+
+#: Domain separator for the execution trace commitment. Its own domain, so a
+#: trace's bytes can never be read as any other record's.
+EXECUTION_TRACE_DOMAIN = "alelyon.lattice.canonical.execution-trace/0.1"
 
 #: The most probes one measurement will offer a chain. Round-robin construction
 #: already keeps the count at the widest single axis rather than the product of
@@ -289,7 +315,168 @@ def derive_probe_coordinates(
     )
 
 
-def measure_inverse_consistency(chain: TransformChain) -> InverseConsistency:
+class ProbeOutcome(str, Enum):
+    """What happened to one probe. Three outcomes, never folded together."""
+
+    #: The chain declined the coordinate. A statement about the probe's place in
+    #: the domain, not about inversion.
+    REFUSED = "REFUSED"
+    #: Applied forward and back, and the result was the probe.
+    RECOVERED = "RECOVERED"
+    #: Applied forward and back, and the result was something else.
+    MISMATCH = "MISMATCH"
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeExecution:
+    """One probe's journey: what went in, what came out of each direction.
+
+    A `REFUSED` probe has no images, and a probe that completed has both. The
+    constructor holds that shape rather than trusting the caller, because these
+    records are hashed into a commitment and a malformed one would commit
+    cleanly to a fiction.
+    """
+
+    probe: tuple[object, ...]
+    outcome: ProbeOutcome
+    forward: tuple[object, ...] | None = None
+    recovered: tuple[object, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.probe) is not tuple:
+            raise TypeError("probe must be a tuple")
+        if not isinstance(self.outcome, ProbeOutcome):
+            raise TypeError("outcome must be a ProbeOutcome")
+        completed = self.outcome is not ProbeOutcome.REFUSED
+        for name in ("forward", "recovered"):
+            image = getattr(self, name)
+            if completed and type(image) is not tuple:
+                raise ValueError(
+                    f"a {self.outcome.value} probe must carry its {name} image"
+                )
+            if not completed and image is not None:
+                raise ValueError("a REFUSED probe has no images to carry")
+        # The outcome is a claim about the recovered image, so it is checked
+        # against that image rather than accepted alongside it.
+        if completed and (self.recovered == self.probe) != (
+            self.outcome is ProbeOutcome.RECOVERED
+        ):
+            raise ValueError(
+                f"outcome {self.outcome.value} contradicts the recovered image"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionTrace:
+    """Every probe execution, in order: the §25.1 `execution_trace_commitment`.
+
+    `InverseConsistency` is a tally of this, and is *derived* from it by
+    `summary()` rather than counted alongside it. A count that could be computed
+    independently of the executions it describes could disagree with them; this
+    one cannot.
+    """
+
+    #: False only when the chain never declared itself invertible, in which case
+    #: nothing was run. Carried explicitly because "no probe was executed" is
+    #: true of that case and of a chain whose axes spell no value, and the two
+    #: must not commit to identical bytes.
+    declared_invertible: bool
+    executions: tuple[ProbeExecution, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.declared_invertible) is not bool:
+            raise TypeError("declared_invertible must be a bool")
+        if type(self.executions) is not tuple:
+            raise TypeError("executions must be a tuple")
+        if not all(type(item) is ProbeExecution for item in self.executions):
+            raise TypeError("every execution must be a ProbeExecution")
+        if not self.declared_invertible and self.executions:
+            raise ValueError(
+                "a chain that declared no invertibility was never run, so it "
+                "cannot carry executions"
+            )
+
+    def summary(self) -> InverseConsistency:
+        """Tally this trace. The only place `InverseConsistency` is built."""
+
+        if not self.declared_invertible:
+            return InverseConsistency(
+                InverseConsistencyCode.NOT_DECLARED_INVERTIBLE, 0, 0, 0
+            )
+        offered = len(self.executions)
+        admitted = sum(
+            1 for item in self.executions
+            if item.outcome is not ProbeOutcome.REFUSED
+        )
+        recovered = sum(
+            1 for item in self.executions
+            if item.outcome is ProbeOutcome.RECOVERED
+        )
+        return InverseConsistency(
+            _code_for(offered, admitted, recovered), offered, admitted, recovered
+        )
+
+    def commitment(self) -> str:
+        """The content reference these executions hash to."""
+
+        return _content_ref(execution_trace_bytes(self))
+
+
+def _coordinate_value_bytes(value: object) -> bytes:
+    """Encode one coordinate value, tagged by type.
+
+    The tag is what stops `1` and `"1"` -- distinct coordinates on distinct axis
+    kinds -- from committing to identical bytes.
+
+    A FLOAT axis is spelled with `float.hex()` rather than as a number, because
+    `canonical`'s encoding is deliberately free of floating-point fields. The
+    hex form is exact, locale-independent, round-trips through `float.fromhex`,
+    and keeps `-0.0` distinct from `0.0` -- which is right for a record of what
+    executed, whatever an equality test would later make of the two.
+    """
+
+    # `bool` is a subclass of `int`, so exact type checks rather than isinstance:
+    # True must not silently commit as 1.
+    if type(value) is int:
+        return b"i" + _string(str(value))
+    if type(value) is str:
+        return b"s" + _string(value)
+    if type(value) is float:
+        return b"f" + _string(value.hex())
+    raise CanonicalEncodingError(
+        f"a coordinate value of type {type(value).__name__!r} has no canonical "
+        f"spelling in an execution trace; add one deliberately rather than "
+        f"letting it hash by repr"
+    )
+
+
+def _coordinate_bytes(coordinate: tuple[object, ...] | None) -> bytes:
+    if coordinate is None:
+        return b"\x00"
+    return b"\x01" + _sequence(
+        _coordinate_value_bytes(value) for value in coordinate
+    )
+
+
+def execution_trace_bytes(trace: ExecutionTrace) -> bytes:
+    """Encode a trace for commitment. Order is content, not presentation."""
+
+    if type(trace) is not ExecutionTrace:
+        raise TypeError("trace must be an ExecutionTrace")
+    return (
+        _domain(EXECUTION_TRACE_DOMAIN)
+        + (b"\x01" if trace.declared_invertible else b"\x00")
+        + _sequence(
+            _string(item.outcome.value)
+            + _coordinate_bytes(item.probe)
+            + _coordinate_bytes(item.forward)
+            + _coordinate_bytes(item.recovered)
+            for item in trace.executions
+        )
+    )
+
+
+def execute_probes(chain: TransformChain) -> ExecutionTrace:
     """Round-trip every derived probe through the chain and its inverse.
 
     The chain maps target to source, so a probe is a *target* coordinate: it is
@@ -298,6 +485,8 @@ def measure_inverse_consistency(chain: TransformChain) -> InverseConsistency:
     coordinate tuple's own -- byte-identical strings, equal integers -- because
     an exact slice admits no tolerance and §25.1's bound here is a count, not a
     residual.
+
+    Returns the whole execution rather than its tally. The tally is `summary()`.
     """
 
     if type(chain) is not TransformChain:
@@ -308,29 +497,30 @@ def measure_inverse_consistency(chain: TransformChain) -> InverseConsistency:
         # rather than assumes. It fires when a non-exact transform arrives, so
         # whoever adds one decides what a bound over it would mean instead of
         # inheriting a round trip that silently measures the wrong thing.
-        return InverseConsistency(
-            InverseConsistencyCode.NOT_DECLARED_INVERTIBLE, 0, 0, 0
-        )
+        return ExecutionTrace(declared_invertible=False)
 
-    probes = derive_probe_coordinates(chain)
     inverse = chain.invert()
-    admitted = 0
-    recovered = 0
-    for probe in probes:
+    executions = []
+    for probe in derive_probe_coordinates(chain):
         try:
             forward = chain.apply_coordinates(probe)
             back = inverse.apply_coordinates(forward)
         except (TypeError, ValueError):
-            # The chain declined this coordinate. That is a statement about the
-            # probe's place in the domain, not about inversion, so it is counted
-            # apart from a recovery failure rather than folded into one.
+            executions.append(ProbeExecution(probe, ProbeOutcome.REFUSED))
             continue
-        admitted += 1
-        if back == probe:
-            recovered += 1
-    return InverseConsistency(
-        _code_for(len(probes), admitted, recovered),
-        len(probes),
-        admitted,
-        recovered,
-    )
+        outcome = (
+            ProbeOutcome.RECOVERED if back == probe else ProbeOutcome.MISMATCH
+        )
+        executions.append(ProbeExecution(probe, outcome, forward, back))
+    return ExecutionTrace(declared_invertible=True, executions=tuple(executions))
+
+
+def measure_inverse_consistency(chain: TransformChain) -> InverseConsistency:
+    """Tally the probe round trip. A summary of `execute_probes`.
+
+    Kept as the name the certificate and the replay report have always called,
+    and now a thin derivation: the counts and the committed trace are two views
+    of one execution rather than two executions that might differ.
+    """
+
+    return execute_probes(chain).summary()

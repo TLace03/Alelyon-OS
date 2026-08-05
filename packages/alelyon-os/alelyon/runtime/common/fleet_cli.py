@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from alelyon.runtime.common import cli_flags as CLI
 from alelyon.runtime.common import session_records as S
 from alelyon.runtime.common import worktree as W
 from alelyon.runtime.common import worktree_areas as A
@@ -813,20 +814,27 @@ _COMMANDS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # Accepted before AND after the subcommand. Declared on the top-level
+    # parser alone, `--session` after the subcommand is `unrecognized
+    # arguments`, which reads as "no such flag" rather than "wrong position".
+    leading, trailing = CLI.either_side((
+        (("--repo",), {"default": ".",
+                       "help": "the repository to observe (default: here). "
+                               "Its worktrees, its coordinate space, its "
+                               "tracked paths -- nothing is read from "
+                               "anywhere else"}),
+        (("--mainline",), {"default": "origin/main"}),
+        (("--session",), {"default": "",
+                          "help": "declare a session id when none can be "
+                                  "derived; recorded as self-reported"}),
+        (("--database",), {"default": "", "help": "override the store"}),
+    ))
     parser = argparse.ArgumentParser(
         prog="alelyon-fleet",
         description=__doc__,
+        parents=[leading],
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repo", default=".",
-                        help="the repository to observe (default: here). Its "
-                             "worktrees, its coordinate space, its tracked "
-                             "paths -- nothing is read from anywhere else")
-    parser.add_argument("--mainline", default="origin/main")
-    parser.add_argument("--session", default="",
-                        help="declare a session id when none can be derived; "
-                             "recorded as self-reported")
-    parser.add_argument("--database", default="", help="override the store")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = CLI.subcommands(parser, trailing, dest="command", required=True)
 
     sub.add_parser("status", help="who is working where")
     sub.add_parser("areas", help="the coordinate space in force, and its source")

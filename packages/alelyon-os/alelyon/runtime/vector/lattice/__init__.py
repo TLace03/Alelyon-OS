@@ -6,14 +6,17 @@ canonical byte encoding with content commitments, a replay checker that recovers
 a committed chain from those bytes and re-executes it, and a signed Registration
 Certificate for an exact correspondence.
 
-The certificate populates 14 of the specification's 34 fields and carries the
-other 20 as named absences inside its signed bytes. It does not read payloads,
+The certificate populates 15 of the specification's 34 fields and carries the
+other 19 as named absences inside its signed bytes. It does not read payloads,
 remap values, propagate uncertainty, or claim optimality, and a signature binds
-bytes to a key rather than establishing who holds it. Its one measured bound,
-`inverse_consistency`, is a count over a derived probe sample rather than a proof
-that the chain inverts everywhere. See
-`docs/architecture/adr/ADR-0001-lattice-foundation.md`, `ADR-0002` and `ADR-0004`
-for the frozen boundary.
+bytes to a key rather than establishing who holds it. Its measured bounds are
+`inverse_consistency`, a count over a derived probe sample rather than a proof
+that the chain inverts everywhere, and `execution_trace_commitment`, which binds
+that count to the probe executions it tallies. Verification additionally re-runs
+the registration ladder, so a chain registration would never have emitted is
+refused even when it replays cleanly. See
+`docs/architecture/adr/ADR-0001-lattice-foundation.md`, `ADR-0002`, `ADR-0004`,
+`ADR-0018` and `ADR-0019` for the frozen boundary.
 """
 
 from alelyon.runtime.vector.lattice.canonical import (
@@ -92,6 +95,7 @@ from alelyon.runtime.vector.lattice.registration import (
     DeclaredReferenceShift,
     DeclaredTimezoneConversion,
     DeclaredUnitConversion,
+    RegistrationDeclarations,
     analyze_exact_compatibility,
 )
 from alelyon.runtime.vector.lattice.timezone_audit import (
@@ -176,6 +180,7 @@ __all__ = [
     "ModelMorphometry",
     "Periodicity",
     "RegistrationCertificate",
+    "RegistrationDeclarations",
     "ReplayCode",
     "ReplayReport",
     "SPEC_CERTIFICATE_FIELDS",

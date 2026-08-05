@@ -5,6 +5,8 @@
     alelyon-ledger reconcile              # re-read the outcomes that were open
     alelyon-ledger promote                # offer the best candidate to the gate
     alelyon-ledger landings               # the branch picture, writing nothing
+    alelyon-ledger careers                # what each model has done, by model
+    alelyon-ledger gate                   # what the gate would say, writing nothing
 
 Why this exists
 ---------------
@@ -69,11 +71,16 @@ LIMITS: tuple[str, ...] = (
     "Nothing here runs unattended. Every command is a deliberate act, because a "
     "durable write made on a timer is a write nobody decided to make - and once "
     "the answer is stored, re-reading the branch graph is a durable write.",
-    "`record` marks no run CONTESTED. The deriver takes one flat set of paths, "
-    "which cannot express 'a finding published AFTER this run', and passing "
-    "every finding's paths would penalise the agent that FIXED a defect exactly "
-    "as hard as the one that caused it. Contestation is UNMEASURED here rather "
-    "than guessed at, and the score is completion and cost only.",
+    # This limit said `record` marks no run CONTESTED. That stopped being true
+    # when the timed pairs shipped (2026-08-05, FLEET-HIERARCHY.md section 6),
+    # and a limit that understates what a command does is as misleading as one
+    # that overstates it: a reader would have discounted a 0.4x penalty the
+    # score had actually applied.
+    "`record` marks a run CONTESTED when another session published a defect or "
+    "interface finding about a file it touched AFTERWARDS, which is the only "
+    "negative-quality signal available without a human. It is weak: it catches "
+    "a real defect and it also catches two sessions working near each other. "
+    "`--no-bus` turns it off, and the score is then completion and cost only.",
     "`record` asks git nothing, so every run it appends starts UNKNOWN. That is "
     "the absence of an answer, not a finding that the work went nowhere, and it "
     "is what `reconcile` exists to settle later.",
@@ -297,9 +304,98 @@ def _cmd_landings(args) -> int:
     return 0
 
 
+def _cmd_careers(args) -> int:
+    """What each model has done across the space. Writes nothing.
+
+    The terminal half of the Fleet hub's `careers` view. A picture that can only
+    be seen inside one desktop application is not a shipped capability — the
+    ledger travels in the `alelyon-os` wheel and the window does not.
+    """
+    ledger, path = _open_existing(args)
+    if ledger is None:
+        _no_ledger(path)
+        _limits()
+        return 0
+
+    careers = ledger.careers()
+    if not careers:
+        print("The ledger was read and holds no runs. Run `record` first.")
+        _limits()
+        return 0
+
+    print(f"Fleet careers — {path}")
+    print("  ordered by what was done, never by score: a pooled mean mixes "
+          "work kinds\n")
+    for career in careers:
+        klass = career.declared_class
+        if career.measured_class and career.measured_class != klass:
+            klass = f"{klass}/{career.measured_class}"
+        print(f"  {career.model:<28} {klass:<14} {career.runs:>4} run(s)  "
+              f"{career.mean_score:.3f} pooled  "
+              f"{career.landed} landed / {career.abandoned} abandoned / "
+              f"{career.undecided} undecided")
+        for card in career.cards:
+            held = " STANDING" if (card.layer, card.work_kind) in career.holds \
+                else ""
+            print(f"      {card.layer}/{card.work_kind:<20} "
+                  f"{card.mean_score:.3f} over {card.runs} run(s), "
+                  f"{card.settled} settled{held}")
+        if not career.holds:
+            print("      holds nothing — a run at a coordinate is not the "
+                  "standing at it")
+    _limits()
+    return 0
+
+
+def _cmd_gate(args) -> int:
+    """What the gate would say, without writing a standing.
+
+    `promote` answers the same question by acting on it. This is the reading
+    `FleetLedger.assess` makes possible: every refusal names the number that
+    failed, and an accepted verdict moves nothing.
+    """
+    ledger, path = _open_existing(args)
+    if ledger is None:
+        _no_ledger(path)
+        _limits()
+        return 0
+
+    coordinates = [c for c in ledger.coordinates()
+                   if (not args.layer or c[0] == args.layer)
+                   and (not args.work_kind or c[1] == args.work_kind)]
+    if not coordinates:
+        print("No coordinate has a run recorded against it"
+              + (" that matches that filter." if args.layer or args.work_kind
+                 else ". Run `record` first."))
+        _limits()
+        return 0
+
+    print(f"The gate as it stands — {path}")
+    print("  read with assess(); nothing below was written\n")
+    for layer_key, kind in coordinates:
+        standing = ledger.standing(layer_key, kind)
+        print(f"  {layer_key}/{kind}"
+              + (f"  held by {standing.model} at {standing.score:.3f}"
+                 if standing else "  no standing"))
+        for card in ledger.candidates(layer_key, kind):
+            if args.model and card.model != args.model:
+                continue
+            verdict = ledger.assess(layer_key, kind, card.model)
+            holder = standing is not None and standing.model == card.model
+            mark = ("HOLDS   " if holder else
+                    "WOULD   " if verdict.accepted else "refused ")
+            print(f"      {mark} {card.model:<28} {verdict.reason}")
+            print(f"               {verdict.detail}")
+    print("\nNothing here moved a standing. `promote` is what writes one, and "
+          "it is a deliberate act with the output in front of you.")
+    _limits()
+    return 0
+
+
 _COMMANDS = {
     "status": _cmd_status, "record": _cmd_record, "reconcile": _cmd_reconcile,
     "promote": _cmd_promote, "landings": _cmd_landings,
+    "careers": _cmd_careers, "gate": _cmd_gate,
 }
 
 
@@ -384,6 +480,15 @@ def build_parser() -> argparse.ArgumentParser:
                               "candidate at each coordinate")
 
     sub_parser("landings", help="the branch picture, writing nothing")
+
+    sub_parser("careers", help="what each model has done, writing nothing")
+
+    gate = sub_parser("gate", help="what the gate would say, writing nothing")
+    gate.add_argument("--layer", default="", choices=[""] + [
+        entry.key for entry in H.LAYERS])
+    gate.add_argument("--work-kind", default="")
+    gate.add_argument("--model", default="",
+                      help="ask about this model only")
     return parser
 
 
