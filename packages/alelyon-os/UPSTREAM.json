@@ -28,7 +28,7 @@
     "packages/alelyon-os/alelyon/runtime/common/toolpath.py": "8968ce807e5f8f4f387b7bbf8d0e3c7cd1f780c42d5ef5dc611625ed699fbaed",
     "packages/alelyon-os/alelyon/runtime/common/worktree.py": "8250d5513b9c5c734f965cb1a753dea2e7427a33c74363262463da322c79a896",
     "packages/alelyon-os/alelyon/runtime/common/worktree_areas.py": "92137b557af6258651cc6e8e1b983dabc46768ef8aefb4e956a755bbaef15f43",
-    "packages/alelyon-os/alelyon/runtime/common/worktree_bus.py": "efb6e4d18ce3a7a3b81e410b8e3aa11222a2b48d793b3062397b806f9cf99293",
+    "packages/alelyon-os/alelyon/runtime/common/worktree_bus.py": "a0a2adbcea1c6e5fcef19b01ce79942009d21bffa4e64859c271af404ce5d92d",
     "packages/alelyon-os/alelyon/runtime/common/worktree_cache.py": "e7ccd44a8e53d335e293995a5fa364d6550a48348f29da0b65cb8a500359d5ee",
     "packages/alelyon-os/alelyon/runtime/common/worktree_disciplines.py": "5029cacfa6ea32760baa39ede19c390d03da5b6cbc4e2b310e23e91cce69f2c8",
     "packages/alelyon-os/alelyon/runtime/common/worktree_graph.py": "be10b1a63516c78d17348ae9b25140cd5bd872f28eaf20536e026e0b61664d33",
@@ -52,7 +52,7 @@
     "packages/alelyon-os/alelyon/runtime/oracle/assistant/providers.py": "9871b6789860a3d8ced64b482d003ae9c48a82876e4ff55650599de0cc2673d4",
     "packages/alelyon-os/alelyon/runtime/oracle/assistant/tools.py": "81824fcbf4f07cd67bc3e6e3a86ecce539298249235900fc522384ac016f0f96",
     "packages/alelyon-os/alelyon/runtime/oracle/dsl/__init__.py": "4d725e09af2e917fd590cc2329a24b3c667f22fdbc4879ac387bb7e7ae834a34",
-    "packages/alelyon-os/alelyon/runtime/oracle/dsl/budget.py": "39ae352ee7d4ff100c177d0e1b18c1c2873b87941db8b0aad9265b0f12ec13d1",
+    "packages/alelyon-os/alelyon/runtime/oracle/dsl/budget.py": "eeb5e6403ff92de3bb1251bd644d7f570c01d730d7d661978fbbc617d4997767",
     "packages/alelyon-os/alelyon/runtime/oracle/dsl/envelope.py": "d740ca1c372417a711861e1919da69806f65eb14d1c2792f8715771105150901",
     "packages/alelyon-os/alelyon/runtime/oracle/dsl/execcert.py": "38c1aa8207730b6563ba814febeda7552230632a94585a5d8ef81511a93c7105",
     "packages/alelyon-os/alelyon/runtime/oracle/dsl/fetch.py": "38e4f88531ea32e24c593561829ed22f252365384ebdc89e9304b3528e43b339",
@@ -132,7 +132,7 @@
     "packages/alelyon-os/pyproject.toml": "8ae2fe08fd8ef5a12d5cd9206666409631cb8a1279985cec5813e82de8c6d8f1",
     "packages/alelyon-os/tests/test_conformance.py": "9b197ce3aabd526d89086fd82bd7f1bb9f9480d23136a66a2dc8b435356435a1",
     "packages/alelyon-os/tests/test_hardening.py": "5d0c14ba7d6827f8a981d775e736b8d361108bff0969cba92794c696dc79ad5d",
-    "papers/00-research-log.md": "e4f6f4c234ba7c5f4fb31d2738c98435bf49f6a0a1efb15e5b8884b01852e226",
+    "papers/00-research-log.md": "c80d6c9c27460b4f9b095fb0106913cbde14bb3f9dc7c9b5c973db080025ee33",
     "papers/01-certified-number-envelope.md": "81abbbbf13636c55b94c2dcb4f966042b9d745daf71f274afe5bf6f7929c3a25",
     "papers/02-exact-coordinate-registration.md": "2b42d571d61218fd44fddbf7ffd398efcd3fadc22eb6eb861da4585186294cd0",
     "papers/03-model-morphometry.md": "c9b7b8c90b7b924851d738cb985632ebc07ca12e9a94f306e5370eaab356d22c",
@@ -143,7 +143,7 @@
     "papers/08-qp-regret.md": "d6beae7a61486d70fd9619ab15bde9206a928d63e68ccd5b20eab282a006d893",
     "papers/09-what-does-not-transfer.md": "81b48a4e949b9b52c52eb004fd922c58bf0eee03341ea9720acbf80633f3f6db",
     "papers/10-the-decoder-not-the-weights.md": "7c17bb2e06e9664f7b7e51e2ea2211073e87c35f6d8739f94785ff8c64691373",
-    "papers/I-replayable-certificates.md": "6e646529a3689c5143226769e3fa1323e18d8bf6121411f9478ba0a1ee0458c1",
+    "papers/I-replayable-certificates.md": "a784e6c7cb4dde536841859dc4a3bc431fb886df52d76424da1ca0c333bfa247",
     "papers/II-certified-statistics-from-dithered-storage.md": "4225e3335dea62f915b2d4cb6d206c6a69de9ac9851d30cf3ede92b66cf6cfe7",
     "papers/III-observed-versus-declared.md": "3d9309f7be3fb524768b2432fd63cad097d72f7a63c1f8dc2e7b13b68a9f3a87",
     "papers/IV-what-does-not-transfer.md": "e2b1f43c93c117d6f8b47ff0a63f31b943a349ed842d9e4cea59a047b49eaa1e",
@@ -152,6 +152,6 @@
     "spec/cne-v0.md": "c170d046a7388dadf0e0f5ce341abb9150561efb4da68a4975de4737e35e407d"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "c3ad55f73d2af6d0a6e28814e539de52a5421308",
+  "source_commit": "b491d8fa47bf8c51e0285508d6cd0fcd73d37065",
   "source_repository": "TLace03/famMain"
 }

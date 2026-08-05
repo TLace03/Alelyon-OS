@@ -565,6 +565,32 @@ class FleetBus:
                 (_now() if at is None else int(at), finding_id, session_id))
             return changed.rowcount > 0
 
+    def deliveries_of(self, finding_id: str) -> tuple[Delivery, ...]:
+        """Every session one finding reached, and which of them read it.
+
+        The publisher's half of `inbox`, and it was missing. `publish` reports
+        who a finding reached at the moment it is sent, and after that a
+        publisher had no way to ask anything about it — so "silence is not
+        consent" was true, unfalsifiable from the sending end, and stayed that
+        way: measured on this repository's bus at 33378ae, 10 of 836 deliveries
+        were acknowledged and all 162 `landed` findings had been acknowledged
+        zero times.
+
+        Acknowledged still means only that a session pressed a button. It does
+        not mean read, understood or agreed, and an unacknowledged delivery is
+        not evidence that nobody looked.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT f.*, d.to_session, d.provenance, d.reason,
+                          d.acknowledged_at
+                   FROM delivery d JOIN finding f ON f.id = d.finding_id
+                   WHERE d.finding_id = ?
+                   ORDER BY d.at""", (finding_id,)).fetchall()
+        return tuple(Delivery(self._finding(r), r["to_session"],
+                              r["provenance"], r["reason"],
+                              r["acknowledged_at"]) for r in rows)
+
     def findings(self, *, limit: int = 100) -> tuple[Finding, ...]:
         with self._connect() as conn:
             rows = conn.execute(

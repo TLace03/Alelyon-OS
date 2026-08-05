@@ -571,6 +571,35 @@ circular block bootstrap's finite-sample behavior on serially correlated data.
 Adding the quantization term moves coverage *up*, to 0.973 at Δ = 8. The open
 question named the composition; the measurement names the sampling estimator.
 
+> **Followed up, 2026-08-05.** Naming the estimator left two things unstated: the
+> shortfall had been measured at one (φ, T), and the sampling term — the one that
+> binds, roughly 1e4 larger than quantization at 24-bit capture — carried **no
+> coverage harness**, while the quantization term that does not bind has had one as
+> a release gate since W4.
+>
+> Measured against a known population value (prices whose pct-change is exactly a
+> mean-zero AR(1), so the truth is 0 by construction), 300 replications per cell,
+> nominal 0.95: **0.920** at φ=0, T=300; **0.913** at φ=0.35, T=300; **0.890** at
+> φ=0.35, T=100; **0.867** at φ=0.7, T=300; **0.907** at φ=0.7, T=1000. The
+> shortfall is systematic, grows with dependence and with small T, and persists at
+> T=1000. The 0.923 above was the mildest cell in the range.
+>
+> Block length was tested rather than blamed. Sweeping L = mult·T^(1/3) at T=300,
+> coverage runs 0.943/0.945/0.935/0.930/0.917 at φ=0.35 and
+> 0.882/0.915/0.920/0.910/0.882 at φ=0.7 for mult 1,2,3,4,6 — a longer block buys
+> about four points under strong dependence, **costs** coverage under mild
+> dependence, and never reaches 0.95. The rule of thumb is kept: changing it moves
+> the dominant term of every budget in exchange for a trade, not a fix.
+>
+> This is therefore a design truth of the percentile bootstrap at finite T, and it
+> is now *stated* rather than assumed away — each sampling term carries
+> `nominal_conf` and a `coverage_status` naming the measured range — and *gated*,
+> by a harness that pins the behaviour in both directions. It deliberately does not
+> assert coverage ≥ 0.95, which would be false; it asserts a floor per cell **and**
+> that coverage does not reach nominal, because a mutation which only widens a
+> bound passes every coverage test, so a width falsifier must be able to fail
+> upward.
+
 ### 9.4 The canonical encoding is canonical in fact, not in specification
 
 **Result: confirmed fork.** The governing architecture decision record states that

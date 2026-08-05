@@ -147,8 +147,47 @@ def _eval_series(expr, ctx) -> Optional[pd.Series]:
 
 
 # ── circular block bootstrap (serial-correlation honest) ─────────────────────
+#
+# MEASURED COVERAGE, 2026-08-05. This interval is a PERCENTILE circular-block
+# bootstrap, and at finite T it does not attain its nominal level. Measured
+# against a known population mean (prices whose pct-change is exactly a mean-zero
+# AR(1)), 300 replications per cell, B=400, nominal 0.95:
+#
+#     phi=0.00  T=300   0.920        phi=0.35  T=100   0.890
+#     phi=0.35  T=300   0.913        phi=0.70  T=300   0.867
+#     phi=0.70  T=1000  0.907
+#
+# The shortfall grows with serial correlation and with small T. This is a known
+# finite-sample property of the percentile bootstrap under dependence, not a
+# defect in this implementation, and it is recorded on the term itself
+# (`nominal_conf` vs `coverage_status`) rather than left for a reader to assume
+# the band is exact. `docs/papers/00-research-log.md` R4 first found it at
+# phi=0.35 and attributed it correctly to the estimator rather than to the
+# composition; the table above is the follow-up that characterises it.
+#
+# BLOCK LENGTH IS NOT THE WHOLE STORY, and was measured rather than assumed. On
+# the estimator directly at T=300, sweeping L = mult * T^(1/3):
+#
+#     phi=0.35   mult 1..6 -> 0.943 0.945 0.935 0.930 0.917   (L=7 is fine)
+#     phi=0.70   mult 1..6 -> 0.882 0.915 0.920 0.910 0.882   (L=7 is too short)
+#
+# So a longer block buys about four points at phi=0.70 and COSTS coverage at
+# phi=0.35, and no setting reaches 0.95. The rule of thumb is therefore kept:
+# changing it would move the dominant term of every budget this module composes,
+# in exchange for a trade rather than a fix. The evidence is left here so the
+# decision is re-checkable instead of re-derivable.
 def _block_len(T: int) -> int:
     return max(1, int(round(T ** (1.0 / 3.0))))          # standard rule of thumb
+
+
+#: What the sampling interval's nominal level is worth, measured rather than
+#: assumed. Carried on every sampling term so the figure travels with the number.
+COVERAGE_STATUS = (
+    "percentile circular-block bootstrap; NOMINAL level, not attained at finite T. "
+    "Measured 0.867-0.920 against a nominal 0.95 over AR(1) phi in [0, 0.7], "
+    "T in [100, 1000] (2026-08-05). The shortfall grows with serial correlation "
+    "and with small T, and is a finite-sample property of the estimator"
+)
 
 
 def _cbb_indices(T: int, L: int, rng) -> np.ndarray:
@@ -205,9 +244,12 @@ def _sampling_term(prog: N.Program, fetched: Dict[Tuple[str, str], FetchedSeries
     width = (hi - lo) / 2.0
     return Term("sampling", width, "finite-sample",
                 f"circular block bootstrap ({spec['kind']}, T={T}, block≈{L}, "
-                f"B={len(boots)}) — serial-correlation honest",
+                f"B={len(boots)}) — serial-correlation honest, and its "
+                f"{conf:.0%} is NOMINAL: see coverage_status",
                 {"T": T, "block_len": L, "se": float(boots.std(ddof=1)),
-                 "lo": lo, "hi": hi})
+                 "lo": lo, "hi": hi,
+                 "nominal_conf": float(conf),
+                 "coverage_status": COVERAGE_STATUS})
 
 
 #: Travels with every provider term, on the certificate itself rather than in a

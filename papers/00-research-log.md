@@ -336,6 +336,53 @@ correlated data, a known property of the estimator. Adding the quantization term
 moves coverage *up* (0.973 at Δ = 8), not down. The open question pointed at the
 composition; the measurement points at the sampling term.
 
+### Followed up, 2026-08-05 — the relocated problem, characterised and gated
+
+R4 relocated the deficit onto the sampling term and stopped. Two things were then
+true and neither was written down: the shortfall had been measured at exactly one
+(φ, T), and **the term that binds had no coverage harness at all** while the
+quantization term that does not bind has had one as a release gate since W4.
+
+Measured against a known population value — prices built as `cumprod(1 + r_t)`
+with `r_t` a mean-zero AR(1), so `returns(·)` recovers `r_t` exactly and the truth
+is 0 by construction — 300 replications per cell, B = 400, nominal 0.95:
+
+| φ | T | coverage | se |
+|---|---|---|---|
+| 0.00 | 300 | 0.920 | 0.016 |
+| 0.35 | 300 | 0.913 | 0.016 |
+| 0.35 | 100 | 0.890 | 0.018 |
+| 0.70 | 300 | **0.867** | 0.020 |
+| 0.70 | 1000 | 0.907 | 0.017 |
+
+So it is systematic, not a single cell: the shortfall grows with serial
+correlation and with small T, and is still present at T = 1000. R4's 0.923 was the
+mildest case in the range.
+
+**Block length was tested rather than blamed.** Sweeping `L = mult · T^(1/3)` on
+the estimator directly at T = 300:
+
+| φ | mult 1 | 2 | 3 | 4 | 6 |
+|---|---|---|---|---|---|
+| 0.35 | 0.943 | 0.945 | 0.935 | 0.930 | 0.917 |
+| 0.70 | 0.882 | 0.915 | 0.920 | 0.910 | 0.882 |
+
+A longer block buys ≈4 points at φ = 0.70 and **costs** coverage at φ = 0.35, and
+no setting reaches 0.95. The rule of thumb is therefore **kept**: changing it would
+move the dominant term of every budget in exchange for a trade rather than a fix.
+This is a design truth of the percentile bootstrap at finite T, not an INFRA GAP —
+so it is stated, not engineered around.
+
+**What shipped.** `Term.extra` now carries `nominal_conf` and a `coverage_status`
+naming the measured range, so the calibration travels with the number instead of a
+reader assuming the 95% is attained; and
+`tests/certification/test_budget_sampling_coverage.py` is the missing gate. It
+deliberately does **not** assert coverage ≥ 0.95, which would be false. It pins the
+behaviour in both directions — a floor per cell, and an assertion that coverage
+does **not** reach nominal, because CLAIMS.md §2 rule 6 says a mutation that only
+widens a bound passes every coverage test, so a width falsifier has to be able to
+fail upward.
+
 ---
 
 ## R5 — Is the canonical encoding canonical under a second encoder?
