@@ -42,6 +42,7 @@ import hashlib
 import re
 import subprocess
 
+from alelyon.runtime.common import toolpath
 from alelyon.runtime.common.worktree_areas import UNMAPPED, all_pillars, area_of
 
 #: Where "already landed" is measured from.
@@ -80,7 +81,7 @@ INDEX_LIMITS: tuple[str, ...] = (
 
 def _git(*args: str, repo: str) -> tuple[int, str]:
     """A query. Nothing in this module writes to the repository."""
-    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True,
+    proc = subprocess.run(toolpath.argv("git", "-C", repo, *args), capture_output=True,
                           text=True, timeout=_GIT_TIMEOUT)
     return proc.returncode, proc.stdout.strip()
 

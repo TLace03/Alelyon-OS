@@ -549,10 +549,32 @@ Both statements consume exactly the premise Theorem 5.3 already delivers, so
 Corollary 5.5 is a drop-in replacement for (5.3) and introduces no new
 probabilistic content.
 
-**Computability.** The map z ↦ σ_min(zI − Â) is 1-Lipschitz in z, so over grid
-arcs of chord c the true minimum is at least (grid minimum) − c/2. A coarse pass
-certifies most of the circle and candidate arcs are refined, yielding a rigorous
-lower bound on s⋆. The gate uses the lower bound, never the observed minimum.
+**Computability.** The map z ↦ σ_min(zI − Â) is 1-Lipschitz in z, so a point within
+chord distance c of an evaluated grid point cannot lie more than c below that
+point's value. Every z on the unit circle is within angular distance h/2 of some
+point of a uniform h-grid, and the chord subtending h/2 is 2·sin(h/4); that is the
+margin the bound must subtract. A coarse pass certifies most of the circle and
+candidate arcs are refined, yielding a lower bound on s⋆. The gate uses the lower
+bound, never the observed minimum.
+
+> **Correction, 2026-08-05.** This paragraph previously read "over grid arcs of
+> chord c the true minimum is at least (grid minimum) − c/2", and the validator
+> implemented it as sin(h/2) — half the chord of the *full* arc. That is strictly
+> smaller than 2·sin(h/4) = sin(h/2)/cos(h/4), so it subtracts too little and the
+> "rigorous lower bound" could exceed the true s⋆. The failure is exhibited by a
+> normal operator with an eigenvalue at an arc midpoint at radius 1 − 1e-9, where
+> the old constant returns +7.5e-3 against a true s⋆ of 1e-9 at a 8-point grid, and
+> remains above the truth at 16, 64 and 256 points. **Tables 10–12 are unchanged**:
+> at the declared 4096-point coarse grid with 256× refinement the overstatement is
+> ≈5.6e-11, and the refined stage that actually binds is ≈3.4e-18, both far below
+> the reported bounds. What was wrong was the stated property, not the figures.
+> The corrected constant ships and is gated by
+> `tests/certification/test_ditherdmd.py::test_s_star_margin_uses_the_chord_to_the_arc_midpoint`.
+
+A second limit belongs here rather than in a footnote: the σ_min evaluations are
+ordinary floating-point SVDs. The Lipschitz argument is exact, but it is not carried
+in interval arithmetic, so the bound is rigorous *given* the evaluations rather than
+rigorous end to end. That gap is **UNMEASURED**.
 
 **Proposition 5.6 (optimality).** Corollary 5.5 is unimprovable given only an
 operator-norm radius. At a minimizing z⋆ = e^{iθ⋆} with singular vectors u, v
@@ -623,8 +645,25 @@ that is **UNMEASURED** here. Second, the lower bound on s⋆ is itself conservat
 where the coarse grid's chord is large relative to s⋆ — visible in the
 strong-non-normal row, where the certified bound 2.880e-3 sits 19% below the
 3.564e-3 the finer extremal search located. The gate uses the lower bound, so this
-costs tightness and never soundness. Third, Corollary 5.5 is implemented in the
-validator only and is **not** in the distributed package.
+costs tightness and never soundness. Third, the grid bound is rigorous given exact
+σ_min evaluations and is not carried in interval arithmetic; see the correction
+under §5.4.
+
+> **Status change, 2026-08-05.** The third limit previously read "Corollary 5.5 is
+> implemented in the validator only and is **not** in the distributed package."
+> That is no longer true. It ships as
+> `alelyon.runtime.vector.ditherdmd.direct_contracting`, beside — not instead of —
+> the Bauer–Fike gate, with the distance to instability exposed separately as
+> `distance_to_instability`. `research/papers/run_pseudospectral.py` now imports
+> both rather than carrying its own copy, so the sweep above validates the shipped
+> code. Neither gate was removed: the Bauer–Fike inclusion still states a
+> per-eigenvalue fact Corollary 5.5 does not.
+>
+> One consequence of shipping it is worth stating, because it makes the two gates
+> non-competing. For any |z| = 1, Bauer–Fike gives σ_min(zI − Â) ≥
+> dist(z, spec(Â))/κ₂(V) ≥ (1 − ρ(Â))/κ₂(V), so **s⋆ ≥ (1 − ρ(Â))/κ₂(V)** and every
+> firing of (5.3) is a firing of Corollary 5.5. The 53.5× and 47.4× ratios in
+> Table 11 are therefore a lower bound on the improvement, never a trade.
 
 **Incidental.** Corollary 5.5 requires no eigendecomposition and therefore has no
 ill-conditioned-eigenbasis refusal class at all. It is evaluable on a defective Â,

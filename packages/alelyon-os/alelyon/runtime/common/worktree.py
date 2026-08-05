@@ -45,6 +45,8 @@ import re
 import subprocess
 import time
 
+from alelyon.runtime.common import toolpath
+
 #: Returned wherever a fact could not be derived. Never an empty string: a blank
 #: beside a filled field reads as "checked, nothing there".
 UNATTRIBUTED = "UNATTRIBUTED"
@@ -120,12 +122,58 @@ MESH_LIMITS: tuple[str, ...] = (
 _GIT_TIMEOUT = 30
 _MAX_PATHS_PER_WORKTREE = 5_000
 
+#: Answers memoised across observations, keyed on the git object hashes they are
+#: a function of.
+#:
+#: `observe()` is re-run every `MESH_INTERVAL_MS` for as long as a Fleet view is
+#: on screen, and measured over this repository's forty-eight worktrees it is
+#: 164 git subprocesses and 3.3 seconds a pass. Two of the three big consumers
+#: do not need re-running at all:
+#:
+#: * a commit's timestamp is a property of the commit. `show -s --format=%ct`
+#:   over one SHA returns the same integer forever.
+#: * ancestry and the ahead-diff are properties of a **pair** of commits, so
+#:   they are fixed once `(head, mainline)` are both named by hash.
+#:
+#: So the key is the content, not the clock, and the cache cannot go stale in
+#: the way a time-based one can: a moved HEAD or a fetched mainline is a
+#: different key and misses. That is the whole reason to do it this way rather
+#: than with an expiry. `git status` is deliberately NOT cached -- it is the
+#: question "what has changed since the last commit", which is exactly the thing
+#: with no immutable key, and it is what the view is for.
+#:
+#: Only successful answers are stored. Freezing a transient git failure for the
+#: life of the process would trade a small cost for a wrong picture.
+_OBJECT_CACHE: dict = {}
+
+#: Entries kept before the cache is dropped whole. Keys are commit hashes, so
+#: the set grows with the repository's history rather than with uptime; this is
+#: a backstop against a long-lived process, not a working limit.
+_OBJECT_CACHE_LIMIT = 8192
+
+
+def forget_git_objects() -> None:
+    """Drop the memoised per-commit answers. For tests and for a cold read."""
+    _OBJECT_CACHE.clear()
+
+
+def _memoised(key: tuple, compute):
+    """`compute()` once per key. Only truthy-resolved answers are kept."""
+    if key in _OBJECT_CACHE:
+        return _OBJECT_CACHE[key]
+    value, keep = compute()
+    if keep:
+        if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
+            _OBJECT_CACHE.clear()
+        _OBJECT_CACHE[key] = value
+    return value
+
 
 def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
     """Run a read-only git query. Returns (returncode, stdout); never raises."""
     try:
         probe = subprocess.run(
-            ["git", *args],
+            toolpath.argv("git", *args),
             cwd=str(cwd) if cwd else None,
             check=False,
             capture_output=True,
@@ -222,6 +270,13 @@ class WorktreeMesh:
     #: failed. Named rather than swallowed.
     notes: tuple[str, ...] = ()
     limits: tuple[str, ...] = MESH_LIMITS
+    #: True when the caller asked `observe` to stop before it had read every
+    #: worktree. The mesh is then a prefix of one, not a small one, and the
+    #: difference is not visible from the contents: three worktrees observed of
+    #: forty-eight looks exactly like a repository with three. A reader that
+    #: cannot tell them apart would report "no contention" about a repository it
+    #: never finished looking at, so the flag is carried rather than inferred.
+    stopped: bool = False
 
     @property
     def agent_worktrees(self) -> tuple[Worktree, ...]:
@@ -391,12 +446,35 @@ def _main_worktree(root: Path, worktree_list_output: str) -> str:
 
 def observe(repo_root: str | Path | None = None, *,
             mainline: str = "origin/main",
-            now: float | None = None) -> WorktreeMesh:
+            now: float | None = None,
+            should_stop=None) -> WorktreeMesh:
     """Read every worktree of a repository and compute where they contend.
 
     ``mainline`` is the ref that "already landed" means. It is a parameter rather
     than a constant because a repository whose default branch is named otherwise
     would otherwise have every worktree reported as ahead of nothing.
+
+    ``should_stop`` is an optional predicate polled between worktrees. It exists
+    because this function is slow in a way callers cannot bound: it is a few git
+    subprocesses per worktree, this repository has around fifty, and each query
+    may sit for ``_GIT_TIMEOUT`` seconds. A GUI running it on a worker thread had
+    no way to abandon it, so a window close had to wait the whole reading out --
+    which Windows records as an application hang and ends the process for.
+
+    Between worktrees is the honest granularity and the docstring says so rather
+    than promising better: a ``subprocess.run`` already in flight is not
+    interruptible, so the tail of one worktree's queries is still owed. That
+    bounds the wait at one worktree instead of all of them.
+
+    A stopped reading returns what it had, with ``stopped`` set and a note. It is
+    a **prefix** of an observation and not a small one, so contention computed
+    from it can only under-report; do not draw it.
+
+    Per-commit answers are memoised in ``_OBJECT_CACHE`` across calls, keyed on
+    the git hashes they are a function of rather than on a clock. Repeated
+    observations of an unchanged repository therefore cost roughly the
+    ``git status`` walks alone. ``forget_git_objects()`` empties it; correctness
+    never depends on doing so, because a changed commit is a changed key.
     """
     root = Path(repo_root or Path.cwd())
     observed_at = int(now if now is not None else time.time())
@@ -413,13 +491,30 @@ def observe(repo_root: str | Path | None = None, *,
 
     # A mainline that does not resolve makes "ahead of the mainline" unanswerable.
     # Say so once rather than reporting every worktree as ahead of nothing.
-    mainline_ok = _git("rev-parse", "--verify", "--quiet", mainline, cwd=root)[0] == 0
+    #
+    # The SHA this prints is kept rather than thrown away: it is what makes the
+    # ancestry answers below content-addressable. A cache keyed on the ref NAME
+    # would go stale the moment somebody fetched; keyed on what the name
+    # resolved to, a fetch is simply a different key.
+    code, resolved = _git("rev-parse", "--verify", "--quiet", mainline, cwd=root)
+    mainline_ok = code == 0
+    mainline_sha = resolved.strip() if mainline_ok else ""
     if not mainline_ok:
         notes.append(f"mainline ref {mainline!r} does not resolve; "
                      f"on_mainline and ahead-of-mainline paths are UNMEASURED")
 
     worktrees: list[Worktree] = []
-    for record in _parse_worktree_list(out):
+    records = _parse_worktree_list(out)
+    stopped = False
+    for record in records:
+        if should_stop is not None and should_stop():
+            stopped = True
+            notes.append(
+                f"the observation was stopped after {len(worktrees)} of "
+                f"{len(records)} worktree(s); what is here is a prefix of an "
+                f"observation, not a complete small one, and its contention is "
+                f"an under-count")
+            break
         path = record.get("worktree", "")
         if not path:
             continue
@@ -435,22 +530,36 @@ def observe(repo_root: str | Path | None = None, *,
             if is_primary else _session_hint(path))
         head = record.get("HEAD", "")
 
+        # A commit's timestamp is a property of the commit, so this is asked once
+        # per SHA for the life of the process rather than once per observation.
         committed_at = None
         if head:
-            code, when = _git("show", "-s", "--format=%ct", head, cwd=root)
-            if code == 0 and when.strip().isdigit():
-                committed_at = int(when.strip())
+            def _committed_at(sha=head):
+                code, when = _git("show", "-s", "--format=%ct", sha, cwd=root)
+                resolved = (code == 0 and when.strip().isdigit())
+                return (int(when.strip()) if resolved else None), resolved
+            committed_at = _memoised(("committed-at", head), _committed_at)
 
+        # Ancestry and the ahead-diff are properties of the PAIR, so the key
+        # names both hashes. A commit, a fetch or a rebase moves one of them and
+        # the next pass simply misses.
         on_mainline = None
         ahead: tuple[str, ...] = ()
         if head and mainline_ok:
-            on_mainline = _git("merge-base", "--is-ancestor", head, mainline,
-                               cwd=root)[0] == 0
-            if not on_mainline:
-                ahead, note = _changed_paths(
-                    str(root), "diff", "--name-only", f"{mainline}...{head}")
-                if note:
-                    notes.append(note)
+            def _ancestry(sha=head):
+                landed = _git("merge-base", "--is-ancestor", sha, mainline,
+                              cwd=root)[0] == 0
+                if landed:
+                    return (True, (), None), True
+                paths, note = _changed_paths(
+                    str(root), "diff", "--name-only", f"{mainline}...{sha}")
+                # A truncated or failed diff is not cached: it would freeze a
+                # partial answer against a key that can never miss again.
+                return (False, paths, note), note is None
+            on_mainline, ahead, note = _memoised(
+                ("ancestry", head, mainline_sha), _ancestry)
+            if note:
+                notes.append(note)
 
         dirty: tuple[str, ...] = ()
         if present:
@@ -485,6 +594,7 @@ def observe(repo_root: str | Path | None = None, *,
         worktrees=tuple(worktrees),
         contentions=find_contentions(worktrees),
         notes=tuple(notes),
+        stopped=stopped,
     )
 
 

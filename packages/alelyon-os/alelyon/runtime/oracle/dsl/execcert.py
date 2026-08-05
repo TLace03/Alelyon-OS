@@ -800,29 +800,30 @@ def certified_run(src: str, data_service=None, *, alpha: float = 0.05,
     base_mvec = [mv for _, _, _, mv in base_trace] if trace_branches else []
     run_pert = [0.0] * len(base_trace) if trace_branches else []
     stable = True
+    flip_source: Optional[str] = None   # 'dither' | 'systematic', for the reason text
     devs: List[float] = []
-    for k in range(K):
-        rng = np.random.default_rng([seed, k])
-        table: Dict[Tuple[str, str], pd.Series] = {}
-        for r, f in fetched.items():
-            vals = f.series.to_numpy(dtype=np.float64, copy=True)
-            d = eff_deltas[r]
-            pert = rng.uniform(-0.5, 0.5, size=len(vals)) * d
-            table[r] = pd.Series(vals + pert, index=f.series.index,
-                                 name=f.series.name)
+
+    def _probe(table: Dict[Tuple[str, str], pd.Series], source: str):
+        """Run the program on one perturbed table and fold the result into the
+        branch-stability accounting. Returns (scalar, error) — never raises.
+
+        Both the decision signature and the per-site margin perturbation are
+        updated here, so every caller's perturbation counts toward the guard
+        regardless of which law produced it.
+        """
+        nonlocal stable, flip_source
         trace_k: list = [] if trace_branches else None
         res_k = run_program(src, program=prog,
                             ctx=_FixedContext(table, trace=trace_k))
         v_k = _scalar_of(res_k)
         if not getattr(res_k, "ok", False) or v_k is None:
-            return _refuse(f"perturbed run {k + 1}/{K} failed "
-                           f"({getattr(res_k, 'error', 'non-finite output')}) — "
-                           f"the program is unstable at dither scale", cls, uf)
-        devs.append(abs(v_k - base_val))
+            return None, str(getattr(res_k, "error", "non-finite output"))
         if trace_branches:
             if (len(trace_k) != len(base_trace)
                     or [(op, str(key)) for op, key, _, _ in trace_k] != sig0):
                 stable = False                     # a decision flipped/changed shape
+                if flip_source is None:
+                    flip_source = source
             else:
                 for i, (_, _, mmk, mvk) in enumerate(trace_k):
                     mv0 = base_mvec[i]
@@ -834,6 +835,56 @@ def certified_run(src: str, data_service=None, *, alpha: float = 0.05,
                         d_i = abs(float(mmk) - float(base_mmin[i]))
                     if d_i > run_pert[i]:
                         run_pert[i] = d_i
+        return v_k, None
+
+    def _shifted(offset_of) -> Dict[Tuple[str, str], pd.Series]:
+        table: Dict[Tuple[str, str], pd.Series] = {}
+        for r, f in fetched.items():
+            vals = f.series.to_numpy(dtype=np.float64, copy=True)
+            table[r] = pd.Series(vals + offset_of(r, len(vals)),
+                                 index=f.series.index, name=f.series.name)
+        return table
+
+    for k in range(K):
+        rng = np.random.default_rng([seed, k])
+        table = _shifted(
+            lambda r, n, _rng=rng: _rng.uniform(-0.5, 0.5, size=n) * eff_deltas[r])
+        v_k, err = _probe(table, "dither")
+        if err is not None:
+            return _refuse(f"perturbed run {k + 1}/{K} failed ({err}) — "
+                           f"the program is unstable at dither scale", cls, uf)
+        devs.append(abs(v_k - base_val))
+
+    # ── worst-case systematic probes (the branch guard only) ──────────────────
+    # The K draws above are INDEPENDENT per element, which is a property of the
+    # dither law and not of the declaration. On an aggregate of n rows independent
+    # error cancels — the observed spread of a mean scales as Δ/√(12n) — while a
+    # systematic rounding obeying the very same per-element promise |stored − true|
+    # ≤ Δ/2 moves that mean by Δ/2. The gap grows like √(3n), so a fixed safety
+    # factor is defeated by making the series longer, and `sign(mean(x) − c)` could
+    # certify at width 0.0 with the decision inverted.
+    #
+    # What the declaration actually gives us is the per-element bound, so the guard
+    # is measured against THAT rather than against the spread of an assumed law —
+    # CLAIMS.md §2 rule 3 (validate against an independently-held invariant, never
+    # against the shape of what the writer emitted) applied one level up, to the
+    # resampler instead of to Δ itself.
+    #
+    # These probes feed the branch guard ONLY. `devs`, and therefore the certified
+    # width, remain a conformal statistic over the dither law and are untouched:
+    # a worst-case corner is not a draw from that law and must not be ordered with
+    # its samples. Adding probes can only raise `run_pert` and can only clear
+    # `stable`, so this is monotonically stricter — nothing previously refused
+    # becomes admissible.
+    if trace_branches:
+        for sign, label in ((1.0, "+Δ/2"), (-1.0, "−Δ/2")):
+            table = _shifted(lambda r, n, s=sign: s * 0.5 * eff_deltas[r])
+            _v, err = _probe(table, "systematic")
+            if err is not None:
+                return _refuse(
+                    f"the worst-case systematic probe ({label} on every element) "
+                    f"failed ({err}) — the program is not evaluable across the "
+                    f"range its own declaration permits", cls, uf)
 
     # ── margin-checked branch stability (min/max + sign/where/comparisons) ────
     # A failed branch guard ALWAYS refuses (both strict and non-strict): the
@@ -883,9 +934,16 @@ def certified_run(src: str, data_service=None, *, alpha: float = 0.05,
                           f"comparison) depends on values with no capture bound; "
                           f"freezing them would manufacture stability")
             elif not stable:
-                reason = ("a branch decision flipped across dither resamples — a "
-                          "discrete branch (min/max argmin, sign, or comparison) "
-                          "is not Δ-separated")
+                reason = (
+                    ("a branch decision flipped under a worst-case systematic "
+                     "rounding (every element at ±Δ/2, which the declaration "
+                     "permits) — a discrete branch (min/max argmin, sign, or "
+                     "comparison) is not Δ-separated. Independent dither alone "
+                     "would not have found this: on an aggregate it cancels")
+                    if flip_source == "systematic" else
+                    ("a branch decision flipped across dither resamples — a "
+                     "discrete branch (min/max argmin, sign, or comparison) "
+                     "is not Δ-separated"))
             else:
                 worst = min(
                     ((mg, p) for mg, p in zip(margins0, pert_scale)
@@ -924,9 +982,15 @@ def certified_run(src: str, data_service=None, *, alpha: float = 0.05,
     elif branch_tier == "empirical":
         assumptions.append(
             "branch decisions (min/max argmin, sign, comparison) observed IDENTICAL "
-            f"across base + all K resamples with margin > {BRANCH_MARGIN_SAFETY:g}× "
-            "the observed perturbation scale; residual branch-flip risk is "
-            "first-order and harness-validated, not a theorem")
+            f"across base + all K dither resamples AND both worst-case systematic "
+            f"probes (every element at ±Δ/2), with margin > "
+            f"{BRANCH_MARGIN_SAFETY:g}× the largest perturbation any of them "
+            "produced. The systematic probes are what make this survive an "
+            "aggregate: independent dither cancels over n rows while a systematic "
+            "rounding within the same per-element bound does not. Residual "
+            "branch-flip risk is first-order and harness-validated, NOT a theorem — "
+            "the probes are the two uniform-sign corners, and a mixed-sign "
+            "perturbation that moves a non-monotone program further is UNMEASURED")
     if exact_storage:
         # Δ=0 here is genuine, and precisely because it is, the reader has to be
         # told what it does NOT cover. A zero storage-quantization term is not a

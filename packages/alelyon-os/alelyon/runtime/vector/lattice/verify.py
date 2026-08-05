@@ -15,6 +15,12 @@ What a passing report establishes:
   decoding rebuilds the records through their ordinary constructors.
 * Re-executing the chain on the supplied target coordinates reproduces the
   claimed source coordinates exactly.
+* The chain's declared invertibility has been *measured* rather than only
+  derived: `inverse.measure_inverse_consistency` round-trips a probe set derived
+  from the chain itself and the report carries the counts. Read
+  `inverse`'s module docstring for what a probe sample bounds — it is a lower
+  bound on a finite sample, not a proof of invertibility over the whole domain,
+  and a chain that admitted no probe says so rather than passing.
 
 What it does not establish:
 
@@ -51,6 +57,10 @@ from alelyon.runtime.vector.lattice.canonical import (
     transform_chain_ref,
 )
 from alelyon.runtime.vector.lattice.contracts import CoordinateSpace
+from alelyon.runtime.vector.lattice.inverse import (
+    InverseConsistency,
+    measure_inverse_consistency,
+)
 from alelyon.runtime.vector.lattice.transforms import (
     LOSS_CLASS_RANK,
     Invertibility,
@@ -92,6 +102,12 @@ class ReplayReport:
     intermediate_space_ids: tuple[str, ...] = ()
     loss_class: LossClass | None = None
     invertibility: Invertibility | None = None
+    #: The measured counterpart of `invertibility`. That field is *structural* —
+    #: it reads EXACT because every member type declares EXACT — so on its own it
+    #: cannot distinguish a chain that inverts from one whose `invert()` is
+    #: wrong. This is the round trip actually run. None on a refusal that never
+    #: reached a decoded chain.
+    inverse_consistency: InverseConsistency | None = None
     cases_replayed: int = 0
     failing_constraint: str | None = None
     evidence: tuple[str, ...] = field(default_factory=tuple)
@@ -281,6 +297,10 @@ def _chain_facts(chain: TransformChain, chain_ref: str) -> dict[str, object]:
         ),
         "loss_class": chain.loss_class,
         "invertibility": chain.invertibility,
+        # Measured here rather than by the caller so that every replay reports
+        # it, and so a certificate's declared value is compared against a number
+        # this module derived independently rather than one it was handed.
+        "inverse_consistency": measure_inverse_consistency(chain),
     }
 
 

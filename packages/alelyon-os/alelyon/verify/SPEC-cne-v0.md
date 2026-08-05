@@ -1114,6 +1114,35 @@ Present only for the branch-guarded tiers. Each entry:
 `guard` is `deterministic`, `empirical`, or `failed`. `margin` is `null` when
 infinite.
 
+`perturb_scale` is the largest movement of that site's margin observed over the
+K dither resamples **and** the two worst-case systematic probes of §8.5 step 7.
+The `empirical` guard passes only where `margin > 3 × perturb_scale` at every
+site.
+
+> **Amended 2026-08-05 — `perturb_scale` was resample-only and that was unsound.**
+> It previously ranged over the K dither resamples alone. Independent dither is a
+> property of the *law*, not of the declaration: over an aggregate of n rows it
+> cancels, so a mean moves by ≈Δ/√(12n), while a systematic rounding obeying the
+> identical per-element promise |stored − true| ≤ Δ/2 moves it by Δ/2. The ratio
+> grows like √(3n), so the fixed 3× factor was defeated by lengthening the series,
+> and `sign(mean(x) − c)` certified at `branch-stable-first-order` with **width
+> 0.0 and the decision inverted**. Measured at n = 25, 100, 400 and 1600.
+>
+> This is §2 rule 3 of [CLAIMS.md](CLAIMS.md) — validate against an
+> independently-held invariant, never against the shape of what the writer emitted
+> — reappearing one level up: the guard was validating against the spread of an
+> assumed resampling law rather than against the bound the declaration actually
+> gives.
+>
+> **Compatibility.** `branch_sites` is replay-compared (§9), so an envelope issued
+> before this amendment carries the old, smaller `perturb_scale` and will not
+> match a replay under this version. That is intended: those envelopes asserted a
+> guard that did not hold. No golden vector carries a branch tier, and no external
+> verification of one is recorded, so nothing outside this repository is
+> invalidated. The `exact-cents/v0` law is unaffected — with Δ = 0 both probes are
+> the identity — and so is the `branch-stable-exact` deterministic guard, which
+> was always worst-case and never consulted the resamples.
+
 ### 7.6 Transparency block
 
 Attached per input when the producer could attribute every consumed row's Δ to a
@@ -1401,8 +1430,16 @@ Given a program, per-input series and per-row Δ, `K` (default 63), `alpha`
    the scalar is not finite.
 6. For `k` in `0 … K-1`: perturb every input per §8.4, execute, and record
    `D_k = |f(perturbed) − base_value|`. Refuse if any resample fails.
-7. `width = sorted(D)[m-1]`; `level = m/(K+1)`.
-8. `exact` is true iff no row was uncertified **and** the tier is `linear-exact`
+7. **Branch-guarded tiers only.** Execute twice more, with every element of every
+   input shifted by `+Δ/2` and then by `−Δ/2` — the corners the declaration
+   permits. Refuse if either fails. These runs update the branch decision
+   signature and `perturb_scale` (§7.5); they MUST NOT contribute to `D`, because
+   the width is a conformal order statistic over the dither law of §8.4 and a
+   worst-case corner is not a draw from it. A verifier that skips this step
+   computes a smaller `perturb_scale` and admits a decision a systematic rounding
+   can invert.
+8. `width = sorted(D)[m-1]`; `level = m/(K+1)`.
+9. `exact` is true iff no row was uncertified **and** the tier is `linear-exact`
    or `branch-stable-exact`.
 
 The final scalar is extracted as: take the last output; if it is a series, drop

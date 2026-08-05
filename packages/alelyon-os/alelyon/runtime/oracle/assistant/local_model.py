@@ -37,6 +37,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from alelyon.runtime.common import toolpath
 from alelyon.runtime.common.paths import GLOBALS_DIR
 
 DEFAULT_MODEL = "qwen3-coder:30b"
@@ -278,7 +279,10 @@ def probe() -> ModelState:
 
 # ── starting the server ──────────────────────────────────────────────────────
 def ollama_binary() -> Optional[str]:
-    return shutil.which("ollama")
+    """Ollama's own installer amends PATH for *new* shells only, so a GUI already
+    running when the user installed it -- the exact moment they then press
+    'Start' -- cannot see it by name. Resolve against the disk instead."""
+    return toolpath.which("ollama")
 
 
 def is_installed() -> bool:
@@ -298,8 +302,9 @@ def ensure_running(wait: float = _START_GRACE) -> ModelState:
     exe = ollama_binary()
     if exe is None:
         return ModelState(STATE_OFFLINE, st.model, [],
-                          "Ollama is not installed on this machine. Install it "
-                          "from ollama.com, then press Start again.")
+                          "Ollama could not be found on this machine. Install "
+                          "it from ollama.com, then press Start again. "
+                          + toolpath.find("ollama").reason())
     try:
         kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":

@@ -10,6 +10,27 @@ pip install "alelyon-os[sdk]"     # additionally installs httpx, for the API cli
 
 Source: <https://github.com/TLace03/Alelyon-OS>
 
+## Stability: this is an unstable surface at 0.1.0
+
+**No API or behaviour here carries a compatibility promise yet.** Names,
+signatures, return values and refusal conditions may change in any release
+before 1.0, without a deprecation period. `Development Status :: 3 - Alpha` in
+the package metadata says the same thing; this says it where a reader will
+actually see it.
+
+That is a decision, not an oversight, and the honest reason is worth stating: a
+release in this series changed `alelyon.runtime.vector.compute.propagate` to
+**refuse** a source with non-finite uncertainty, where it had previously
+returned statistics that were silently `nan`. The old behaviour hid the input
+carrying the most uncertainty from the variance attribution that exists to name
+it. That fix was correct and it broke behaviour a caller could have depended on.
+A stability promise at 0.1.0 would have forbidden it, or made it a major
+version — and this surface is not finished making corrections of that kind.
+
+If you need to pin against change, pin the exact version and read the changelog
+before moving. If you depend on this and want a stability commitment, say so —
+the promise is cheap to make once the corrections stop, and dishonest before.
+
 ---
 
 ## What is in here

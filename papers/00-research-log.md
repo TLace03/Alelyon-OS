@@ -83,8 +83,71 @@ certificate evaluations on real data.
    relative to s⋆.** In the strong-non-normal case the certified bound 2.880e-3
    sits 19% below the 3.564e-3 the finer extremal search located. The gate uses
    the lower bound, so this costs tightness and never soundness.
-3. **D2 is not implemented in the shipped package.** It exists in the validator
-   only. Nothing in `alelyon.runtime.vector.ditherdmd` was changed.
+3. ~~**D2 is not implemented in the shipped package.** It exists in the validator
+   only. Nothing in `alelyon.runtime.vector.ditherdmd` was changed.~~
+   **Closed 2026-08-05 — see below.**
+
+### Update, 2026-08-05 — limit 3 closed, and a defect found in closing it
+
+D2 now ships as `alelyon.runtime.vector.ditherdmd.direct_contracting`, with s⋆
+exposed separately as `distance_to_instability`. The Bauer–Fike gate was **not**
+removed; `run_pseudospectral.py` now imports the shipped implementation instead of
+carrying its own, so the sweep validates what ships.
+
+Writing the falsifiers surfaced a defect in the validator this log quotes. Its
+"RIGOROUS lower bound" subtracted `sin(h/2)` — half the chord of the *full* grid
+arc — where the worst-uncovered point is the arc **midpoint**, at angular distance
+h/2 and chord `2·sin(h/4) = sin(h/2)/cos(h/4)`. The smaller constant subtracts too
+little, so the lower bound could **exceed** the true s⋆. Exhibited by a normal
+operator with an eigenvalue parked at an arc midpoint at radius 1 − 1e-9: the old
+constant returns +7.5e-3 against a true s⋆ of 1e-9 on an 8-point grid, and stays
+above the truth at 16, 64 and 256 points.
+
+**The figures in this log and in Paper II are unchanged.** At the declared
+4096-point grid the overstatement is ≈5.6e-11, and the refined stage that actually
+binds is ≈3.4e-18, both far below the reported bounds of 5.574e-3 and 7.217e-1.
+What failed was the property the bound was described as having, not the numbers it
+produced — recorded here rather than quietly repaired, since this log is the
+evidence a reader re-derives the conclusions from. Published to the fleet as
+`6f267a5abb32cd5f`, which reached 1 session.
+
+One thing became provable in the move and strengthens R1's answer. For any |z| = 1,
+Bauer–Fike gives σ_min(zI − Â) ≥ (1 − ρ(Â))/κ₂(V), so **s⋆ ≥ (1 − ρ(Â))/κ₂(V)**:
+every Bauer–Fike firing is a D2 firing. The 53× ratio measured above is therefore a
+floor on the improvement rather than a trade between two criteria — which is what
+makes shipping both, rather than choosing, the honest arrangement.
+
+A limit that was implicit is now written down: the grid argument is exact, but the
+σ_min evaluations are ordinary floating-point SVDs and are not carried in interval
+arithmetic. The bound is rigorous *given* those evaluations. End-to-end rigour is
+**UNMEASURED**.
+
+#### Re-measured on the shipped code, 2026-08-05
+
+The R1 table above cannot be reproduced exactly: it was taken on a STATE matrix of
+k = 14 features × W = 1339 weekly snapshots, and `globals/history.db` has since grown,
+so `build_state` now yields k = 11 × 1568. The figures below are therefore a fresh
+measurement of the same **property** on the current data, not a re-run of that table.
+8 dither redraws per depth, δ = 0.05, read-only load, shipped gates:
+
+| b | median r̂ | median κ₂(V) | BF ρ_bound | BF fires | median s⋆ lb | D2 fires |
+|---|---|---|---|---|---|---|
+| 10 | 6.159e-2 | 48.03 | 3.950 | 0/8 | 5.996e-3 | 0/8 |
+| 12 | 1.509e-2 | 48.11 | 1.718 | 0/8 | 5.986e-3 | 0/8 |
+| **14** | 3.753e-3 | 48.07 | 1.173 | 0/8 | 5.985e-3 | **8/8** |
+| 16 | 9.371e-4 | 48.05 | 1.038 | 0/8 | 5.986e-3 | 8/8 |
+| 18 | 2.342e-4 | 48.05 | 1.004 | **0/8** | 5.986e-3 | 8/8 |
+
+ρ(A_λ) = 0.992584 against a 1 − ρ margin of 0.007416, closely tracking the 0.99264 /
+0.00736 the original run saw on the smaller matrix. **Bauer–Fike still never fires,
+not even at 18 bits** — its ρ_bound is 1.004 there and it would need b ≈ 19 — while
+the direct gate fires from **b = 14**, a 5-bit reduction. The BF threshold on r̂ is
+(1 − ρ)/κ₂(V) = 1.543e-4 against s⋆ ≥ 5.985e-3, a factor of **38.8×**; the original
+run measured 53.5× on the other matrix. Zero D2 soundness violations: the run asserts
+`fired ⇒ ρ(A_λ) < 1` on every evaluation.
+
+This is the Gate 3 abstention in `docs/PROOFS.md` reproduced on current data and then
+passed — by changing the bound, not the bit depth or the operator.
 
 *Note on figures.* An earlier ad-hoc run of the same searches reported
 0.999665 for the soundness worst case and 0.9865 / 0.9802 for the real gap. Those
@@ -179,13 +242,65 @@ across sign, min, max and comparison-vs-constant.
 
 ### Status
 
-Audit only. Not fixed — AGENTS.md §12 makes an audit read-only. Fix direction:
+~~Audit only. Not fixed — AGENTS.md §12 makes an audit read-only.~~ Fix direction:
 either the empirical guard's perturbation scale for a decision on an aggregate of
 n certified rows must use the worst-case Δ/2 rather than the resample spread, or
 `Declared` must require an explicit law and `certified_run` must refuse
 aggregate-grounded branch decisions under any law not guaranteeing independence.
 Published to the fleet as `28ee148cbefb7d7f`, which **reached nobody** — recorded,
-not delivered.
+not delivered. **FIXED 2026-08-05 — see below.**
+
+### Fixed, 2026-08-05 — the first fix direction, and the defect was wider than recorded
+
+The guard now takes its perturbation scale from the K dither resamples **and** two
+worst-case systematic probes: every element of every input at `+Δ/2`, then at
+`−Δ/2`. The margin must clear 3× the largest movement any of them produces, and a
+decision that changes under either probe refuses with a reason naming the probe
+rather than the resamples — independent dither never finds this case, so blaming
+the resamples would send a reader to look at `K`.
+
+**The defect was wider than the table above records.** Re-running the shape at
+`0.499Δ` systematic offset, it certifies at **every** n tested, n = 25 included —
+not only above the √n ≳ 3 crossover. The recorded n = 25 refusal was a property of
+that run's particular margin, not a floor. Measured before the fix, all four
+inverted, all four at `branch-stable-first-order` with **width 0.0**:
+
+| n | margin | perturb_scale (dither only) | 3× | Δ/2 | pre-fix | post-fix |
+|---|---|---|---|---|---|---|
+| 25 | 0.0498 | 1.19674e-2 | 3.59021e-2 | 0.05 | certified −→+, width 0.0 | refused |
+| 100 | 0.0498 | 6.0616e-3 | 1.81848e-2 | 0.05 | certified −→+, width 0.0 | refused |
+| 400 | 0.0498 | 3.01784e-3 | 9.05353e-3 | 0.05 | certified −→+, width 0.0 | refused |
+| 1600 | 0.0498 | 1.58006e-3 | 4.74017e-3 | 0.05 | certified −→+, width 0.0 | refused |
+
+The margin is 0.0498 and Δ/2 is 0.0500: the decision sat inside the bound the
+declaration permits at every n, and only the *observed* scale made it look safe.
+`perturb_scale` halves as n quadruples — 1.197e-2, 6.06e-3, 3.02e-3, 1.58e-3 —
+which is the Δ/√(12n) cancellation the mechanism predicts, measured rather than
+argued. The 3× factor never had to be beaten by much: at n = 25 it is already
+3.59e-2 against a 4.98e-2 margin.
+
+**Why probes rather than an explicit-law refusal.** The second fix direction —
+require a law and refuse under any law not guaranteeing independence — refuses
+programs that are genuinely safe, because it never looks at the margin. The probes
+measure the bound the declaration actually gives, which is what CLAIMS.md §2 rule 3
+asks for, and they are monotonically stricter: adding a probe can only raise
+`perturb_scale` and can only clear `stable`, so nothing previously refused becomes
+admissible. `branch-stable-exact` is untouched — its deterministic Δ-separation
+guard was always worst-case and never consulted the resamples.
+
+**What is still not a theorem.** The probes are the two uniform-sign corners. A
+mixed-sign perturbation that moves a non-monotone program further is **UNMEASURED**,
+and the tier keeps its `-first-order` name for that reason. The width is also
+untouched by design: it remains a conformal order statistic over the dither law,
+and a worst-case corner is not a draw from that law, so the probes are excluded
+from it. A test asserts the width stays on the dither scale rather than the Δ/2
+scale.
+
+**Compatibility.** `branch_sites` is replay-compared, so an envelope issued before
+this carries the old, smaller `perturb_scale` and will not match a replay under the
+new code. Intended: those envelopes asserted a guard that did not hold. No golden
+vector carries a branch tier and no external verification of one is recorded, so
+nothing outside this repository is invalidated. SPEC-cne-v0 §7.5 and §8.5 amended.
 
 ---
 

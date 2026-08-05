@@ -37,7 +37,7 @@ certificate does not contain**.
 ## 2. Absences are signed content
 
 The governing specification declares 34 certificate fields. This implementation
-populates 13. The other 21 are carried in the certificate as named absences,
+populates 14. The other 20 are carried in the certificate as named absences,
 each with a reason and a kind:
 
 - **NOT_APPLICABLE** — the mechanism cannot apply to exact registration. There is

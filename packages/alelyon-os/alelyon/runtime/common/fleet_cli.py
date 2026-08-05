@@ -9,9 +9,16 @@
     alelyon-fleet claim engine/tools --note "adding a unit checker"
     alelyon-fleet ack <finding-id>
     alelyon-fleet areas                        # the coordinate space in force
+    alelyon-fleet supply                       # where the work is STUCK
 
 Read-only with respect to git — every git call is a query. It writes to one
 SQLite file.
+
+`status` answers *who is where* and `supply` answers *where the work has piled
+up* — the fleet read as a production line, with the constraint marked, the areas
+several documents run through, and the joins no record here can supply. It is
+the expensive one: it curates the Markdown corpus and expands every queued item,
+so it is asked for rather than folded into `status`.
 
 **Which repository?** `--repo` (default: the current directory). Everything is
 resolved from there: the worktrees, the coordinate space, the tracked paths.
@@ -41,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +58,8 @@ from alelyon.runtime.common import worktree_areas as A
 from alelyon.runtime.common import worktree_bus as B
 from alelyon.runtime.common import worktree_cache as C
 from alelyon.runtime.common import worktree_disciplines as D
+from alelyon.runtime.common import worktree_launch as LAUNCH
+from alelyon.runtime.common import worktree_resume as RES
 
 
 def _identify(mesh, override: str) -> tuple[str, str]:
@@ -275,7 +285,8 @@ def _cmd_publish(args, mesh, bus, session, evidence, space) -> int:
     # An unresolvable --to-area is the same trap as an unresolvable claim, and
     # worse here: publish already prints REACHED NOBODY for a legitimate empty
     # audience, so a typo is indistinguishable from "nobody is working there".
-    if args.to_area and _require_known_area(args.to_area, space) is None:
+    if args.to_area and _require_known_area(
+            args.to_area, space, mesh.repo_root) is None:
         return 2
     try:
         finding, deliveries = bus.publish(
@@ -417,7 +428,135 @@ def _cmd_open_areas(args, mesh, bus, session, evidence, space) -> int:
     return 0
 
 
-def _require_known_area(text: str, space):
+def _cmd_supply(args, mesh, bus, session, evidence, space) -> int:
+    """The fleet read as a production system: the line, and where it is stuck.
+
+    Everything the Work Supply Chain view draws, in a terminal. It exists here
+    rather than only in the window for the same reason the rest of this module
+    does: the fleet subsystems ship in the `alelyon-os` wheel, and a picture that
+    can only be seen inside one desktop application is not a shipped capability.
+
+    Read-only, and expensive by this CLI's standards — it curates the Markdown
+    corpus and expands every queued item — so it is a command a reader asks for
+    rather than part of `status`.
+    """
+    from alelyon.runtime.common import blueprint as BP
+    from alelyon.runtime.common import blueprint_focus as BF
+    from alelyon.runtime.common import job_path as JP
+    from alelyon.runtime.common import session_supply as SS
+
+    blueprint = None
+    plans: tuple = ()
+    if not args.no_corpus:
+        corpus = BP.read_corpus(mesh.repo_root)
+        blueprint = BF.curate(corpus, mesh=mesh)
+        evidence_read = JP.gather(mesh.repo_root, mesh=mesh,
+                                  database=args.database or None)
+        plans = tuple(JP.plan(entry.document, evidence_read, ready_only=True)
+                      for entry in blueprint.focus + blueprint.deferred)
+
+    activity = None
+    if not args.no_chain:
+        try:
+            from alelyon.runtime.common import session_activity as SA
+            activity = SA.read_activity(mesh.repo_root)
+        except Exception as exc:  # noqa: BLE001 - a missing records root is normal
+            print(f"  (the orchestration chain could not be read: "
+                  f"{type(exc).__name__}: {exc})", file=sys.stderr)
+
+    chain = SS.build(mesh=mesh, activity=activity, blueprint=blueprint,
+                     plans=plans, claims=bus.active_claims())
+
+    print(f"Work supply chain over {mesh.repo_root}")
+    print(f"  {chain.headline}")
+    print()
+
+    print("  THE LINE")
+    print("  STATION               IN PROCESS   PASSED   UNMEASURED")
+    neck = chain.bottleneck
+    for station in chain.stations:
+        mark = "  << CONSTRAINT" if neck is not None and station.key == neck.key \
+            else ""
+        print(f"  {station.title:<20} {station.wip:>10}   {station.passed:>6}   "
+              f"{station.unmeasured:>10}{mark}")
+    print()
+    if neck is not None:
+        print(f"  The constraint is where work has ACCUMULATED, which is a "
+              f"weaker statement")
+        print(f"  than 'this station is slowest'. Nothing records a job "
+              f"completing, so")
+        print(f"  throughput and cycle time are UNMEASURED and only queue depth "
+              f"is observed.")
+        print()
+
+    risky = [c for c in chain.chokepoints if c.risk != "ORDINARY"]
+    print(f"  {len(risky)} AREA(S) CARRYING SUPPLY RISK")
+    print("  RISK           AREA                           IN IT  DOCS  JOBS")
+    for point in risky[:args.limit]:
+        tier3 = " *" if point.tier3 else ""
+        print(f"  {point.risk:<14} {point.area:<30} {len(point.sessions):>5}  "
+              f"{len(point.documents):>4}  {point.jobs:>4}{tier3}")
+    if len(risky) > args.limit:
+        print(f"      (+{len(risky) - args.limit} more; --limit to see them)")
+    if any(c.tier3 for c in risky[:args.limit]):
+        print("  * Tier 3 -- capital, destructive, trust or release authority "
+              "(AGENTS.md 3).")
+    print()
+
+    print("  CONCENTRATION")
+    print(f"      Herfindahl {chain.concentration:.2f} over "
+          f"{chain.observed_sessions} observed session(s)")
+    print("      Sum of squared shares of outstanding paths per session. 1.00 "
+          "is one holder.")
+    print("      One session holding everything and one session being the ONLY "
+          "ONE VISIBLE")
+    print("      produce the same number, which is why the observed count is "
+          "printed with it.")
+    print()
+
+    if chain.idle_areas:
+        print(f"  {len(chain.idle_areas)} AREA(S) THE PLAN NAMES THAT NOBODY "
+              f"IS IN")
+        print(f"      {', '.join(chain.idle_areas[:16])}")
+        if len(chain.idle_areas) > 16:
+            print(f"      (+{len(chain.idle_areas) - 16} more)")
+        print()
+
+    print("  SEVERED -- a join no record in this repository can supply")
+    for what, why in chain.severed:
+        print(f"    {what}")
+        for line in _wrap(why, 72):
+            print(f"        {line}")
+    print()
+    for note in chain.notes:
+        print(f"  NOTE: {note}")
+    if chain.notes:
+        print()
+    print("WHAT THIS CANNOT TELL YOU")
+    for limit in chain.limits:
+        for index, line in enumerate(_wrap(limit, 74)):
+            print(f"  {'- ' if index == 0 else '  '}{line}")
+    return 0
+
+
+def _wrap(text: str, width: int) -> list:
+    """Fold one sentence to a width. No dependency, and no reflow of newlines."""
+    words = str(text).split()
+    lines: list = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def _require_known_area(text: str, space, repo_root: Optional[str] = None):
     """Parse `text` into an area a path can actually resolve to, or explain.
 
     `parse_area` accepts anything — it partitions on `/` and returns what it was
@@ -431,7 +570,33 @@ def _require_known_area(text: str, space):
     """
     area = A.parse_area(text)
     if space.known(area):
-        return area
+        # From the repository the space describes, never the current directory:
+        # `--repo` selects what is observed, and reading surfaces from elsewhere
+        # would check one repository's coordinate against another's layout.
+        surfaces = A.observed_surfaces(repo_root, space=space)
+        if space.derivable(area, surfaces):
+            return area
+        # The pillar is real and the surface is imagined. Same failure as
+        # below, one rung down, and it reads as success just as loudly.
+        print(f"Refused: {text!r} names a real pillar and a surface no path "
+              f"in this repository derives.", file=sys.stderr)
+        fallback = A.Area(area.pillar, "")
+        if space.derivable(fallback, surfaces):
+            print(f"  Did you mean {fallback}?", file=sys.stderr)
+            # ASCII only: this prints to a terminal, and a Windows console runs
+            # cp1252 by default. See session_supply.SEVERED for the incident.
+            print(f"  Every file directly under that pillar derives "
+                  f"{fallback}. The surface is taken from a DIRECTORY, and "
+                  f"there is none here. `tools/` is FLAT, where the file is "
+                  f"the unit and `tools/relay` is derivable; this pillar is "
+                  f"not.", file=sys.stderr)
+        else:
+            print("  Run `open-areas` for the vocabulary, or `areas` for the "
+                  "rules.", file=sys.stderr)
+        print("  Refused rather than recorded: a claim on an area nothing "
+              "resolves to is invisible to routing, and reads as success.",
+              file=sys.stderr)
+        return None
 
     print(f"Refused: {text!r} is not an area of this repository.",
           file=sys.stderr)
@@ -460,7 +625,7 @@ def _cmd_claim(args, mesh, bus, session, evidence, space) -> int:
     failure = _require_session(session)
     if failure:
         return failure
-    area = _require_known_area(args.area, space)
+    area = _require_known_area(args.area, space, mesh.repo_root)
     if area is None:
         return 2
     bus.claim(area, session, note=args.note or "")
@@ -502,11 +667,148 @@ def _cmd_ack(args, mesh, bus, session, evidence, space) -> int:
     return 0
 
 
+def _cmd_resume(args, mesh, bus, session, evidence, space) -> int:
+    """What is dormant, and -- only when explicitly authorised -- wake it.
+
+    The default is a READING. `--wake` without `--authorise` still starts
+    nothing: it shows what would be admitted and what would be refused, which is
+    the artifact worth looking at before an agent runs in a directory full of
+    somebody else's uncommitted work.
+    """
+    live = _live_sessions(mesh)
+    candidates = RES.survey(mesh.repo_root, mesh=mesh, bus=bus, space=space,
+                            live_sessions=live,
+                            older_than_days=args.older_than_days)
+    sleeping = RES.dormant(candidates)
+    print(f"Dormant worktrees over {mesh.repo_root}")
+    print(f"  {len(sleeping)} of {len(candidates)} worktree(s) read as DORMANT "
+          f"at {args.older_than_days:g} day(s)")
+
+    config = LAUNCH.read_config(mesh.repo_root)
+    if config is None:
+        print(f"  NO AGENT COMMAND DECLARED. Add a [launch] command to "
+              f"{LAUNCH.CONFIG_PATH} before anything can be woken; this "
+              f"repository refuses to guess one.")
+
+    if not sleeping:
+        print()
+        print("  Nothing is dormant. That is a reading of COMMIT AGE, not of "
+              "whether anybody is in these directories.")
+        _print_limits(RES.LIMITS)
+        return 0
+
+    chosen = _select(sleeping, args.wake)
+    if args.wake and not chosen:
+        print()
+        print(f"  No dormant worktree matches {', '.join(args.wake)}.")
+        return 1
+    plan = RES.plan(chosen or sleeping, repo_root=mesh.repo_root)
+
+    # The authority is constructed HERE, from an explicit flag, and nowhere
+    # else. `--authorise` is the whole difference between a report and a spend.
+    authority = None
+    if args.authorise:
+        authority = LAUNCH.Authority(
+            granted_by=session or "an unidentified session",
+            granted_at=time.time(),
+            covers=tuple(one.path for one in plan.selected),
+            note="declared on the alelyon-fleet command line")
+
+    print()
+    for candidate in plan.selected:
+        verdict = LAUNCH.admit(
+            candidate, plan=plan, authority=authority, live_sessions=live,
+            space=space, model=args.model, max_in_flight=args.max_in_flight,
+            configured=config is not None,
+            in_flight=LAUNCH.reserved(mesh.repo_root))
+        mark = "WOULD WAKE" if verdict.accepted else "refused"
+        print(f"  {mark:<11} {candidate.label}")
+        print(f"     {candidate.dormancy_evidence}")
+        if candidate.document:
+            print(f"     queued: {candidate.document}")
+        if not verdict.accepted:
+            print(f"     {verdict.reason}: {verdict.detail}")
+
+    if not args.authorise:
+        print()
+        print("  NOTHING WAS STARTED. Waking an agent is Tier 3 process "
+              "control and spends the owner's API budget, so it needs "
+              "--authorise, which only the owner may give.")
+        _print_limits(RES.LIMITS + LAUNCH.LAUNCH_LIMITS)
+        return 0
+
+    report = LAUNCH.launch(
+        plan, spawn=LAUNCH.detached_spawner(config, repo_root=mesh.repo_root),
+        authority=authority, model_for=lambda c: args.model,
+        live_sessions=live, space=space, max_in_flight=args.max_in_flight,
+        configured=config is not None)
+    print()
+    for request, handle in report.started:
+        print(f"  STARTED pid {handle.pid}  {request.candidate.label}")
+        print(f"     {' '.join(handle.argv)}")
+    for verdict in report.refused:
+        label = verdict.candidate.label if verdict.candidate else "?"
+        print(f"  refused {label}: {verdict.reason}")
+    if report.started:
+        print()
+        print("  A STARTED PROCESS IS NOT A WORKING AGENT. These are detached "
+              "and outlive this command; nothing here can stop them.")
+    _print_limits(LAUNCH.LAUNCH_LIMITS)
+    return 0
+
+
+def _select(candidates, labels):
+    """The dormant worktrees whose label or directory name matches."""
+    if not labels:
+        return ()
+    wanted = {one.strip().lower() for one in labels if one.strip()}
+    picked = []
+    for one in candidates:
+        tail = one.path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if one.label.lower() in wanted or tail.lower() in wanted:
+            picked.append(one)
+    return tuple(picked)
+
+
+def _live_sessions(mesh) -> tuple:
+    """Session ids the harness records as live anywhere in this mesh.
+
+    Asked per DIRECTORY, because that is the question `session_records` can
+    answer -- a record names the cwd a session started in. The union over the
+    primary checkout and every worktree is what `worktree_resume` wants, since
+    it tests membership of one worktree's session in this set.
+
+    Records the agent did not write, and the only signal allowed to contradict
+    commit age. A records root that cannot be read yields NO live sessions,
+    which reads as "nobody is there". That is the unsafe direction, so it is
+    tolerable only because every other refusal still applies -- this must never
+    be the sole thing between a wake and an occupied directory.
+    """
+    found = set()
+    directories = [mesh.repo_root] + [tree.path for tree in mesh.worktrees]
+    for directory in directories:
+        try:
+            for record in S.sessions_in(directory):
+                if record.session_id:
+                    found.add(record.session_id)
+        except Exception:                # noqa: BLE001 - containment boundary
+            continue
+    return tuple(sorted(found))
+
+
+def _print_limits(limits) -> None:
+    print()
+    print("WHAT THIS CANNOT TELL YOU")
+    for line in limits:
+        print(f"  - {line}")
+
+
 _COMMANDS = {
     "status": _cmd_status, "inbox": _cmd_inbox, "publish": _cmd_publish,
     "open-areas": _cmd_open_areas, "claim": _cmd_claim,
     "release": _cmd_release, "ack": _cmd_ack,
     "disciplines": _cmd_disciplines, "areas": _cmd_areas,
+    "supply": _cmd_supply, "resume": _cmd_resume,
 }
 
 
@@ -573,6 +875,35 @@ def build_parser() -> argparse.ArgumentParser:
     disciplines.add_argument("--paths", nargs="+", default=None,
                              help="place these paths instead of this "
                                   "worktree's outstanding work")
+
+    supply = sub.add_parser(
+        "supply", help="the fleet as a production line: where work is stuck")
+    supply.add_argument("--limit", type=int, default=12,
+                        help="how many risk-carrying areas to list")
+    supply.add_argument("--no-corpus", action="store_true",
+                        help="skip the Markdown corpus and the job expansion. "
+                             "Much faster, and the line is then empty -- which "
+                             "is a missing reading, not an idle fleet")
+    supply.add_argument("--no-chain", action="store_true",
+                        help="skip the harness transcripts; no fleet or agent "
+                             "then appears on the graph")
+
+    resume = sub.add_parser(
+        "resume", help="what is dormant, and what waking it would involve")
+    resume.add_argument("--wake", action="append", metavar="LABEL", default=None,
+                        help="worktree label to wake; repeatable. Without "
+                             "--authorise this still starts nothing")
+    resume.add_argument("--authorise", action="store_true",
+                        help="TIER 3. Actually start agents. Without it the "
+                             "answer is always no-owner-authority, which is "
+                             "the safe default rather than a fault")
+    resume.add_argument("--model", default="",
+                        help="the model to run. Never defaulted: the layer "
+                             "space says what RANK work is, never which model")
+    resume.add_argument("--max-in-flight", type=int,
+                        default=LAUNCH.DEFAULT_MAX_IN_FLIGHT)
+    resume.add_argument("--older-than-days", type=float,
+                        default=RES.DORMANT_AFTER_DAYS)
     return parser
 
 

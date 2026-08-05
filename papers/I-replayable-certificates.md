@@ -329,7 +329,7 @@ not invertible — remains open and is listed in §10.
 ## 6. Absences as signed content
 
 The governing specification for the registration certificate declares 34 fields.
-The implementation populates 13. The remaining 21 are carried in the certificate
+The implementation populates 14. The remaining 20 are carried in the certificate
 as named absences, each with a reason and a kind:
 
 - **NOT_APPLICABLE** — the mechanism cannot apply to exact registration. There is
@@ -377,7 +377,7 @@ closed.
 | `smooth-first-order` | Exchangeability holds to first order at capture deltas | Approximate; coverage harness is the falsifier |
 | `branch-sensitive` | A dither-sized perturbation can flip a discrete branch and no sound first-order object exists | **Refuses** |
 | `branch-stable-exact` | Every decision applied directly to certified data and Δ-separated per element | Theorem |
-| `branch-stable-first-order` | Decisions identical across all K resamples and margins clearing a safety multiple of the observed perturbation | Approximate — **and see §9.2** |
+| `branch-stable-first-order` | Decisions identical across all K resamples **and both worst-case systematic probes (every element at ±Δ/2)**, with margins clearing a safety multiple of the largest perturbation any of them produces | Approximate — **and see §9.2** |
 
 The two salvage guards are independent. The deterministic guard certifies the
 exact tier on its own: for an extremum, every competitor gap must exceed
@@ -505,12 +505,49 @@ Randomized search with adversarially thin margins produced **14,833 exact-tier
 firings and 0 soundness violations** across sign, minimum, maximum and
 comparison-against-constant.
 
-**Status.** Audit only; not remediated, because an audit in this program does not
-authorize remediation. Two fix directions are available: the empirical guard's
+**Status.** ~~Audit only; not remediated, because an audit in this program does not
+authorize remediation.~~ Two fix directions are available: the empirical guard's
 perturbation scale for a decision on an aggregate of n certified rows must use the
 worst-case Δ/2 rather than the resample spread; or the producer surface must require
 an explicit capture law and refuse aggregate-grounded branch decisions under any
-law that does not guarantee independence.
+law that does not guarantee independence. **REMEDIATED 2026-08-05 by the first
+direction; see below.**
+
+> **Remediated, 2026-08-05 — and Table 3's crossover was an artifact.**
+>
+> The guard now draws its perturbation scale from the K dither resamples **and**
+> two worst-case systematic probes — every element of every input at `+Δ/2`, then
+> at `−Δ/2`. A decision that changes under either refuses, naming the probe rather
+> than the resamples, since independent dither never finds this case.
+>
+> **Table 3 understated the defect.** Re-measured at a 0.499Δ systematic offset,
+> the certificate is granted at **every** n, n = 25 included — the "refuses" row
+> was a property of that run's particular margin, not a crossover the mechanism
+> requires. The margin is 0.0498 throughout against a permitted Δ/2 = 0.0500, and
+> what changes with n is only the *observed* scale, which halves as n quadruples:
+>
+> | n | margin | perturb_scale (dither only) | 3× | pre-fix | post-fix |
+> |---|---|---|---|---|---|
+> | 25 | 0.0498 | 1.19674e-2 | 3.59021e-2 | certifies, width 0.0 | refuses |
+> | 100 | 0.0498 | 6.0616e-3 | 1.81848e-2 | certifies, width 0.0 | refuses |
+> | 400 | 0.0498 | 3.01784e-3 | 9.05353e-3 | certifies, width 0.0 | refuses |
+> | 1600 | 0.0498 | 1.58006e-3 | 4.74017e-3 | certifies, width 0.0 | refuses |
+>
+> That 1/√n decay is the Δ/√(12n) cancellation of the mechanism paragraph,
+> measured rather than argued.
+>
+> **Why the first direction.** The second refuses programs that are genuinely
+> safe, because it never looks at the margin. Probing the corners measures the
+> bound the declaration actually gives, which is what the structural rule above
+> asks for, and it is monotonically stricter — a probe can only raise the scale and
+> can only clear the stability flag, so nothing previously refused becomes
+> admissible.
+>
+> **Still not a theorem.** The probes are the two uniform-sign corners; a
+> mixed-sign perturbation that moves a non-monotone program further is
+> **UNMEASURED**, which is why the tier keeps its first-order name. The width is
+> deliberately untouched: it remains a conformal order statistic over the dither
+> law, and a worst-case corner is not a draw from that law.
 
 ### 9.3 The composite's independence assumption is false and conservative
 
@@ -574,8 +611,12 @@ implementation. This is the first measurement of it.
 
 ## 10. Limitations and open problems
 
-1. **§9.2 is an open defect.** The first-order salvage tier is unsound under
-   interval-bounded storage. It is documented, not fixed.
+1. ~~**§9.2 is an open defect.** The first-order salvage tier is unsound under
+   interval-bounded storage. It is documented, not fixed.~~ **Closed 2026-08-05**
+   by worst-case systematic probes (§9.2). What remains open is narrower and is
+   stated there: the probes are the two uniform-sign corners, so a mixed-sign
+   perturbation of a non-monotone program is **UNMEASURED**, and the tier keeps
+   its first-order name for that reason.
 2. **§9.4 is an open specification defect.** A second implementation cannot
    reproduce the commitment from the written rules.
 3. **Verification is not an independent implementation.** Per §3.2, the verifier
@@ -669,6 +710,16 @@ specification does not reproduce its own bytes. Both are consequences of the sam
 underlying pattern — a guarantee resting on a premise that nothing in the system
 checks. That pattern, rather than either defect, is what this paper would put to a
 reviewer first.
+
+The first of the two was closed on 2026-08-05 (§9.2) by measuring the guard against
+the bound the declaration actually gives — the ±Δ/2 corners — instead of against
+the spread of a resampling law nobody had checked the data against. The fix is
+worth reading as evidence for the pattern rather than against it: the tier was not
+wrong about margins, it was reading its premise from the wrong place, and the
+repair was to stop inferring the premise and probe it. The encoding defect remains
+open, and so does the narrower residue of the first: the probes are the two
+uniform-sign corners, and a mixed-sign perturbation of a non-monotone program is
+**UNMEASURED**.
 
 ---
 

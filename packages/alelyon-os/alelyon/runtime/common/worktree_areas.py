@@ -71,6 +71,8 @@ from typing import Iterable, Mapping, Optional, Sequence, Tuple
 import os
 import subprocess
 
+from alelyon.runtime.common import toolpath
+
 #: Extending the pillar table or changing a surface depth changes what an area
 #: *means*, and stored areas from before the change would silently re-point.
 #: DYNAMIC-CACHE.md §4 rule 1 makes that a version bump rather than a refactor.
@@ -285,6 +287,34 @@ class AreaSpace:
         bad record can still be inspected and released.
         """
         return area.pillar in self.known_pillars
+
+    def derivable(self, area: Area, surfaces) -> bool:
+        """Whether a path in this repository actually derives `area`.
+
+        `known` checks the PILLAR and stops there, which is why it accepted
+        `runtime.common/session_activity`: `runtime.common` is a real pillar, so
+        the surface was never examined. But that pillar's rule has depth 1 over a
+        directory with no subdirectories, so `area_of` trims the filename and
+        every file under it derives `runtime.common` with an empty surface. No
+        path can produce that coordinate, and a claim on it is invisible to
+        routing while reporting success — the `platform.gateway` failure one rung
+        down, where the pillar is right and only the surface is imagined.
+
+        Measured on this repository at `9ec3d59`: 8 of 39 active claims were in
+        that state, all of the `runtime.common/<file>` form. The habit is
+        imported from `tools/`, which is declared FLAT — "the file is the unit" —
+        where `tools/relay` genuinely is derivable.
+
+        `surfaces` is what `observed_surfaces` returns. **An empty set means the
+        surfaces were never observed, not that none exist**, so this answers True
+        rather than refusing everything on missing evidence — the same direction
+        `tier3` takes for an undeclared space, and for the same reason.
+        """
+        if not surfaces:
+            return True
+        if not area.surface:
+            return area.pillar in {pillar for pillar, _s in surfaces}
+        return (area.pillar, area.surface) in surfaces
 
     def tier3(self, area: Area) -> bool:
         """Work here needs explicit owner authority.
@@ -503,7 +533,7 @@ def _read_config(path: Path) -> AreaSpace:
 def _tracked_paths(repo_root: str) -> Sequence[str]:
     try:
         probe = subprocess.run(
-            ["git", "ls-files"], cwd=repo_root, check=False,
+            toolpath.argv("git", "ls-files"), cwd=repo_root, check=False,
             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return ()
@@ -521,7 +551,7 @@ def repo_root_of(start: Optional[str] = None) -> Optional[str]:
     """
     try:
         probe = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            toolpath.argv("git", "rev-parse", "--show-toplevel"),
             cwd=str(start or Path.cwd()), check=False,
             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
@@ -574,6 +604,48 @@ def set_default_space(space: Optional[AreaSpace]) -> None:
     """Install a space (or `None` to force re-resolution on next use)."""
     global _DEFAULT
     _DEFAULT = space
+    _SURFACES.clear()
+
+
+def surfaces_of(paths: Iterable[str],
+                space: Optional[AreaSpace] = None) -> frozenset:
+    """Every `(pillar, surface)` some path in `paths` actually derives.
+
+    Pure, and the whole of the rule: a coordinate exists because a path produces
+    it, never because it is well-formed. `UNMAPPED` is excluded — it is the
+    answer for a path the rules do not place, not a surface anyone works in.
+    """
+    resolved = space or default_space()
+    return frozenset((area.pillar, area.surface)
+                     for area in resolved.areas_of(paths) if area.mapped)
+
+
+#: `observed_surfaces` per repository root. Cached because the answer costs a
+#: `git ls-files` and does not change within one command.
+_SURFACES: dict = {}
+
+
+def observed_surfaces(repo_root: Optional[str] = None, *,
+                      space: Optional[AreaSpace] = None) -> frozenset:
+    """The coordinates this repository's tracked paths actually derive.
+
+    Not folded into `load()` on purpose. A **declared** space is read from
+    `.alelyon/fleet.toml` and costs no git call at all, and making every process
+    that resolves one path pay for `git ls-files` to satisfy a check only the
+    claim path performs would be a poor trade. This is therefore asked for
+    explicitly, by the one caller that is creating a coordinate rather than
+    reading one back.
+
+    Returns an empty set when there is no checkout or nothing is tracked, which
+    every caller must read as **"not observed"** and never as "nothing exists".
+    """
+    root = repo_root if repo_root is not None else repo_root_of()
+    if root is None:
+        return frozenset()
+    key = str(root)
+    if key not in _SURFACES:
+        _SURFACES[key] = surfaces_of(_tracked_paths(key), space)
+    return _SURFACES[key]
 
 
 def area_of(path: str, space: Optional[AreaSpace] = None) -> Area:

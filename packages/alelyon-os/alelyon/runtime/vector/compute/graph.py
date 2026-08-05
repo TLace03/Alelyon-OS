@@ -17,10 +17,10 @@ crucially, **no uncertainty propagation**. This is the honest first framework:
   • `propagate()` — Monte-Carlo uncertainty propagation: draw every source from
     its distribution, push all draws through the DAG at once (vectorised over the
     sample axis), and summarise each node's resulting marginal (mean, std, 90%
-    credible interval). Reuses `engines/stats_engine.MonteCarloSimulator` as the
-    RNG kernel (roadmap mandate). Also attributes each sink node's variance back
-    to its sources (first-order share) so a caller can say *which input drives
-    the uncertainty*.
+    credible interval). The RNG kernel is `np.random.default_rng(seed)`; pass
+    `simulator=` to share an existing one. Also attributes each sink node's
+    variance back to its sources (first-order share) so a caller can say *which
+    input drives the uncertainty*.
 
 Node `fn`s MUST be elementwise / sample-axis-agnostic — the SAME callable runs
 on scalars (evaluate) and on (n,) arrays (propagate). Sums, products, weighted
@@ -203,14 +203,16 @@ class ComputationGraph:
             raise ComputeGraphError("propagate needs n_samples >= 2")
         order = self.topological_order()          # validates the DAG first
 
-        if simulator is not None:
-            rng = simulator.rng
-        else:
-            try:                       # reuse the engine's seeded MC kernel if present
-                from alelyon.runtime.vector.stats_engine import MonteCarloSimulator
-                rng = MonteCarloSimulator(seed=seed).rng
-            except Exception:  # noqa: BLE001 — decoupled fallback (e.g. web deploy,
-                rng = np.random.default_rng(seed)   # no engine): a plain seeded RNG
+        # `MonteCarloSimulator(seed).rng` IS `np.random.default_rng(seed)` — one
+        # line, stats_engine.py:180. Importing it bought a vector -> sentinel
+        # dependency (stats_engine.py:10 pulls in sentinel.alert_engine at module
+        # scope) for no numerical difference, and stats_engine does not ship in
+        # the alelyon-os wheel — so every external caller took the except branch
+        # while every in-repo caller took the try branch. Two populations running
+        # different code, identical only by coincidence and pinned by nothing.
+        # Calling numpy directly makes them identical by construction.
+        # `simulator=` remains the seam for sharing an RNG across graphs.
+        rng = simulator.rng if simulator is not None else np.random.default_rng(seed)
 
         draws: Dict[str, np.ndarray] = {}
         for name in order:
@@ -220,6 +222,22 @@ class ComputationGraph:
                 if s.shape != (n,):
                     raise ComputeGraphError(
                         f"source '{name}' sampled shape {s.shape}, expected ({n},)")
+                # `Distribution` (types.py:31) says implementations MUST return
+                # finite means and length-n arrays. Only the length half was
+                # enforced, two lines up, and the finite half decided nothing —
+                # so a `Normal(mu, inf)` sampled to +/-inf, every statistic
+                # downstream became nan, and NOTHING raised. Worse than the nan:
+                # `_attribute_variance` then dropped that source, so the input
+                # with UNBOUNDED uncertainty vanished from "what drives the
+                # uncertainty" while the ranking still looked healthy.
+                if not np.all(np.isfinite(s)):
+                    bad = int(np.count_nonzero(~np.isfinite(s)))
+                    raise ComputeGraphError(
+                        f"source '{name}' sampled {bad} non-finite value(s) of "
+                        f"{n}; a Distribution must return finite draws "
+                        f"(types.py:31). An infinite or undefined uncertainty is "
+                        f"a refusal to state one, and it must not enter the DAG "
+                        f"as though it were a number")
                 draws[name] = s
             else:
                 inp = {d: draws[d] for d in node.deps}
@@ -277,18 +295,34 @@ class ComputationGraph:
         y = draws[target]
         if y.shape[0] < 3:
             return {}
+        # A non-finite target has no decomposition. Ranking the finite sources
+        # against a quantity that is not a number reports a share of nothing.
+        if not np.all(np.isfinite(y)):
+            return {}
         yv = float(np.var(y))
         if yv <= 1e-15:
             return {}
         raw: Dict[str, float] = {}
         for name in self.sources():
             x = draws[name]
+            # NOT `continue`, which is what a bare `isfinite(r)` filter amounted
+            # to. A source whose draws are non-finite carries the LARGEST
+            # uncertainty there is; skipping it renormalises the rest to 1.0 and
+            # presents the remaining sources as the whole story, with the real
+            # driver absent rather than first. Refuse the attribution instead —
+            # naming nothing is recoverable, naming the wrong input is not.
+            # Unreachable for a source now that `propagate` rejects non-finite
+            # draws at the sampling step; kept because this is the place the
+            # evidence was destroyed, and a future caller may reach it another way.
+            if not np.all(np.isfinite(x)):
+                return {}
             xv = float(np.var(x))
-            if xv <= 1e-15:
+            if xv <= 1e-15:          # a genuine constant contributes no variance
                 continue
             r = float(np.corrcoef(x, y)[0, 1])
-            if np.isfinite(r):
-                raw[name] = r * r
+            if not np.isfinite(r):
+                return {}
+            raw[name] = r * r
         tot = sum(raw.values())
         if tot <= 0.0:
             return {}

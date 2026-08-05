@@ -68,6 +68,7 @@ does it, and current activity is by definition at the end.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 import json
 import os
@@ -120,6 +121,11 @@ _SECRET = re.compile(
 
 _ROLE_ASSISTANT = "assistant"
 _ROLE_USER = "user"
+
+#: An absolute path, in either convention a tool call can carry: a Windows drive
+#: (`C:/…`, and `\\\\server\\share` once separators are normalised) or a POSIX
+#: root. Matched on the slash-normalised form, so only forward slashes appear.
+_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:/|/)")
 
 LIMITS: tuple[str, ...] = (
     "An agent's reasoning is the model's own output. It is quoted, never "
@@ -217,6 +223,22 @@ class AgentRun:
     @property
     def model(self) -> str:
         return self.models[0] if self.models else UNATTRIBUTED
+
+    @property
+    def repo_files(self) -> tuple[str, ...]:
+        """`files`, as repository-relative paths, using this agent's own `cwd`.
+
+        The agent is the right root to use and the session is not: an agent given
+        `isolation: worktree` runs in a checkout of its own, which is why `cwd`
+        is carried per agent rather than inherited. A worktree path resolves to
+        the file it is a checkout of either way — see `repo_relative`.
+
+        Files outside the repository are dropped, so this is shorter than
+        `files` whenever an agent touched a scratchpad. Compare the two lengths
+        rather than assuming this placed everything.
+        """
+        roots = [r for r in (repo_root_of(self.cwd), self.cwd) if r]
+        return repo_paths_of(self.files, roots=roots)
 
     @property
     def elapsed_seconds(self) -> int | None:
@@ -457,6 +479,104 @@ def _files_in(payload) -> list[str]:
         if isinstance(value, str) and value.strip():
             out.append(value.strip())
     return out
+
+
+#: The segment a git worktree lives under. A worktree is a second checkout of
+#: the same repository, so a file inside one is a file in the repository and its
+#: subject is the path BELOW this marker — `alelyon/x.py`, not
+#: `.claude/worktrees/wt-9/alelyon/x.py`, which matches no area rule at all.
+_WORKTREE_MARK = "/.claude/worktrees/"
+
+
+def _posix(path: str) -> str:
+    """Separators normalised, quotes and stray whitespace removed."""
+    return str(path or "").strip().strip('"').strip("'").replace("\\", "/")
+
+
+def repo_root_of(path: str) -> str:
+    """The main checkout a path belongs to, when it is inside a worktree.
+
+    A worktree of this repository lives at `<root>/.claude/worktrees/<name>`, so
+    the root is simply the text before that marker. Returns "" when the path
+    names no worktree, which is not the same as "not in a repository" — it means
+    this rule had nothing to say and the caller should use a root it already
+    knows.
+    """
+    posix = _posix(path)
+    cut = posix.find(_WORKTREE_MARK)
+    return posix[:cut] if cut > 0 else ""
+
+
+def repo_relative(path: str, *, roots: Iterable[str] = ()) -> str:
+    """One raw tool-payload path as a repository-relative POSIX path, or "".
+
+    `AgentRun.files` holds the strings tool calls actually carried, which are
+    very often absolute and Windows-shaped —
+    `C:\\Users\\...\\famMain\\alelyon\\runtime\\common\\blueprint.py`. Every area
+    rule in `worktree_areas` is a repository-RELATIVE prefix (`alelyon/runtime/`),
+    and `area_of` only normalises separators, so an absolute path matches no rule
+    and resolves to `UNMAPPED`. Measured over 1256 agents and 6852 recorded
+    files, 28 resolved to an area — 0.4% — while 6216 of those files were inside
+    the repository. This is the conversion that was missing.
+
+    An empty string is returned for anything that cannot be shown to be inside
+    one of `roots`, and that is deliberate: an agent's scratchpad file and a
+    transcript under `~/.claude/projects` are genuinely not repository work, and
+    guessing them into an area would replace a blind edge with a wrong one.
+
+    A path inside a worktree is reported as the file it is a checkout OF, so two
+    agents editing the same module from different worktrees agree on the subject.
+
+    What this does not do: it never touches the filesystem, so it cannot tell a
+    path that exists from one that does not, and a relative path is trusted to be
+    relative to the repository rather than resolved against anything.
+    """
+    posix = _posix(path)
+    if not posix:
+        return ""
+
+    inside = repo_root_of(posix)
+    if inside:
+        # Inside a worktree, whatever root the caller had in mind.
+        posix = posix[len(inside) + len(_WORKTREE_MARK):]
+        cut = posix.find("/")
+        return posix[cut + 1:] if cut >= 0 else ""
+
+    absolute = bool(_ABSOLUTE.match(posix))
+    if absolute:
+        best = ""
+        for root in roots:
+            candidate = _posix(root).rstrip("/")
+            if not candidate:
+                continue
+            head = posix[:len(candidate)]
+            if head.casefold() == candidate.casefold() and \
+                    posix[len(candidate):len(candidate) + 1] == "/" and \
+                    len(candidate) > len(best):
+                best = candidate
+        if not best:
+            return ""
+        posix = posix[len(best) + 1:]
+
+    # A relative path that climbs out of the tree describes something this
+    # cannot place, and `..` never appears in a repository-relative path.
+    if not posix or posix.startswith("../") or posix == "..":
+        return ""
+    return posix.lstrip("/")
+
+
+def repo_paths_of(paths: Iterable[str], *,
+                  roots: Iterable[str] = ()) -> tuple[str, ...]:
+    """`repo_relative` over many paths: sorted, deduplicated, blanks dropped.
+
+    The count of what fell out is not reported here. A caller that needs to say
+    "n of m files were placed" should compare against the input, because a
+    silently shorter tuple is exactly how a coverage claim becomes wrong.
+    """
+    roots = tuple(roots)
+    return tuple(sorted({rel for rel in
+                         (repo_relative(p, roots=roots) for p in (paths or ()))
+                         if rel}))
 
 
 @dataclass
@@ -863,5 +983,6 @@ __all__ = [
     "ACTIVITY_SCHEMA", "Activity", "ActivityIndex", "AgentRun", "EXCERPT_CHARS",
     "FLEET_DIRECT", "FLEET_WORKFLOW", "Fleet", "LIMITS", "QUIET", "RECENT_TURNS",
     "RUNNING", "RUNNING_MINUTES", "SETTLED", "STATUSES", "STOPPED", "SessionRun",
-    "Turn", "read_activity", "redact",
+    "Turn", "read_activity", "redact", "repo_paths_of", "repo_relative",
+    "repo_root_of",
 ]

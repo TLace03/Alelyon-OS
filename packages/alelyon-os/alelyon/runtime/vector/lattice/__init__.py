@@ -6,10 +6,12 @@ canonical byte encoding with content commitments, a replay checker that recovers
 a committed chain from those bytes and re-executes it, and a signed Registration
 Certificate for an exact correspondence.
 
-The certificate populates 13 of the specification's 34 fields and carries the
-other 21 as named absences inside its signed bytes. It does not read payloads,
+The certificate populates 14 of the specification's 34 fields and carries the
+other 20 as named absences inside its signed bytes. It does not read payloads,
 remap values, propagate uncertainty, or claim optimality, and a signature binds
-bytes to a key rather than establishing who holds it. See
+bytes to a key rather than establishing who holds it. Its one measured bound,
+`inverse_consistency`, is a count over a derived probe sample rather than a proof
+that the chain inverts everywhere. See
 `docs/architecture/adr/ADR-0001-lattice-foundation.md`, `ADR-0002` and `ADR-0004`
 for the frozen boundary.
 """
@@ -59,6 +61,13 @@ from alelyon.runtime.vector.lattice.contracts import (
     TopologyType,
     label_dictionary_ref,
 )
+from alelyon.runtime.vector.lattice.inverse import (
+    MAX_PROBES,
+    InverseConsistency,
+    InverseConsistencyCode,
+    derive_probe_coordinates,
+    measure_inverse_consistency,
+)
 from alelyon.runtime.vector.lattice.morphometry import (
     Cell,
     FAMILIES,
@@ -84,6 +93,13 @@ from alelyon.runtime.vector.lattice.registration import (
     DeclaredTimezoneConversion,
     DeclaredUnitConversion,
     analyze_exact_compatibility,
+)
+from alelyon.runtime.vector.lattice.timezone_audit import (
+    TimezoneAuditFinding,
+    TimezoneAuditReport,
+    TimezoneAuditVerdict,
+    audit_declared_conversion,
+    audit_timezone_transform,
 )
 from alelyon.runtime.vector.lattice.transforms import (
     AxisOrderingTransform,
@@ -121,6 +137,11 @@ __all__ = [
     "CalendarTransform",
     "CANONICAL_SCHEMA",
     "CERTIFICATE_SCHEMA",
+    "InverseConsistency",
+    "InverseConsistencyCode",
+    "MAX_PROBES",
+    "derive_probe_coordinates",
+    "measure_inverse_consistency",
     "CanonicalEncodingError",
     "ContractViolationError",
     "Cell",
@@ -161,6 +182,9 @@ __all__ = [
     "ScalarType",
     "SignedRegistrationCertificate",
     "TensorRecord",
+    "TimezoneAuditFinding",
+    "TimezoneAuditReport",
+    "TimezoneAuditVerdict",
     "TimezoneTransform",
     "TopologyType",
     "TransformChain",
@@ -170,6 +194,8 @@ __all__ = [
     "VoxelField",
     "analyze_exact_compatibility",
     "analyze_model_morphometry",
+    "audit_declared_conversion",
+    "audit_timezone_transform",
     "axis_bytes",
     "certificate_bytes",
     "certify_model_morphometry",

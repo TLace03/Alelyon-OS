@@ -96,7 +96,53 @@ def _resolve() -> tuple[Path, Path, bool]:
 
 REPO_ROOT, GLOBALS_DIR, INSTALLED = _resolve()
 
+
+def _package_root() -> Path:
+    """The `alelyon` package directory, found by NAME rather than by depth.
+
+    `REPO_ROOT` answers "where does state live", and deliberately becomes a
+    per-user directory when installed. A different question keeps being asked
+    across the tree -- "where is the code I shipped with" -- and it kept being
+    answered by counting parents:
+
+        Path(__file__).resolve().parents[3]        # frontend/desktop/...
+        Path(__file__).resolve().parents[5]        # frontend/desktop/lattice/...
+        Path(__file__).resolve().parent.parent     # and this one was WRONG
+
+    Every one of those encodes the module's own nesting depth at the moment it
+    was written, which is precisely what breaks when a file moves. The
+    `alelyon.*` refactor moved files and silently invalidated the counts; the
+    `parent.parent` above resolved to `alelyon/frontend/globals/`, a directory
+    that has never existed, and the cache written through it failed into a bare
+    `except Exception` for months without one visible symptom.
+
+    A package's relationship to the modules inside it does not depend on where
+    the tree as a whole is mounted, so walking up to the directory NAMED
+    `alelyon` is stable under a checkout, a wheel, and a frozen bundle alike.
+
+    Nearest match wins, which matters for a checkout that is itself in a
+    directory called `alelyon`: `.../alelyon/alelyon/runtime/...` must resolve to
+    the inner one, and `Path.parents` is ordered nearest-first.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if parent.name == "alelyon":
+            return parent
+    # This module is inside the package, so the loop finding nothing means the
+    # package was renamed. Its own directory is the closest honest answer.
+    return here.parent
+
+
+#: The `alelyon` package directory itself.
+PACKAGE_ROOT = _package_root()
+
+#: The directory CONTAINING the package -- the repository root in a checkout,
+#: `site-packages` in an installed wheel, the bundle directory when frozen.
+#: Use for locating code and shipped assets. For STATE, use `GLOBALS_DIR`.
+INSTALL_ROOT = PACKAGE_ROOT.parent
+
 #: True when no source checkout backs these paths — `REPO_ROOT` is then a state
 #: directory rather than a repository, and nothing may assume a repository
 #: layout (`<root>/alelyon/...`, `<root>/docs/...`) exists beneath it.
-__all__ = ["REPO_ROOT", "GLOBALS_DIR", "INSTALLED"]
+__all__ = ["REPO_ROOT", "GLOBALS_DIR", "INSTALLED", "PACKAGE_ROOT",
+           "INSTALL_ROOT"]

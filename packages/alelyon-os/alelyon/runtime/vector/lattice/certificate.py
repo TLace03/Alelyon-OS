@@ -10,7 +10,7 @@ database.
 Scope, stated rather than implied
 ---------------------------------
 The governing specification (MODEL-MORPHOMETRY.md §25.1) declares 34 certificate
-fields. This slice populates 13 of them. The other 21 refer to mechanisms that do
+fields. This slice populates 14 of them. The other 20 refer to mechanisms that do
 not exist here -- there is no artifact manifest, no template registry, no search
 plan, no metric registry, no objective, no payload remapping, no uncertainty
 propagation and no execution trace -- and each is carried in the certificate as a
@@ -20,6 +20,13 @@ measured it. The absences are part of the signed bytes, so a certificate cannot
 understate what it leaves out, and `DECLARED_ABSENCES` is asserted complete
 against the spec's field list by
 `tests/vector/test_lattice_certificate.py::test_every_spec_field_is_populated_or_named_absent`.
+
+`inverse_consistency_bounds` was one of the two UNMEASURED absences and is now
+populated: `inverse.measure_inverse_consistency` round-trips a derived probe set
+through the chain and its own `invert()`, and the counts are signed. Read that
+module for the boundary -- a probe sample bounds inverse consistency from below
+and does not prove it over the whole domain. `execution_trace_commitment` remains
+the one UNMEASURED field.
 
 What a CERTIFICATE_VERIFIED report establishes
 ----------------------------------------------
@@ -38,6 +45,9 @@ What it does not establish
 * Not that the registration is *correct* for any dataset. A semantically wrong
   but internally consistent chain verifies cleanly, exactly as it replays cleanly.
 * Not optimality. Nothing here searches an objective, so no field claims a bound.
+* Not that the chain inverts everywhere. `inverse_consistency` is a count over a
+  finite derived probe set, and a chain that admitted no probe reports that
+  rather than a clean result.
 * Nothing about payload values. No artifact is read and no value is remapped.
 * Not an independent implementation. Verification shares the contract, transform
   and canonical modules with the issuer, so a defect in those is reproduced
@@ -78,6 +88,11 @@ from alelyon.runtime.vector.lattice.contracts import (
     _bounded_tuple,
     _text,
 )
+from alelyon.runtime.vector.lattice.inverse import (
+    InverseConsistency,
+    InverseConsistencyCode,
+    measure_inverse_consistency,
+)
 from alelyon.runtime.vector.lattice.registration import (
     COMPOSED_STAGE_ORDER,
     EXACT_CHAIN_SHAPES,
@@ -97,9 +112,14 @@ from alelyon.runtime.vector.lattice.verify import (
 )
 
 
-CERTIFICATE_SCHEMA = "alelyon.lattice.registration-certificate/0.1"
-CERTIFICATE_DOMAIN = "alelyon.lattice.canonical.registration-certificate/0.1"
+#: Bumped from 0.1 when `inverse_consistency_bounds` stopped being an absence and
+#: became a populated field. The record gained a member and the absence list lost
+#: one, so 0.1 bytes and 0.2 bytes are different encodings of different records; a
+#: reader for one is not a reader for the other, which is what a version is for.
+CERTIFICATE_SCHEMA = "alelyon.lattice.registration-certificate/0.2"
+CERTIFICATE_DOMAIN = "alelyon.lattice.canonical.registration-certificate/0.2"
 ABSENCE_DOMAIN = "alelyon.lattice.canonical.field-absence/0.1"
+INVERSE_CONSISTENCY_DOMAIN = "alelyon.lattice.canonical.inverse-consistency/0.1"
 
 #: Declared build identifiers for the two halves the specification separates
 #: (§25.1 `candidate_generator_build`, `reference_verifier_build`). These are
@@ -228,6 +248,9 @@ POPULATED_FIELDS: Mapping[str, str] = MappingProxyType({
     "template_commitment": "template_space_ref",
     "transform_chain_ref": "transform_chain_ref",
     "transform_chain_commitment": "transform_chain_ref",
+    "inverse_consistency_bounds": "inverse_consistency (a measured probe sample: "
+                                  "see alelyon.runtime.vector.lattice.inverse for "
+                                  "what a sample bounds and what it does not)",
     "proof_status": "compatibility_code",
     "determinism_profile": "determinism_profile",
     "candidate_generator_build": "candidate_generator_build",
@@ -333,12 +356,6 @@ DECLARED_ABSENCES = (
         "no uncertainty propagation exists in this slice",
     ),
     FieldAbsence(
-        "inverse_consistency_bounds",
-        FieldStatus.UNMEASURED,
-        "the chain declares EXACT invertibility and inversion is implemented, but "
-        "no inverse-consistency measurement is performed or recorded",
-    ),
-    FieldAbsence(
         "hardware_profile",
         FieldStatus.NOT_APPLICABLE,
         "the exact path is integer and string comparison with no floating-point "
@@ -410,7 +427,14 @@ class RegistrationCertificate:
     template_space_ref: str
     transform_chain_ref: str
     loss_class: LossClass
+    #: Structural: EXACT because every member type declares it. Says nothing
+    #: about whether the chain's own `invert()` actually recovers a coordinate.
     invertibility: Invertibility
+    #: The measurement `invertibility` is not. Required rather than optional: a
+    #: certificate that could omit it would be back to the UNMEASURED absence
+    #: this schema version exists to close, and a reader could not tell an
+    #: issuer that measured nothing from one that measured and stayed quiet.
+    inverse_consistency: InverseConsistency
     schema_version: str = CERTIFICATE_SCHEMA
     determinism_profile: DeterminismProfile = DeterminismProfile.STRICT_REFERENCE
     candidate_generator_build: str = CANDIDATE_GENERATOR_BUILD
@@ -443,6 +467,18 @@ class RegistrationCertificate:
             raise TypeError("loss_class must be a LossClass")
         if not isinstance(self.invertibility, Invertibility):
             raise TypeError("invertibility must be an Invertibility")
+        if type(self.inverse_consistency) is not InverseConsistency:
+            raise TypeError("inverse_consistency must be an InverseConsistency")
+        if self.inverse_consistency.code is InverseConsistencyCode.RECOVERY_MISMATCH:
+            # A record declaring EXACT invertibility beside a measurement that
+            # found a coordinate the inverse did not recover would assert two
+            # contradictory things at once, and a reader checking only the
+            # declaration would be misled by a certificate that contains its own
+            # refutation. Refused here so it cannot be signed at all.
+            raise ValueError(
+                "a measured recovery mismatch cannot be certified: the chain's "
+                "declared invertibility is contradicted by its own round trip"
+            )
         for name in ("source_space_ref", "template_space_ref", "transform_chain_ref"):
             object.__setattr__(
                 self, name, _content_reference(getattr(self, name), name)
@@ -477,6 +513,42 @@ class RegistrationCertificate:
         object.__setattr__(self, "absences", absences)
 
 
+def _inverse_consistency_bytes(measurement: InverseConsistency) -> bytes:
+    """Encode the measurement. The counts are signed, not only the verdict.
+
+    A verifier that saw only `EXACT_ON_EVERY_PROBE` could not tell a chain that
+    round-tripped every probe from one that was handed a single probe, so the
+    sample size is part of what the key signs.
+    """
+
+    return (
+        _domain(INVERSE_CONSISTENCY_DOMAIN)
+        + _string(measurement.code.value)
+        + _u64(measurement.probes_offered)
+        + _u64(measurement.probes_admitted)
+        + _u64(measurement.probes_recovered)
+    )
+
+
+def _read_inverse_consistency(reader: _Reader) -> InverseConsistency:
+    reader.expect_domain(INVERSE_CONSISTENCY_DOMAIN)
+    code = _read_enum(reader, InverseConsistencyCode, "inverse_consistency code")
+    offered = _read_u64(reader)
+    admitted = _read_u64(reader)
+    recovered = _read_u64(reader)
+    try:
+        return InverseConsistency(code, offered, admitted, recovered)
+    except (TypeError, ValueError) as exc:
+        # The record's own coherence rules — counts that narrow, and a code its
+        # counts agree with — are enforced on the way in as well as on the way
+        # out, so bytes claiming a clean run over impossible counts are refused
+        # here rather than decoded into a record nobody could have built.
+        raise CanonicalEncodingError(
+            f"the encoded inverse-consistency measurement is not a valid "
+            f"record: {exc}"
+        ) from exc
+
+
 def _absence_bytes(absence: FieldAbsence) -> bytes:
     return (
         _domain(ABSENCE_DOMAIN)
@@ -502,6 +574,7 @@ def certificate_bytes(certificate: RegistrationCertificate) -> bytes:
         + _string(certificate.transform_chain_ref)
         + _string(certificate.loss_class.value)
         + _string(certificate.invertibility.value)
+        + _inverse_consistency_bytes(certificate.inverse_consistency)
         + _string(certificate.candidate_generator_build)
         + _string(certificate.reference_verifier_build)
         + _sequence(_string(warning) for warning in certificate.warnings)
@@ -556,6 +629,7 @@ def read_certificate(payload: bytes) -> RegistrationCertificate:
     chain_ref = reader.string()
     loss_class = _read_enum(reader, LossClass, "loss_class")
     invertibility = _read_enum(reader, Invertibility, "invertibility")
+    inverse_consistency = _read_inverse_consistency(reader)
     candidate_generator_build = reader.string()
     reference_verifier_build = reader.string()
     warnings = tuple(
@@ -576,6 +650,7 @@ def read_certificate(payload: bytes) -> RegistrationCertificate:
             transform_chain_ref=chain_ref,
             loss_class=loss_class,
             invertibility=invertibility,
+            inverse_consistency=inverse_consistency,
             schema_version=schema_version,
             determinism_profile=determinism_profile,
             candidate_generator_build=candidate_generator_build,
@@ -771,6 +846,19 @@ def issue_registration_certificate(
             "chain maps target->source, so template_space must be its target"
         )
 
+    # Measured, not asserted, and not a parameter: an issuer that could pass this
+    # in could pass in a result it did not take, which is the shape of claim
+    # `docs/cne/CLAIMS.md` §2.2 forbids. The probe set is derived from the chain,
+    # so there is nothing here for an issuer to choose either.
+    measurement = measure_inverse_consistency(chain)
+    if measurement.code is InverseConsistencyCode.RECOVERY_MISMATCH:
+        raise CertificateError(
+            "the chain declares EXACT invertibility but its own inverse did not "
+            f"recover {measurement.probes_admitted - measurement.probes_recovered} "
+            f"of {measurement.probes_admitted} probe coordinate(s); this is a "
+            "defect in the chain, not a certifiable registration"
+        )
+
     certificate = RegistrationCertificate(
         issued_at_unix_seconds=issued_at_unix_seconds,
         compatibility_code=report.code,
@@ -779,6 +867,7 @@ def issue_registration_certificate(
         transform_chain_ref=transform_chain_ref(chain),
         loss_class=chain.loss_class,
         invertibility=chain.invertibility,
+        inverse_consistency=measurement,
         warnings=tuple(warnings),
     )
     payload = certificate_bytes(certificate)
@@ -903,12 +992,18 @@ def verify_registration_certificate(
         signed.certificate.template_space_ref,
         signed.certificate.loss_class,
         signed.certificate.invertibility,
+        # The measurement is re-taken by the replay from the chain it decoded,
+        # not read from the certificate. That is the whole value of signing a
+        # count: an issuer claiming a clean round trip over probes it never ran
+        # disagrees here with the verifier's own run and is refused.
+        signed.certificate.inverse_consistency,
     )
     replayed = (
         replay.source_space_ref,
         replay.target_space_ref,
         replay.loss_class,
         replay.invertibility,
+        replay.inverse_consistency,
     )
     # The declared class is checked against the replayed *shape* by the same rule
     # the report side uses, rather than against a fixed tuple: a composed chain's
@@ -945,6 +1040,7 @@ def verify_registration_certificate(
             "template_space_ref",
             "loss_class",
             "invertibility",
+            "inverse_consistency",
         )
         evidence = [
             f"{name}: declared={declared_value!r} replayed={replayed_value!r}"

@@ -55,6 +55,8 @@ from pathlib import Path
 import subprocess
 import time
 
+from alelyon.runtime.common import toolpath
+
 #: The label vocabulary. Closed, for the same reason the ledger's refusal
 #: reasons are closed: "why was my run scored that way" must have an answer that
 #: is the same every time it is asked.
@@ -89,7 +91,7 @@ _NOT_ANCESTOR = "not-ancestor"
 def _git(*args: str, repo) -> tuple[int, str]:
     """A query. Nothing in this module writes to the repository."""
     try:
-        proc = subprocess.run(["git", "-C", str(repo), *args],
+        proc = subprocess.run(toolpath.argv("git", "-C", str(repo), *args),
                               capture_output=True, text=True,
                               timeout=_GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
@@ -359,8 +361,8 @@ def _git_common_dir(path: Path) -> str | None:
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--path-format=absolute",
-             "--git-common-dir"],
+            toolpath.argv("git", "-C", str(path), "rev-parse",
+                          "--path-format=absolute", "--git-common-dir"),
             capture_output=True, text=True, timeout=_GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None

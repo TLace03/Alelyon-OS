@@ -779,10 +779,21 @@ def runs_from_activity(activity, *, contested_paths=(), landing=None,
                        now: int | None = None) -> tuple[Run, ...]:
     """Score every settled agent in an `Activity` reading.
 
-    `contested_paths` is the set of files some session later published a defect
-    or interface finding about; an agent that touched one is marked contested.
-    The caller supplies it because ordering the finding against the run is a
+    `contested_paths` is the files some session **later** published a defect or
+    interface finding about; an agent that touched one is marked contested. The
+    caller supplies it because ordering the finding against the run is a
     question about the bus, not about the transcripts.
+
+    Each item is either a bare path or a `(path, at)` pair carrying the moment
+    the finding was published. **Pass the pair wherever you have the time.** A
+    bare path cannot express "later" at all, so it marks every run that touched
+    the file including the ones that finished after the defect was already
+    known — and `contested` multiplies a score by 0.4, so that is a heavy
+    penalty applied on no evidence. The pair form is honoured against `Run.at`:
+    a finding published before a run settled does not contest it. A run whose
+    own time is unknown (`at == 0`) is contested by any finding about a file it
+    touched, because nothing here can order the two and the bare-path reading
+    is the one that was already in force.
 
     `landing` is a `fleet_outcomes.LandingIndex`. Optional, and its absence is
     not neutrality dressed up as a default — without it every run records
@@ -796,7 +807,7 @@ def runs_from_activity(activity, *, contested_paths=(), landing=None,
     """
     from alelyon.runtime.common import session_activity as SA
 
-    contested = {str(p).replace("\\", "/") for p in contested_paths}
+    always, latest = _contested_index(contested_paths)
     out: list[Run] = []
     for session in activity.sessions:
         for fleet in session.fleets:
@@ -806,7 +817,17 @@ def runs_from_activity(activity, *, contested_paths=(), landing=None,
                 placed, _evidence = H.place(agent.brief or agent.agent_type)
                 kind = next((k for k, v in H.WORK_KINDS.items()
                              if v == placed.key), placed.key)
-                touched = {p.replace("\\", "/") for p in agent.files}
+                # `repo_files`, not `files`. The bus records a finding's subject
+                # as a REPOSITORY-RELATIVE posix path, and the harness stamps an
+                # agent's files as absolute native ones — so intersecting the two
+                # could never match, and `contested` had never once fired on this
+                # repository however many defects the fleet published. Measured
+                # 2026-08-05: 58 runs, 109 subject paths, 0 contested before this
+                # line and non-zero after. `repo_files` also drops files outside
+                # the checkout, which is right: a scratchpad file is not
+                # something another session can publish a finding about.
+                touched = set(getattr(agent, "repo_files", None)
+                              or agent.files)
                 branch = getattr(agent, "branch", "") or session.branch
                 cwd = getattr(agent, "cwd", "") or session.cwd
                 at = agent.last_at or 0
@@ -823,9 +844,47 @@ def runs_from_activity(activity, *, contested_paths=(), landing=None,
                     settled=agent.status == SA.SETTLED,
                     turns=agent.turns, out_tokens=agent.output_tokens,
                     seconds=agent.elapsed_seconds,
-                    contested=bool(touched & contested),
+                    contested=_is_contested(touched, at, always, latest),
                     branch=branch, cwd=cwd, landed=outcome))
     return tuple(out)
+
+
+def _contested_index(contested_paths) -> tuple[set[str], dict[str, int]]:
+    """`(always, latest)` — the bare paths, and the timed ones' last publication.
+
+    The question is *does ANY finding about this file postdate the run*, so the
+    LATEST publication per path is the one that answers it: if the last one does
+    not postdate the run, none of them do. Keeping the earliest instead would
+    lose every contest a later finding establishes, which is the same false
+    negative in reverse and was caught by a test rather than by reading this.
+    """
+    always: set[str] = set()
+    latest: dict[str, int] = {}
+    for item in contested_paths:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            path, at = item
+            key = str(path).replace("\\", "/")
+            when = int(at)
+            latest[key] = max(latest.get(key, when), when)
+        else:
+            always.add(str(item).replace("\\", "/"))
+    return always, latest
+
+
+def _is_contested(touched, at: int, always: set[str],
+                  latest: dict[str, int]) -> bool:
+    """Whether a defect finding lands on this run, respecting publication order.
+
+    `>=` and not `>`: transcript and bus times are both whole seconds, so a
+    finding published in the same second a run settled cannot be ordered
+    against it at all. The tie keeps the conservative reading already in force
+    rather than choosing the lenient one on evidence that does not exist.
+    """
+    if touched & always:
+        return True
+    return any(when >= at
+               for when in (latest.get(p) for p in touched)
+               if when is not None)
 
 
 __all__ = [

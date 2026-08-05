@@ -295,15 +295,73 @@ structural guarantee from being asserted where the backend cannot supply it.
 2. **This bounds figures, not argument.** The model can arrange true figures into
    a misleading sentence. Nothing in the construction inspects the claim a
    sentence makes.
-3. **Spelled-out numerals defeat the digit-free pattern.** "Thirty-four percent"
-   satisfies `^[^0-9]*$`. The construction accepts this on the judgment that a
-   spelled-out numeral cannot carry the precision that makes a fabricated figure
-   consequential in this setting. The judgment is stated rather than assumed and
-   is the first item this paper would put to a reviewer.
-4. **The enumeration's behavior at scale is UNMEASURED.** The `figure` enumeration
-   contains one member per rendered tool output. Whether grammar compilation and
-   sampling degrade as that set grows, and where the practical ceiling lies, has
-   not been measured.
+3. **Spelled-out numerals defeat the digit-free pattern — and the judgment that
+   excused it was wrong.** "Thirty-four percent" satisfies `^[^0-9]*$`. This
+   paper accepted that on the judgment *that a spelled-out numeral cannot carry
+   the precision that makes a fabricated figure consequential in this setting*,
+   and named it as the first item it would put to a reviewer. **Measured
+   2026-08-05, it does not survive.** English carries arbitrary precision in
+   words: "thirty-four point two percent" is three significant figures, "two
+   hundred and fifteen million dollars" is exact, and "one hundred and forty
+   basis points" is a rate. All five test cases pass the prose pattern.
+
+   The grammar cannot close this. A digit-free pattern admits number words by
+   definition, and no regular expression over prose enumerates English. So the
+   **claim** is narrowed to what the construction can support rather than the
+   construction being described as stronger than it is:
+
+   - `ok` continues to mean the reply conformed to the grammar — no digit in
+     prose, no figure outside the enum;
+   - `grounded_by_construction`, which is the claim-bearing property and says
+     *every figure came from the allowed set*, now **refuses** a reply whose
+     prose spells a quantity out, because such a reply falsifies exactly that
+     sentence;
+   - the prompt asks for the behaviour the badge requires. Checking something
+     the model was never told is a trap rather than a guarantee, and asking
+     first also lowers how often the check has to fire.
+
+   `constrain.spelled_quantities` requires a number word **beside a scale or
+   precision marker** — percent, basis points, million, times, "point" as a
+   decimal. That pairing is the whole design: measured against seven sentences
+   of ordinary prose containing number words ("one of the desks", "a second
+   factor"), it flags none, and against the five consequential cases above it
+   flags all. A detector that fired on "one of the desks" would be switched off
+   within a day and would take the real ones with it.
+
+   **The residual is named rather than closed.** A bare ratio — "nine out of ten
+   names underperformed" — carries a quantity and no marker, so it is still
+   admitted. Catching it would mean catching "one of the desks". A test pins
+   that case so a later hand tightening the pattern meets the trade-off
+   deliberately instead of through a support ticket.
+4. **The enumeration's behavior at scale, measured 2026-08-05 — and the answer
+   splits in two.** *Building* the enumeration was **O(n·u)** in the number of
+   facts and the number of DISTINCT figures among them, because `allowed_figures`
+   deduplicated against a list. At 8,000 distinct figures that was 174 ms; the
+   same 8,000 facts carrying only 20 distinct figures cost 1 ms, which is the
+   identical law seen from its cheap side and is why the term stayed invisible —
+   every question anyone had asked was on that side of it. A hashed membership
+   test makes it linear (0.93 ms at 8,000, 187×; 2 ms at 16,000) and the order
+   the desks returned is preserved, because the enumeration is also what the
+   model reads. `tests/oracle/test_assistant_constrain_scale.py` pins it by
+   counting membership probes rather than wall-clock, so the falsifier is
+   deterministic on a loaded machine.
+
+   The ceiling is therefore **not** the Python. It is the artifact: the schema
+   carries roughly **9.7 bytes of JSON per distinct figure** — ~9 KB at a
+   thousand, ~161 KB at sixteen thousand — and nothing caps the fact count,
+   since `tools.facts_of` concatenates every desk result. The practical bound is
+   set by whichever desk returns the widest table, and a screener answering with
+   a few thousand rows is not exotic. **No cap was imposed**: silently dropping
+   figures from the enumeration would make a REAL desk figure unrepresentable,
+   which is the one failure this construction exists to prevent, so the size is
+   reported rather than truncated.
+
+   **What remains UNMEASURED is the backend half**, and it is an infrastructure
+   gap rather than a design truth: whether grammar compilation and sampling
+   degrade as the enumeration grows is a property of llama.cpp's GBNF compiler
+   and of each OpenAI-compatible server, measurable only against a running
+   backend. Nothing in this repository can answer it, and the figures above
+   bound only what this repository hands over.
 5. **The evaluation lacked a control.** Per §6, no task was run that the grammar
    does not trivially satisfy, so the model's contribution is unquantified.
 6. **The structural guarantee is conditional on the backend.** Proposition 3.3

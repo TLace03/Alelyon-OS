@@ -109,6 +109,10 @@ alelyon-verify = "alelyon.verify.cli:main"
 # package: a CLI under `tools/` in the source repo cannot travel with the wheel, and
 # what shipped before was a library with no way to run it.
 alelyon-fleet = "alelyon.runtime.common.fleet_cli:main"
+# The ledger's own front door. Separate from `alelyon-fleet` because it writes a
+# DIFFERENT store: overloading that command's `--database`, which means the bus,
+# would make one flag point at two files depending on the subcommand.
+alelyon-ledger = "alelyon.runtime.common.fleet_ledger_cli:main"
 alelyon-workspace = "alelyon.runtime.oracle.assistant.cli:main"
 
 [tool.setuptools]
