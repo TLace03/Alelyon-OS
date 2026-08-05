@@ -134,6 +134,20 @@ _WINDOWS: Dict[str, Tuple[str, ...]] = {
         r"%USERPROFILE%\scoop\shims\git.exe",
         r"%ProgramData%\chocolatey\bin\git.exe",
     ),
+    # Git for Windows ships bash; a stock workstation has it installed and not
+    # on PATH, which is how the local workflow runner's six shell-step tests
+    # were red on the machine that runs them daily. `%SystemRoot%\System32\
+    # bash.exe` is deliberately NOT a candidate: that is WSL's launcher, which
+    # runs the script inside a Linux distribution where the step's Windows
+    # environment (GITHUB_OUTPUT, the workspace path) does not exist as
+    # written.
+    "bash": (
+        r"%ProgramFiles%\Git\bin\bash.exe",
+        r"%ProgramFiles(x86)%\Git\bin\bash.exe",
+        r"%LOCALAPPDATA%\Programs\Git\bin\bash.exe",
+        r"%USERPROFILE%\scoop\shims\bash.exe",
+        r"%ProgramData%\chocolatey\bin\bash.exe",
+    ),
     "gh": (
         r"%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe",
         r"%ProgramFiles%\GitHub CLI\gh.exe",
@@ -181,6 +195,7 @@ _WINDOWS: Dict[str, Tuple[str, ...]] = {
 _DARWIN: Dict[str, Tuple[str, ...]] = {
     "git": ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git",
             "/Library/Developer/CommandLineTools/usr/bin/git"),
+    "bash": ("/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"),
     "gh": ("/opt/homebrew/bin/gh", "/usr/local/bin/gh"),
     "ollama": ("/opt/homebrew/bin/ollama", "/usr/local/bin/ollama",
                "/Applications/Ollama.app/Contents/Resources/ollama"),
@@ -196,6 +211,7 @@ _DARWIN: Dict[str, Tuple[str, ...]] = {
 _POSIX: Dict[str, Tuple[str, ...]] = {
     "git": ("/usr/bin/git", "/usr/local/bin/git"),
     "gh": ("/usr/bin/gh", "/usr/local/bin/gh", "/snap/bin/gh"),
+    "bash": ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"),
     "ollama": ("/usr/local/bin/ollama", "/usr/bin/ollama"),
     "cargo": ("$CARGO_HOME/bin/cargo", "$HOME/.cargo/bin/cargo"),
     "rustc": ("$CARGO_HOME/bin/rustc", "$HOME/.cargo/bin/rustc"),
