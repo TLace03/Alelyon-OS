@@ -6,12 +6,6 @@ The open part of the Alelyon Deterministic Quantitative Computational Operating 
 pip install alelyon-os
 ```
 
-> **Not on PyPI yet.** The distribution is packaged and this repository is its generated
-> source, but the first release has not been published. Until it is, install from a
-> clone: `pip install ./packages/alelyon-os`.
-
----
-
 ## What is here
 
 | Import | What it does |
