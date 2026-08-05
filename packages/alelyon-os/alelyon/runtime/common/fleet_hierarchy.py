@@ -263,6 +263,42 @@ def board_matter(text: str) -> bool:
     return False
 
 
+def placement(text: str) -> tuple[Layer, str, str]:
+    """(layer, work_kind, evidence) — `place()` without discarding the kind.
+
+    The ledger's coordinate is `(layer, work_kind)`, so a caller holding only a
+    layer names a row it cannot find. The same match that chooses the layer
+    already knows the kind; `place()` simply threw it away, which is why nothing
+    could look a brief up in the ledger.
+
+    The kind is **""** when nothing matched. That is an absence for the caller to
+    handle, not a default it may use: guessing a kind would fabricate a
+    coordinate and read somebody else's standing out of it.
+
+    One asymmetry is deliberate. When the kind is board-level, `_model_layer`
+    moves the layer to `executive` while the kind stays what it matched — so the
+    pair is **not** a coordinate the ledger holds. `board_matter()` is what
+    detects that, and `fleet_dispatch` refuses to name a model from a standing
+    there rather than reading the executive row for a decision that is the
+    owner's.
+    """
+    body = str(text or "")
+    known = WORK_KINDS.get(body.strip())
+    if known:
+        target, evidence = _model_layer(
+            BY_KEY[known], f"the work kind {body.strip()!r} names this layer")
+        return target, body.strip(), evidence
+    for pattern, kind in _PHRASES:
+        if pattern.search(body):
+            target, evidence = _model_layer(
+                layer_for_kind(kind),
+                f"the phrase rule {pattern.pattern!r} placed it as {kind!r}")
+            return target, kind, evidence
+    return DEFAULT_LAYER, "", ("no work kind and no phrase rule matched, so it "
+                               "is placed at the bottom layer and must escalate "
+                               "rather than assume authority")
+
+
 def place(text: str) -> tuple[Layer, str]:
     """(layer, evidence) for a described job. Never returns the board.
 
@@ -270,19 +306,8 @@ def place(text: str) -> tuple[Layer, str]:
     is for the case that actually occurs — an agent brief written in prose —
     and it says which rule fired so a reader can disagree with the rule.
     """
-    body = str(text or "")
-    known = WORK_KINDS.get(body.strip())
-    if known:
-        return _model_layer(BY_KEY[known],
-                            f"the work kind {body.strip()!r} names this layer")
-    for pattern, kind in _PHRASES:
-        if pattern.search(body):
-            return _model_layer(
-                layer_for_kind(kind),
-                f"the phrase rule {pattern.pattern!r} placed it as {kind!r}")
-    return DEFAULT_LAYER, ("no work kind and no phrase rule matched, so it is "
-                           "placed at the bottom layer and must escalate rather "
-                           "than assume authority")
+    target, _kind, evidence = placement(text)
+    return target, evidence
 
 
 def escalation_path(key: str) -> tuple[str, ...]:
@@ -409,6 +434,6 @@ __all__ = [
     "BY_KEY", "BY_RANK", "CLASSES", "COST_WEIGHT", "DEFAULT_LAYER",
     "ENTRY_CLASS", "FRONTIER", "LAYERS", "LAYER_SPACE_VERSION", "LIMITS",
     "LOCAL", "MID", "SMALL", "UNPLACED", "Layer", "WORK_KINDS", "approves",
-    "charter", "entry_class", "escalation_path", "fits", "layer",
-    "layer_for_kind", "place",
+    "board_matter", "charter", "entry_class", "escalation_path", "fits",
+    "layer", "layer_for_kind", "place", "placement",
 ]

@@ -16,11 +16,13 @@
     "packages/alelyon-os/alelyon/runtime/atlas/data/attest.py": "5c4ce01db8e1965d276710917f050ff4a5fdb98f056395d85f6f6ec5293b8e90",
     "packages/alelyon-os/alelyon/runtime/atlas/data/keylife.py": "268110eb46900f85ddc1e2983e44cd47394b0fe2f2ff505b3edd16b41ae4ce16",
     "packages/alelyon-os/alelyon/runtime/common/__init__.py": "282f15cd7689bdedc116b869be242b26494b73ee839b77f34dad2ebcc5d03beb",
+    "packages/alelyon-os/alelyon/runtime/common/branch_index.py": "07e96032b5d900d3fa85137d4e644108f0349bce9fee933f2be527e065db259e",
     "packages/alelyon-os/alelyon/runtime/common/fleet_cli.py": "23e4505979f898e0fc6f88d66388ca693592b91991b405b2a8f3ab67436dfc0e",
-    "packages/alelyon-os/alelyon/runtime/common/fleet_hierarchy.py": "47c1c68a2fac8b8786c6cbbebdfebb71e6a1180e04b1381d3298157a507195c4",
-    "packages/alelyon-os/alelyon/runtime/common/fleet_ledger.py": "7512fc37d1586a61cfb72e01b5d5f9ae990f72325cae944c43dc5ece0cb12520",
+    "packages/alelyon-os/alelyon/runtime/common/fleet_hierarchy.py": "5c8e25b2f5191ee279b9f94cc025e43d3715aea60d11d16e86e02c714c20e712",
+    "packages/alelyon-os/alelyon/runtime/common/fleet_ledger.py": "415fc8731d2c147183e93f61915eb9b891222e3cd780e968bc7db9cb1fc8e6ca",
+    "packages/alelyon-os/alelyon/runtime/common/fleet_outcomes.py": "353799b0410fb2e3918dd9645834806d38d80a629f3ac84ee6635a4af74ff030",
     "packages/alelyon-os/alelyon/runtime/common/paths.py": "fafdd98b26d5b425ea60ae17be08086053396b555963581e840f6c3ca2d3a7ac",
-    "packages/alelyon-os/alelyon/runtime/common/session_activity.py": "cfe5f4f4727884ce2d16fa81c14d7fa9cf89ebcae6c01ea3ffaef5d6d506f583",
+    "packages/alelyon-os/alelyon/runtime/common/session_activity.py": "bbd3e5a057a6712bb877008cbdaab452966cd21d804e8e8ffb68df3a5d7ddbde",
     "packages/alelyon-os/alelyon/runtime/common/session_records.py": "a908a8c8980014876683c54ad1ee715a79c24875c13591a47fda375ac2b0d18c",
     "packages/alelyon-os/alelyon/runtime/common/worktree.py": "a87221ee4c21af02e5c4db5752c5f66cb418818d526fbb02c91cffa2bdfd1a38",
     "packages/alelyon-os/alelyon/runtime/common/worktree_areas.py": "b58124397edb2230eafbe00e741f9102e31e7f5898e863a82a073c26e201147b",
@@ -147,6 +149,6 @@
     "spec/cne-v0.md": "ede5738edec227c88a8c4876b0ca8dac96387b2381827cdc664acf56870aa5c2"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "e5f47eaef4b4f01edf65f9e3949121c9a019d00c",
+  "source_commit": "d160afbedd0c2c59731c48fcf9899ec173a35715",
   "source_repository": "TLace03/famMain"
 }

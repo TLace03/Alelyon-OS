@@ -204,6 +204,15 @@ class AgentRun:
     output_tokens: int = 0
     status: str = QUIET
     status_evidence: str = ""
+    #: Where this agent actually ran, as the harness stamped it on the
+    #: transcript. Carried on the AGENT and not only on the session because an
+    #: agent given `isolation: worktree` runs on a branch of its own, and
+    #: inheriting the parent session's branch would attribute its work to the
+    #: wrong one. `gitBranch` is written per record by the harness, so it is the
+    #: branch that was checked out AT THE TIME rather than whatever is checked
+    #: out when something reads the transcript back.
+    cwd: str = ""
+    branch: str = ""
 
     @property
     def model(self) -> str:
@@ -766,6 +775,8 @@ class ActivityIndex:
             recent=tuple(accumulator.recent),
             input_tokens=accumulator.input_tokens,
             output_tokens=accumulator.output_tokens,
+            cwd=accumulator.cwd,
+            branch=accumulator.branch,
             status=status, status_evidence=evidence)
 
     def _journal(self, path: Path) -> dict:

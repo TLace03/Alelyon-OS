@@ -13,7 +13,9 @@ unless **all** of these hold:
 1. the challenger has at least `MIN_RUNS` completed runs at that coordinate;
 2. those runs are **later than the incumbent's standing was set** — held out by
    time, so a challenger cannot win on the evidence that promoted the incumbent;
-3. it beats the incumbent's score by at least `MARGIN`;
+3. it beats the incumbent's score by at least `MARGIN_FRACTION` of the
+   headroom still available above that incumbent (see `MARGIN_FRACTION`
+   for why this is a fraction and not an absolute step);
 4. it meets the layer's capability floor.
 
 Everything else is refused **by name and with the number that failed**. Nothing
@@ -60,8 +62,29 @@ import sqlite3
 import time
 
 from alelyon.runtime.common import fleet_hierarchy as H
+from alelyon.runtime.common import fleet_outcomes as O
 
-LEDGER_SCHEMA_VERSION = 1
+#: 2 added `branch`, `cwd` and `landed` to `runs`. Migrated in place rather than
+#: versioned into a new layer space: the columns are additive and `landed`
+#: defaults to the one value that scores exactly as v1 did, so a v1 ledger reads
+#: back at v2 with every historical score unchanged. A test pins that.
+LEDGER_SCHEMA_VERSION = 2
+
+#: What an ABANDONED landing does to a run's score.
+#:
+#: It is a **penalty and never a bonus**, and that asymmetry is the load-bearing
+#: part rather than the number. `standings.score` is a snapshot frozen under the
+#: scoring rule in force when it was written, so a rule that could RAISE a score
+#: would let a challenger unseat an incumbent by the rule change alone — beating
+#: a number computed under the old rule with one computed under the new one,
+#: which is not a comparison. Every landing outcome except ABANDONED multiplies
+#: by exactly 1.0, so this release can only ever make it harder to move a
+#: standing, never easier. A test asserts the direction.
+#:
+#: 0.5 sits between neutral and `contested`'s 0.4 because the two signals are
+#: about equally weak and equally noisy, and both must bite hard enough to
+#: matter against a MARGIN of 0.05.
+ABANDONED_PENALTY = 0.5
 
 #: Runs required at a coordinate before a model may be proposed for it. Small,
 #: because the population is small — and stated as the weak number it is: five
@@ -69,10 +92,31 @@ LEDGER_SCHEMA_VERSION = 1
 #: working hypothesis, not a finding.
 MIN_RUNS = 5
 
-#: How much better a challenger must score. A margin rather than "greater than",
-#: because with tens of runs a hair's difference is noise and a standing that
-#: flipped on noise would make the ratchet a random walk with extra steps.
-MARGIN = 0.05
+#: The most `Run.score` can express. The score is `0.75 + 0.25 * cost` with
+#: `cost` in (0, 1], so the attainable band is [0.75, 1.0] — a fact the margin
+#: below has to respect, because a margin that can exceed the ceiling is not a
+#: bar, it is a lock.
+MAX_SCORE = 1.0
+
+#: How much better a challenger must score, as a FRACTION OF THE HEADROOM still
+#: available above the incumbent — not as an absolute quantity.
+#:
+#: It was absolute (0.05) and that made the ratchet unable to ratchet. The score
+#: is bounded at 1.0, so an incumbent above 0.95 required a challenger to clear
+#: more than 1.0, which no run can reach; and since any run under ~12,877 output
+#: tokens already scores above 0.95, the FIRST model to win a coordinate with an
+#: ordinary-sized run held it permanently. `propose()` could never accept anyone
+#: again, while the scorecard went on printing numbers that made it look like a
+#: contest. Reported by session da438960 with a reproduction, confirmed by
+#: `tests/runtime/test_fleet_ledger.py`.
+#:
+#: 0.2 is not a new tuning: at the bottom of the band the headroom is 0.25, so
+#: 0.2 of it is exactly the 0.05 the absolute margin asked for. The behaviour at
+#: mid-scale is unchanged and only the unsatisfiable region is removed. Near the
+#: ceiling the bar shrinks in absolute terms and stays meaningful in relative
+#: ones: beating an incumbent at 1,000 output tokens still requires about 800,
+#: which is a real ~20% improvement rather than noise.
+MARGIN_FRACTION = 0.2
 
 #: Lifecycle states, from docs/MODELS.md section 0.
 OBSERVATION = "OBSERVATION"   # running and being scored; holds nothing
@@ -86,6 +130,11 @@ STATES = (OBSERVATION, PAPER, LIVE, DEMOTED)
 TOO_FEW_RUNS = "too-few-runs"
 NOT_HELD_OUT = "not-held-out"
 NO_MARGIN = "no-margin"
+#: The incumbent sits at MAX_SCORE, so the signal has no resolution left to
+#: distinguish a better challenger. Named rather than silently refused: "the
+#: standing is unbeatable because the metric ran out" is a different fact from
+#: "the challenger was worse", and a caller acting on the second would be wrong.
+SCORE_CEILING = "score-ceiling"
 BELOW_FLOOR = "below-capability-floor"
 NOT_A_COORDINATE = "not-a-coordinate"
 ACCEPTED = "accepted"
@@ -94,10 +143,14 @@ SCORE_LIMITS: tuple[str, ...] = (
     "The score measures COMPLETION and COST, not quality. An agent that "
     "settled quickly and cheaply on a wrong answer scores well, and nothing "
     "here would notice.",
-    "contested-after is the only negative-quality signal, and it is weak: it "
-    "fires when somebody else published a finding about a file this agent "
-    "touched afterwards, which catches a real defect and also catches two "
-    "sessions working near each other.",
+    "contested-after is weak: it fires when somebody else published a finding "
+    "about a file this agent touched afterwards, which catches a real defect "
+    "and also catches two sessions working near each other.",
+    "Whether the branch LANDED is the second negative signal, and it is a "
+    "signal about the branch rather than about the agent - every agent that "
+    "ran on one carries the same outcome. It is also silent by default: a run "
+    "recorded before anyone merged anything is IN-FLIGHT, and only reconcile() "
+    "reading the repository later can turn that into a result.",
     "A run is attributed to the model the harness recorded for its turns. An "
     "agent re-driven on a second model is attributed to whichever ran most of "
     "its turns, so a mixed run is scored as one model's work.",
@@ -113,7 +166,10 @@ SCORE_LIMITS: tuple[str, ...] = (
 _DDL = (
     """CREATE TABLE IF NOT EXISTS meta (
            name TEXT PRIMARY KEY, value TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS runs (
+    # An f-string for one reason: the `landed` default is the outcome
+    # vocabulary's own UNKNOWN rather than a second copy of the word that could
+    # drift from it and silently start scoring historical rows.
+    f"""CREATE TABLE IF NOT EXISTS runs (
            run_id      TEXT PRIMARY KEY,
            at          INTEGER NOT NULL,
            layer       TEXT NOT NULL,
@@ -127,7 +183,10 @@ _DDL = (
            out_tokens  INTEGER NOT NULL,
            seconds     INTEGER,
            contested   INTEGER NOT NULL DEFAULT 0,
-           space       INTEGER NOT NULL)""",
+           space       INTEGER NOT NULL,
+           branch      TEXT NOT NULL DEFAULT '',
+           cwd         TEXT NOT NULL DEFAULT '',
+           landed      TEXT NOT NULL DEFAULT '{O.UNKNOWN}')""",
     """CREATE INDEX IF NOT EXISTS runs_coord
            ON runs(layer, work_kind, model, at)""",
     # `seq` rather than `set_at` decides which standing is current, and the
@@ -169,15 +228,31 @@ class Run:
     out_tokens: int
     seconds: int | None
     contested: bool = False
+    #: Where the work was done, as the harness stamped it on the transcript.
+    #: Stored so the row can be re-read against the repository later without
+    #: going back to the transcripts — a record that carries its own inputs is
+    #: one somebody else can check.
+    branch: str = ""
+    cwd: str = ""
+    #: What became of that branch: `fleet_outcomes.LANDED` / `IN_FLIGHT` /
+    #: `ABANDONED` / `UNKNOWN`. Provisional until it is one of the terminal two.
+    landed: str = O.UNKNOWN
 
     @property
     def score(self) -> float:
-        """Completion, penalised by cost and by a later defect finding.
+        """Completion, penalised by cost, by a later defect finding, and by
+        the branch having been abandoned.
 
         In [0, 1]. Deliberately simple and deliberately printed beside its
         limits: a compound score with tuned weights would look like a
         measurement of quality, and this is a measurement of whether the job
-        finished and what it cost to finish.
+        finished, what it cost to finish, and whether anyone took it up.
+
+        **Landing only ever subtracts.** LANDED, IN-FLIGHT and UNKNOWN all
+        multiply by exactly 1.0, so a run recorded before this term existed
+        scores identically under it — and, more importantly, no challenger can
+        beat an incumbent whose stored score was frozen under the older rule
+        merely because the rule got more generous. See `ABANDONED_PENALTY`.
         """
         if not self.settled:
             return 0.0
@@ -186,7 +261,8 @@ class Run:
         # the same runs it scores would be circular.
         cost = 0.5 ** (max(0, self.out_tokens) / 40_000.0)
         value = 0.75 + 0.25 * cost
-        return round(value * (0.4 if self.contested else 1.0), 6)
+        landing = ABANDONED_PENALTY if self.landed == O.ABANDONED else 1.0
+        return round(value * (0.4 if self.contested else 1.0) * landing, 6)
 
 
 @dataclass(frozen=True)
@@ -202,6 +278,17 @@ class Scorecard:
     mean_score: float
     mean_tokens: float
     last_at: int
+    #: How many of those runs were done on a branch that reached the mainline,
+    #: and how many on one that did not. They do not sum to `runs`: the rest are
+    #: IN-FLIGHT or UNKNOWN, which are the absence of evidence and are reported
+    #: as their own number rather than folded into either side.
+    landed: int = 0
+    abandoned: int = 0
+
+    @property
+    def undecided(self) -> int:
+        """Runs whose branch has told us nothing yet. Named, never implied."""
+        return max(0, self.runs - self.landed - self.abandoned)
 
     @property
     def completion(self) -> float:
@@ -250,9 +337,39 @@ class FleetLedger:
         with self._connect() as conn:
             for statement in _DDL:
                 conn.execute(statement)
+            self._migrate(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO meta(name, value) VALUES('schema', ?)",
                 (str(LEDGER_SCHEMA_VERSION),))
+            conn.execute("UPDATE meta SET value=? WHERE name='schema'",
+                         (str(LEDGER_SCHEMA_VERSION),))
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> tuple[str, ...]:
+        """Bring an older `runs` table up to the current columns.
+
+        `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        exists, so a ledger written at schema v1 keeps v1's columns forever
+        unless something adds them — and every read here would then fail on a
+        missing column rather than degrade. Adding them is safe in a way a
+        rewrite would not be: each carries a DEFAULT that reproduces v1's
+        behaviour exactly, so migrating rescores nothing.
+
+        Idempotent, and returns what it actually did so a caller can report it.
+        """
+        have = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        added = []
+        for column, ddl in (
+            ("branch", "ALTER TABLE runs ADD COLUMN branch TEXT NOT NULL "
+                       "DEFAULT ''"),
+            ("cwd", "ALTER TABLE runs ADD COLUMN cwd TEXT NOT NULL DEFAULT ''"),
+            ("landed", f"ALTER TABLE runs ADD COLUMN landed TEXT NOT NULL "
+                       f"DEFAULT '{O.UNKNOWN}'"),
+        ):
+            if column not in have:
+                conn.execute(ddl)
+                added.append(column)
+        return tuple(added)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.database), timeout=10.0)
@@ -272,16 +389,56 @@ class FleetLedger:
                 """INSERT OR IGNORE INTO runs
                    (run_id, at, layer, work_kind, model, agent_id, fleet_id,
                     session_id, settled, turns, out_tokens, seconds, contested,
-                    space)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    space, branch, cwd, landed)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run.run_id, run.at, run.layer, run.work_kind, run.model,
                  run.agent_id, run.fleet_id, run.session_id, int(run.settled),
                  run.turns, run.out_tokens, run.seconds, int(run.contested),
-                 H.LAYER_SPACE_VERSION))
+                 H.LAYER_SPACE_VERSION, run.branch, run.cwd,
+                 run.landed or O.UNKNOWN))
             return cursor.rowcount > 0
 
     def record_all(self, runs) -> int:
         return sum(1 for run in runs if self.record(run))
+
+    def reconcile(self, index, *, now: int | None = None) -> dict[str, int]:
+        """Re-read the runs whose landing was not yet decided. Returns a tally.
+
+        A run recorded the hour it finished has a branch nobody has merged yet,
+        so its outcome is IN-FLIGHT — and if that were the last word, the only
+        label that carries a penalty would never once be applied. The outcome
+        has to be looked at again later, which is the whole reason `branch` and
+        `cwd` are stored on the row: this needs no transcript to re-derive them.
+
+        **Provisional to terminal only.** LANDED and ABANDONED are never
+        overwritten, and the guard is in the UPDATE's own WHERE clause rather
+        than in a Python branch above it, so a second caller reconciling
+        concurrently cannot walk a decided row backwards either. What this is
+        not is an append-only history of the outcome: the row carries the
+        current answer, and the previous provisional non-answer is not kept,
+        because "we did not know yet" is not a finding worth a row of its own.
+        """
+        moment = int(now if now is not None else time.time())
+        tally: dict[str, int] = {"read": 0, "unchanged": 0}
+        with self._connect() as conn:
+            pending = conn.execute(
+                "SELECT run_id, at, branch, cwd, landed FROM runs "
+                f"WHERE landed IN ({','.join('?' * len(O.PROVISIONAL))})",
+                O.PROVISIONAL).fetchall()
+            for row in pending:
+                tally["read"] += 1
+                landing = index.of(row["branch"] or "", settled_at=row["at"],
+                                   now=moment, cwd=row["cwd"] or "")
+                if landing.outcome == (row["landed"] or O.UNKNOWN):
+                    tally["unchanged"] += 1
+                    continue
+                cursor = conn.execute(
+                    "UPDATE runs SET landed=? WHERE run_id=? AND landed IN "
+                    f"({','.join('?' * len(O.PROVISIONAL))})",
+                    (landing.outcome, row["run_id"], *O.PROVISIONAL))
+                if cursor.rowcount:
+                    tally[landing.outcome] = tally.get(landing.outcome, 0) + 1
+        return tally
 
     # ── reading ──────────────────────────────────────────────────────────────
     def scorecard(self, layer: str, work_kind: str, model: str, *,
@@ -297,24 +454,29 @@ class FleetLedger:
             if not row or not row["runs"]:
                 return None
             scored = conn.execute(
-                """SELECT settled, out_tokens, contested FROM runs
+                """SELECT settled, out_tokens, contested, landed FROM runs
                     WHERE layer=? AND work_kind=? AND model=? AND at>? AND space=?""",
                 (layer, work_kind, model, since, H.LAYER_SPACE_VERSION)).fetchall()
         total = 0.0
+        landed = abandoned = 0
         for entry in scored:
+            outcome = entry["landed"] or O.UNKNOWN
+            landed += outcome == O.LANDED
+            abandoned += outcome == O.ABANDONED
             total += Run(
                 run_id="", at=0, layer=layer, work_kind=work_kind, model=model,
                 agent_id="", fleet_id="", session_id="",
                 settled=bool(entry["settled"]), turns=0,
                 out_tokens=int(entry["out_tokens"] or 0), seconds=None,
-                contested=bool(entry["contested"])).score
+                contested=bool(entry["contested"]), landed=outcome).score
         return Scorecard(
             layer=layer, work_kind=work_kind, model=model,
             runs=int(row["runs"]), settled=int(row["settled"] or 0),
             contested=int(row["contested"] or 0),
             mean_score=round(total / int(row["runs"]), 6),
             mean_tokens=round(float(row["tokens"] or 0.0), 1),
-            last_at=int(row["last_at"] or 0))
+            last_at=int(row["last_at"] or 0),
+            landed=landed, abandoned=abandoned)
 
     def candidates(self, layer: str, work_kind: str, *,
                    since: int = 0) -> tuple[Scorecard, ...]:
@@ -424,12 +586,29 @@ class FleetLedger:
                                f"{model} remains the standing at "
                                f"{card.mean_score:.3f} over {card.runs} later "
                                f"run(s)", challenger=card, incumbent=incumbent)
-            if card.mean_score < incumbent.score + MARGIN:
+            # The bar is a fraction of what is still ATTAINABLE above the
+            # incumbent, never an absolute step. An absolute step on a bounded
+            # score is unsatisfiable near the ceiling, which is how this gate
+            # came to refuse every challenger forever.
+            headroom = MAX_SCORE - incumbent.score
+            if headroom <= 0.0:
+                return Verdict(
+                    False, SCORE_CEILING,
+                    f"{incumbent.model} holds {layer}/{work_kind} at "
+                    f"{incumbent.score:.3f}, which is the most this score can "
+                    f"express; no challenger can be measurably better on it. "
+                    f"The standing is held by exhausted resolution, not by "
+                    f"demonstrated merit",
+                    challenger=card, incumbent=incumbent)
+            required = incumbent.score + MARGIN_FRACTION * headroom
+            if card.mean_score < required:
                 return Verdict(
                     False, NO_MARGIN,
                     f"{model} scored {card.mean_score:.3f} against "
                     f"{incumbent.model}'s {incumbent.score:.3f}; a challenger "
-                    f"must clear {incumbent.score + MARGIN:.3f}",
+                    f"must clear {required:.3f}, which is "
+                    f"{MARGIN_FRACTION:.0%} of the {headroom:.3f} still "
+                    f"available above the incumbent",
                     challenger=card, incumbent=incumbent)
             self._append(layer, work_kind, incumbent.model, DEMOTED,
                          incumbent.score, incumbent.runs, moment,
@@ -582,22 +761,38 @@ class FleetLedger:
                              f"{standing.score:.3f} over {standing.runs} run(s)"
                              f"  ({standing.reason})")
             for card in self.candidates(layer_key, work_kind)[:5]:
+                # The undecided count is printed beside the decided ones rather
+                # than left out. A landed/abandoned pair on its own reads as a
+                # complete tally of the runs, and it usually is not one.
                 lines.append(f"        {card.model:<28} {card.mean_score:.3f}  "
                              f"{card.settled}/{card.runs} settled  "
-                             f"{card.mean_tokens:>8.0f} tok")
+                             f"{card.mean_tokens:>8.0f} tok  "
+                             f"{card.landed} landed / {card.abandoned} "
+                             f"abandoned / {card.undecided} undecided")
         lines += ["", "WHAT THIS CANNOT TELL YOU"]
         lines += [f"  - {limit}" for limit in SCORE_LIMITS]
         return "\n".join(lines)
 
 
 # ── deriving runs from what the fleet already recorded ───────────────────────
-def runs_from_activity(activity, *, contested_paths=()) -> tuple[Run, ...]:
+def runs_from_activity(activity, *, contested_paths=(), landing=None,
+                       now: int | None = None) -> tuple[Run, ...]:
     """Score every settled agent in an `Activity` reading.
 
     `contested_paths` is the set of files some session later published a defect
     or interface finding about; an agent that touched one is marked contested.
     The caller supplies it because ordering the finding against the run is a
     question about the bus, not about the transcripts.
+
+    `landing` is a `fleet_outcomes.LandingIndex`. Optional, and its absence is
+    not neutrality dressed up as a default — without it every run records
+    UNKNOWN, which is the honest reading of "nobody asked the repository", and
+    `reconcile()` can supply the answer later.
+
+    The branch is taken from the AGENT and falls back to the session's. An
+    agent given `isolation: worktree` runs on a branch of its own, so reading
+    the session's would attribute its work to whatever the parent happened to
+    have checked out.
     """
     from alelyon.runtime.common import session_activity as SA
 
@@ -612,22 +807,32 @@ def runs_from_activity(activity, *, contested_paths=()) -> tuple[Run, ...]:
                 kind = next((k for k, v in H.WORK_KINDS.items()
                              if v == placed.key), placed.key)
                 touched = {p.replace("\\", "/") for p in agent.files}
+                branch = getattr(agent, "branch", "") or session.branch
+                cwd = getattr(agent, "cwd", "") or session.cwd
+                at = agent.last_at or 0
+                outcome = O.UNKNOWN
+                if landing is not None:
+                    outcome = landing.of(branch, settled_at=at, now=now,
+                                         cwd=cwd).outcome
                 out.append(Run(
                     run_id=f"{agent.session_id}/{agent.fleet_id}/{agent.agent_id}",
-                    at=agent.last_at or 0,
+                    at=at,
                     layer=placed.key, work_kind=kind, model=agent.model,
                     agent_id=agent.agent_id, fleet_id=agent.fleet_id,
                     session_id=agent.session_id,
                     settled=agent.status == SA.SETTLED,
                     turns=agent.turns, out_tokens=agent.output_tokens,
                     seconds=agent.elapsed_seconds,
-                    contested=bool(touched & contested)))
+                    contested=bool(touched & contested),
+                    branch=branch, cwd=cwd, landed=outcome))
     return tuple(out)
 
 
 __all__ = [
+    "ABANDONED_PENALTY",
     "ACCEPTED", "BELOW_FLOOR", "DEMOTED", "FleetLedger",
-    "LEDGER_SCHEMA_VERSION", "LIVE", "MARGIN", "MIN_RUNS", "NOT_A_COORDINATE",
+    "LEDGER_SCHEMA_VERSION", "LIVE", "MARGIN_FRACTION", "MAX_SCORE",
+    "MIN_RUNS", "NOT_A_COORDINATE", "SCORE_CEILING",
     "NOT_HELD_OUT", "NO_MARGIN", "OBSERVATION", "PAPER", "Run", "SCORE_LIMITS",
     "STATES", "Scorecard", "Standing", "TOO_FEW_RUNS", "Verdict",
     "default_database", "runs_from_activity",
