@@ -52,9 +52,27 @@ for routing a finding to an interested party and **unsafe for gating a change**,
 so gating stays where it already is — the policy document itself, the CI
 workflows, and a reviewer. `LIMITS` says so at every read.
 
-Computing reachability properly needs the import graph. That is named as an
-INFRA GAP rather than papered over with plausible globs, because a guessed glob
-would report a discipline as *checked* on ground nobody checked.
+Computing reachability properly needs the import graph, and it is **not** papered
+over with plausible globs, because a guessed glob would report a discipline as
+*checked* on ground nobody checked.
+
+That much stands. What this paragraph used to say next — that the import graph
+is an **INFRA GAP** — was wrong, and wrong in the direction that costs the most:
+it forecloses work that is available. `grimp` is pinned in
+`requirements-lock.txt` (3.15) and already installed, because `import-linter`
+runs the `.importlinter` contracts under AGENTS.md §2 and grimp is what it builds
+its graph with. Measured 2026-08-06 on this repository: `grimp.build_graph(
+'alelyon', cache_dir=None)` returns 751 modules in **0.06s**, and
+`find_downstream_modules` answers "what can reach this anchor" in under 10ms. The
+infrastructure is present, cheap, and already a dependency.
+
+So the open question is a **decision, not a capability**: this module is pure and
+reads one declared file, and computing reachability would make it read the whole
+source tree — a different contract, with a cost and a cache to own, on a module
+whose callers ask it path questions. Answering "should this module hold an import
+graph?" is what remains, and nothing external has to arrive first. Stated that
+way so a reader looking for open work sees one, which an INFRA GAP label told
+them not to bother looking for.
 
 `UNSPECIALISED` is first class
 ------------------------------

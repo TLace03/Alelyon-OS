@@ -295,6 +295,22 @@ def derive_probe_coordinates(
     values, instead of the product of all of them, and -- unlike holding one base
     coordinate fixed and varying a single axis -- it does not lose the whole
     measurement when the base happens to be a coordinate the chain refuses.
+
+    **Each axis is offset by its own position**, and that is load-bearing rather
+    than decorative. Axes that declare no domain of their own are handed the same
+    per-scalar-type constant, so taking the *k*-th value of every axis put every
+    probe on the DIAGONAL: two DECIMAL axes both yielded
+    `('0','0'), ('1','1'), ('-1','-1'), ('1.5','1.5')`. A permutation of those two
+    axes maps that set onto itself, so the round trip succeeded whether the
+    permutation was right or wrong, and the measurement reported
+    `EXACT_ON_EVERY_PROBE 4/4 of 4` -- full-coverage counts over a sample that
+    could not fail. That is the one thing this module exists to not be: the
+    measurement `invertibility` is not.
+
+    Offsetting is a rotation per axis, so every property above survives -- still
+    pure, still total, still deterministic, still `width` probes visiting every
+    value of every axis, still no cartesian blow-up -- and no probe has equal
+    components on two same-typed axes unless the axes genuinely have one value.
     """
 
     if type(chain) is not TransformChain:
@@ -310,7 +326,8 @@ def derive_probe_coordinates(
         return ()
     width = min(max(len(values) for values in per_axis), MAX_PROBES)
     return tuple(
-        tuple(values[index % len(values)] for values in per_axis)
+        tuple(values[(index + position) % len(values)]
+              for position, values in enumerate(per_axis))
         for index in range(width)
     )
 

@@ -49,12 +49,14 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 from alelyon.runtime.common import cli_flags as CLI
 from alelyon.runtime.common import session_records as S
 from alelyon.runtime.common import worktree as W
+from alelyon.runtime.common import actor as ACT
 from alelyon.runtime.common import worktree_areas as A
 from alelyon.runtime.common import worktree_bus as B
 from alelyon.runtime.common import worktree_cache as C
@@ -895,12 +897,104 @@ def _cmd_waiting(args, mesh, bus, session, evidence, space) -> int:
     return 0
 
 
+def resolve_actor(session: str, evidence: str, *, cwd=None) -> ACT.Actor:
+    """`_identify`'s answer, graded as a value rather than as prose.
+
+    The same session and the same sentence every other command already uses --
+    this adds no derivation and overrides none. What it adds is the two things
+    the prose could not carry to a caller: which GRADE the evidence earns, and
+    whether the attribution is AMBIGUOUS.
+
+    Ambiguity is read from the harness's own record of how many sessions are
+    live in this directory. More than one means the derivation collapses: they
+    share a path, so they share an identity, and `worktree_bus` already records
+    that as one identity rather than two. That is not a hypothetical -- three
+    sessions were in `famMain` at once on 2026-08-06 and one published a finding
+    under the wrong author.
+    """
+    here = Path(cwd) if cwd else Path.cwd()
+    try:
+        live = S.candidates(here)
+    except OSError:
+        live = ()
+    shared = len(live) > 1
+
+    if evidence.startswith("declared on the command line, corroborated"):
+        actor = ACT.DeclaredOnCommandLine(session, corroborated=True,
+                                          evidence=evidence).current()
+    elif evidence.startswith("declared on the command line") or \
+            evidence.startswith("self-reported"):
+        actor = ACT.DeclaredOnCommandLine(session, corroborated=False,
+                                          evidence=evidence).current()
+    else:
+        actor = ACT.DerivedFromPath(session, evidence=evidence,
+                                    shared_checkout=shared).current()
+        if shared and not actor.attributed:
+            # The derivation did not fail to find anybody -- it found several
+            # and refused to choose. "Nobody works here" and "too many people
+            # work here to say which" both arrive as UNATTRIBUTED, and only the
+            # second is a fact about contention. Marking it keeps them apart.
+            actor = replace(actor, ambiguous=True)
+    # A DECLARED or CORROBORATED identity is a name the writer chose, so a
+    # shared checkout does not make it ambiguous -- two people typing two
+    # different names are distinguishable, however weakly. Only a DERIVATION
+    # collapses, because the path is the same for both.
+    return actor
+
+
+def _cmd_whoami(args, mesh, bus, session, evidence, space) -> int:
+    """Who this command would publish AS, and whether that is good enough.
+
+    Exists because the answer was already computable and never shown until
+    something had been written under it. A session that discovers its own
+    attribution by reading a finding it published under the wrong name has
+    discovered it too late.
+    """
+    actor = resolve_actor(session, evidence)
+    minimum = ACT.Assurance[args.at_least]
+
+    print(f"Actor over {mesh.repo_root}")
+    print(f"  id           {actor.id}")
+    print(f"  kind         {actor.kind.name}")
+    print(f"  organization {actor.organization}")
+    print(f"  assurance    {actor.assurance.name}")
+    print(f"  evidence     {actor.evidence}")
+    print(f"  ambiguous    {'YES' if actor.ambiguous else 'no'}")
+
+    if actor.may_author(minimum):
+        print(f"\nMAY AUTHOR at {minimum.name}.")
+    else:
+        print(f"\nMAY NOT AUTHOR at {minimum.name}:")
+        print(f"  {actor.refusal(minimum)}")
+
+    try:
+        live = S.candidates(Path.cwd())
+    except OSError:
+        live = ()
+    if len(live) > 1:
+        print(f"\n{len(live)} session(s) are live in this directory, according "
+              f"to records the harness wrote:")
+        for candidate in sorted(live):
+            here = "  <- you say you are this one" if candidate == session else ""
+            print(f"    {candidate}{here}")
+        print("  They share one path, so a DERIVED identity cannot separate "
+              "them. Passing --session is what distinguishes you, and it is a "
+              "declaration: it says who you claim to be, not who you are.")
+
+    print()
+    print("WHAT THIS CANNOT TELL YOU")
+    for limit in ACT.LIMITS:
+        print(f"  - {limit}")
+    return 0 if actor.may_author(minimum) else 1
+
+
 _COMMANDS = {
     "status": _cmd_status, "inbox": _cmd_inbox, "publish": _cmd_publish,
     "open-areas": _cmd_open_areas, "claim": _cmd_claim,
     "release": _cmd_release, "ack": _cmd_ack,
     "disciplines": _cmd_disciplines, "areas": _cmd_areas,
     "supply": _cmd_supply, "resume": _cmd_resume, "waiting": _cmd_waiting,
+    "whoami": _cmd_whoami,
 }
 
 
@@ -928,6 +1022,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = CLI.subcommands(parser, trailing, dest="command", required=True)
 
     sub.add_parser("status", help="who is working where")
+    whoami = sub.add_parser(
+        "whoami", help="who you would publish AS, and whether that is enough")
+    whoami.add_argument(
+        "--at-least", default="CORROBORATED",
+        choices=[level.name for level in ACT.Assurance],
+        help="the assurance a durable write should require (default: "
+             "CORROBORATED). Exits non-zero when the current attribution does "
+             "not reach it")
     sub.add_parser("areas", help="the coordinate space in force, and its source")
 
     inbox = sub.add_parser("inbox", help="findings addressed to this session")
