@@ -405,14 +405,14 @@ def _cmd_careers(args) -> int:
         if career.measured_class and career.measured_class != klass:
             klass = f"{klass}/{career.measured_class}"
         print(f"  {career.model:<28} {klass:<14} {career.runs:>4} run(s)  "
-              f"{career.mean_score:.3f} pooled  "
+              f"{L.pooled_text(career)} pooled  "
               f"{career.landed} landed / {career.abandoned} abandoned / "
               f"{career.undecided} undecided")
         for card in career.cards:
             held = " STANDING" if (card.layer, card.work_kind) in career.holds \
                 else ""
             print(f"      {card.layer}/{card.work_kind:<20} "
-                  f"{card.mean_score:.3f} over {card.runs} run(s), "
+                  f"{L.pooled_text(card)} over {card.runs} run(s), "
                   f"{card.settled} settled{held}")
         if not career.holds:
             print("      holds nothing — a run at a coordinate is not the "

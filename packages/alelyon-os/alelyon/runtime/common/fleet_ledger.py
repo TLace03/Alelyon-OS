@@ -10,7 +10,9 @@ One standing per `(layer, work_kind)`: the model currently held to be best for
 that job. A challenger replaces it only through `propose()`, which refuses
 unless **all** of these hold:
 
-1. the challenger has at least `MIN_RUNS` completed runs at that coordinate;
+1. the challenger has at least `MIN_RUNS` completed runs at that coordinate —
+   *completed*, which until 2026-08-06 this compared against the total instead,
+   so runs that established nothing counted towards the bar;
 2. those runs are **later than the incumbent's standing was set** — held out by
    time, so a challenger cannot win on the evidence that promoted the incumbent;
 3. it beats the incumbent's score by at least `MARGIN_FRACTION` of the
@@ -156,6 +158,13 @@ SCORE_LIMITS: tuple[str, ...] = (
     "its turns, so a mixed run is scored as one model's work.",
     "MIN_RUNS is five. Five runs is a working hypothesis, not a finding - a "
     "coin clears that bar one time in sixteen.",
+    "A run whose outcome no journal recorded is NOT SCORED, and is not counted "
+    "towards MIN_RUNS either. It is still recorded and still shown, because "
+    "how much of a model's work left no outcome is worth seeing - measured "
+    "2026-08-06, 272 of 1439 runs, and every one of them QUIET rather than "
+    "STOPPED. What it is not is a bad result: session_activity says a crashed "
+    "agent and an agent whose workflow wrote no journal look identical, and a "
+    "directly-spawned agent has no journal to be settled by at all.",
     "The ratchet guarantees the standing never moves to a candidate that "
     "scored worse on the evidence available. It cannot guarantee the standing "
     "is the best model, because a model nobody ran has no evidence at all.",
@@ -242,23 +251,62 @@ class Run:
     landed: str = O.UNKNOWN
 
     @property
-    def score(self) -> float:
-        """Completion, penalised by cost, by a later defect finding, and by
-        the branch having been abandoned.
+    def measured(self) -> bool:
+        """Whether this run established anything at all.
 
-        In [0, 1]. Deliberately simple and deliberately printed beside its
-        limits: a compound score with tuned weights would look like a
-        measurement of quality, and this is a measurement of whether the job
-        finished, what it cost to finish, and whether anyone took it up.
+        `settled` means the workflow journal recorded a result. Its negation is
+        NOT "the work failed": `session_activity` has four statuses, and the two
+        that reach here unsettled are STOPPED — the journal recorded `stopped`,
+        `error` or `failed`, which is real negative evidence — and QUIET, which
+        that module defines as *"no write for N minutes and no outcome in a
+        journal; a crashed agent looks exactly like this"* and whose own LIMITS
+        say is "not a report from the agent".
+
+        Measured 2026-08-06 over 1439 recorded runs: 1167 SETTLED, 272 QUIET,
+        and **STOPPED zero times**. So in practice the unsettled rows are
+        entirely the absence of a journal entry rather than evidence of a
+        failure. By fleet kind the split is workflow 1167/197 and direct 0/75 —
+        `_read_journal` reads a WORKFLOW journal, so a directly-spawned agent
+        has none, can never be SETTLED, and would otherwise be scored on which
+        mechanism spawned it rather than on anything it did.
+        """
+        return self.settled
+
+    @property
+    def score(self) -> float | None:
+        """Completion, penalised by cost, by a later defect finding, and by
+        the branch having been abandoned. **`None` where nothing was measured.**
+
+        In [0, 1] when it is a number at all. Deliberately simple and
+        deliberately printed beside its limits: a compound score with tuned
+        weights would look like a measurement of quality, and this is a
+        measurement of whether the job finished, what it cost to finish, and
+        whether anyone took it up.
 
         **Landing only ever subtracts.** LANDED, IN-FLIGHT and UNKNOWN all
         multiply by exactly 1.0, so a run recorded before this term existed
         scores identically under it — and, more importantly, no challenger can
         beat an incumbent whose stored score was frozen under the older rule
         merely because the rule got more generous. See `ABANDONED_PENALTY`.
+
+        **Completion now obeys that same rule, and did not.** An unmeasured run
+        returned `0.0` — the worst attainable value — and that number was then
+        averaged into `Scorecard.mean_score`, which is what the gate compares.
+        The test covering it said the quiet part out loud: *"an unsettled run
+        measured nothing"*, and then asserted the worst possible measurement of
+        it. Absence of evidence was the only thing the penalty ever fired on
+        (see `measured`), and it decided coordinates: at `executive/design-
+        review`, the busiest at 733 runs, excluding the unmeasured rows from the
+        mean puts a different model on top.
+
+        `None` rather than a neutral 1.0, and rather than a documented 0.0,
+        because this is the producer. A neutral number would still be a number
+        an aggregator could average; `None` cannot be summed by accident, so a
+        caller has to decide what an absence means instead of inheriting an
+        answer. There are three callers and each one now says.
         """
-        if not self.settled:
-            return 0.0
+        if not self.measured:
+            return None
         # Cost term: 1.0 at zero tokens, decaying with a 40k half-life. A
         # constant rather than a fitted parameter, because fitting it against
         # the same runs it scores would be circular.
@@ -287,6 +335,17 @@ class Scorecard:
     #: as their own number rather than folded into either side.
     landed: int = 0
     abandoned: int = 0
+
+    @property
+    def measured(self) -> bool:
+        """Whether `mean_score` is a score at all.
+
+        False means every run here was unmeasured (`Run.measured`), so the mean
+        is over nothing and reads 0.0 for want of a number rather than because
+        anything scored badly. A surface that prints `mean_score` without asking
+        this prints the worst value on the scale as a finding.
+        """
+        return self.settled > 0
 
     @property
     def undecided(self) -> int:
@@ -332,6 +391,17 @@ class Career:
     measured_class: str | None = None
 
     @property
+    def measured(self) -> bool:
+        """Whether `mean_score` is a score at all. See `Scorecard.measured`.
+
+        `<synthetic>` is why this is not hypothetical: on the live ledger it is
+        94 runs of which 0 measured anything, so its pooled mean is over nothing
+        and drew as 0.000 — the worst value on the scale, for work whose only
+        established property is that no journal recorded an outcome for it.
+        """
+        return self.settled > 0
+
+    @property
     def undecided(self) -> int:
         """Runs whose branch has told us nothing yet. Named, never implied."""
         return max(0, self.runs - self.landed - self.abandoned)
@@ -374,6 +444,19 @@ class Verdict:
 
     def __str__(self) -> str:
         return f"{'ACCEPTED' if self.accepted else 'REFUSED'} — {self.detail}"
+
+
+def pooled_text(record) -> str:
+    """A `Scorecard` or `Career` mean, or UNMEASURED where it is over nothing.
+
+    Shared rather than written per surface for the reason the number exists at
+    all: `mean_score` reads 0.0 when nothing under it measured anything, and 0.0
+    is the BOTTOM of the scale. Four surfaces print it — two panels, the ledger
+    report and the careers command — and a fifth copy of `if measured` is how
+    one of them quietly starts printing the worst value on the scale as a
+    finding again.
+    """
+    return f"{record.mean_score:.3f}" if record.measured else "UNMEASURED"
 
 
 def default_database() -> Path:
@@ -510,23 +593,35 @@ class FleetLedger:
                 """SELECT settled, out_tokens, contested, landed FROM runs
                     WHERE layer=? AND work_kind=? AND model=? AND at>? AND space=?""",
                 (layer, work_kind, model, since, H.LAYER_SPACE_VERSION)).fetchall()
+        # The mean is over the runs that MEASURED something, never over all of
+        # them. Dividing by `runs` while the unmeasured rows contributed 0.0 was
+        # a double count of the same absence: it entered the numerator as the
+        # worst possible score and the denominator as though it were evidence.
         total = 0.0
+        measured = 0
         landed = abandoned = 0
         for entry in scored:
             outcome = entry["landed"] or O.UNKNOWN
             landed += outcome == O.LANDED
             abandoned += outcome == O.ABANDONED
-            total += Run(
+            value = Run(
                 run_id="", at=0, layer=layer, work_kind=work_kind, model=model,
                 agent_id="", fleet_id="", session_id="",
                 settled=bool(entry["settled"]), turns=0,
                 out_tokens=int(entry["out_tokens"] or 0), seconds=None,
                 contested=bool(entry["contested"]), landed=outcome).score
+            if value is not None:
+                total += value
+                measured += 1
         return Scorecard(
             layer=layer, work_kind=work_kind, model=model,
             runs=int(row["runs"]), settled=int(row["settled"] or 0),
             contested=int(row["contested"] or 0),
-            mean_score=round(total / int(row["runs"]), 6),
+            # 0.0 where nothing was measured, and `measured` is False there so a
+            # reader is never handed that zero as though it were a score. The
+            # gate cannot reach it either: `MIN_RUNS` is now checked against the
+            # measured count, which is zero in exactly that case.
+            mean_score=round(total / measured, 6) if measured else 0.0,
             mean_tokens=round(float(row["tokens"] or 0.0), 1),
             last_at=int(row["last_at"] or 0),
             landed=landed, abandoned=abandoned)
@@ -775,13 +870,23 @@ class FleetLedger:
         since = incumbent.set_at if incumbent else 0
         card = self.scorecard(layer, work_kind, model, since=since)
 
-        if card is None or card.runs < MIN_RUNS:
-            have = card.runs if card else 0
+        # MEASURED runs, not runs. The module docstring has always said "at
+        # least MIN_RUNS **completed** runs" and this compared the total, so a
+        # model could clear the bar on rows that established nothing — the same
+        # absence counted as evidence here that was counted as failure in the
+        # mean. Both halves of the gate now read the same column.
+        if card is None or card.settled < MIN_RUNS:
+            have = card.settled if card else 0
+            unmeasured = (card.runs - card.settled) if card else 0
             reason = NOT_HELD_OUT if (incumbent and card is None) else TOO_FEW_RUNS
             return Verdict(False, reason,
-                           f"{model} has {have} run(s) at {layer}/{work_kind}"
+                           f"{model} has {have} measured run(s) at "
+                           f"{layer}/{work_kind}"
                            + (f" since the incumbent was set" if incumbent else "")
-                           + f"; {MIN_RUNS} are required",
+                           + f"; {MIN_RUNS} are required"
+                           + (f" ({unmeasured} more left no outcome in a "
+                              f"journal, which is not evidence either way)"
+                              if unmeasured else ""),
                            challenger=card, incumbent=incumbent)
 
         ok, evidence = self.eligible(layer, model)
@@ -840,11 +945,12 @@ class FleetLedger:
                            f"nothing holds {layer}/{work_kind}")
         card = self.scorecard(layer, work_kind, incumbent.model,
                               since=incumbent.set_at)
-        if card is None or card.runs < MIN_RUNS:
+        if card is None or card.settled < MIN_RUNS:
             return Verdict(False, TOO_FEW_RUNS,
-                           f"{incumbent.model} has {card.runs if card else 0} "
-                           f"run(s) since it was promoted; {MIN_RUNS} are "
-                           f"required before it can be demoted on them",
+                           f"{incumbent.model} has "
+                           f"{card.settled if card else 0} measured run(s) "
+                           f"since it was promoted; {MIN_RUNS} are required "
+                           f"before it can be demoted on them",
                            incumbent=incumbent)
         if card.mean_score >= floor:
             return Verdict(False, NO_MARGIN,
@@ -974,7 +1080,7 @@ class FleetLedger:
                 # The undecided count is printed beside the decided ones rather
                 # than left out. A landed/abandoned pair on its own reads as a
                 # complete tally of the runs, and it usually is not one.
-                lines.append(f"        {card.model:<28} {card.mean_score:.3f}  "
+                lines.append(f"        {card.model:<28} {pooled_text(card):<11}  "
                              f"{card.settled}/{card.runs} settled  "
                              f"{card.mean_tokens:>8.0f} tok  "
                              f"{card.landed} landed / {card.abandoned} "
@@ -1104,5 +1210,5 @@ __all__ = [
     "MIN_RUNS", "NOT_A_COORDINATE", "SCORE_CEILING",
     "NOT_HELD_OUT", "NO_MARGIN", "OBSERVATION", "PAPER", "Run", "SCORE_LIMITS",
     "STATES", "Scorecard", "Standing", "TOO_FEW_RUNS", "Verdict",
-    "default_database", "runs_from_activity",
+    "default_database", "pooled_text", "runs_from_activity",
 ]
