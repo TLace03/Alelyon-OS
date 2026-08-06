@@ -42,6 +42,41 @@ half-applied refactor that was nobody's defect. A finding addressed *by subject*
 would have reached exactly the session that needed it, without either knowing the
 other existed.
 
+Channels and threads
+--------------------
+The findings half above is a *notification* system: a session publishes, routing
+decides who hears it, and there the exchange ends. Sessions had no way to hold a
+conversation — `mail.py ack --note` publishes a reply as a brand-new finding with
+no link to what it answers, so a thread of five messages is five unrelated rows
+and a reader cannot reassemble it.
+
+Channels and threads close that, and they are deliberately built on the *claim*
+precedent rather than as a new trust model. A Slack channel is a **declared
+subscription**, which is the exact opposite of the derived routing this module
+exists to protect — so joining a channel is treated as what it is: the same kind
+of self-report a claim already is, labelled `DECLARED` at every read, carrying
+the same "that is your own declaration, not observed work" reason.
+
+The consequence is a property Slack does not have and cannot have. A message
+posted to `#runtime-common` naming `worktree_bus.py` reaches:
+
+* everyone who **joined** the channel — `DECLARED`, because they said so; and
+* everyone the mesh can see **editing that file**, whether or not they ever
+  joined — `DERIVED`, because the repository says so.
+
+A session cannot miss a message about the file it is demonstrably editing merely
+because it was not in the room. Derived routing is not weakened by the channel;
+the channel is an additional audience laid over it.
+
+A **thread** is a `reply_to` pointing at the message being answered. A reply
+reaches the parent's audience, and each recipient keeps **the provenance their
+parent delivery had** — an inherited audience is graded by the link that
+assembled it, never promoted by being replied to (§5's weakest-link rule).
+
+Mentions (`@here`, `@channel`, `@<session-prefix>`) are `DECLARED` without
+exception: they are a publisher naming an address, which is the one thing a
+publisher is never trusted to do on its own.
+
 Territory
 ---------
 A claim on an `Area`. `open_areas()` reports the areas no live worktree is
@@ -71,7 +106,12 @@ from alelyon.runtime.common.worktree import UNATTRIBUTED, WorktreeMesh
 #: Bumped independently of `worktree_cache.SCHEMA_VERSION`: the two share a file
 #: but not a lifecycle, and coupling their versions would force a migration of
 #: one whenever the other changed.
-BUS_SCHEMA_VERSION = 1
+#: 2 added channels, threads and the `message` kind. The upgrade is additive —
+#: two new tables and two defaulted columns — so a v1 database opens, migrates in
+#: place and keeps every row. There is no downgrade: an older build opening a
+#: migrated file sees columns it does not select and works unchanged, which is
+#: the only compatibility direction this file needs.
+BUS_SCHEMA_VERSION = 2
 
 #: How a delivery was arrived at. Mirrors `worktree_graph.PROVENANCE` deliberately
 #: — a reader who has learned one vocabulary should not need a second.
@@ -87,14 +127,23 @@ KIND_DEFECT = "defect-found"           # a real bug, possibly not mine to fix
 KIND_CONVENTION = "convention"         # a rule or pattern others should follow
 KIND_BLOCKED = "blocked-on"            # I cannot proceed until something changes
 KIND_LANDED = "landed"                 # work reached a branch others can build on
+KIND_MESSAGE = "message"               # conversation; carries no operational claim
 KINDS = (KIND_REFACTOR, KIND_INTERFACE, KIND_DEFECT, KIND_CONVENTION,
-         KIND_BLOCKED, KIND_LANDED)
+         KIND_BLOCKED, KIND_LANDED, KIND_MESSAGE)
 
 #: Inbox ordering. `refactor-in-flight` and `interface-changed` outrank the rest
 #: because they are the two that make another session's *correct* work start
 #: failing — the reader needs them before they debug something that is not theirs.
+#:
+#: `message` sorts LAST, below even `landed`, and that placement is the whole
+#: safety argument for adding chat to an operational bus. Conversation is far
+#: more frequent than incident reporting; ranking the two together would let a
+#: busy channel push an `interface-changed` off the top of an inbox, and the one
+#: thing this bus exists to deliver on time is the finding that stops a session
+#: debugging somebody else's half-applied refactor. Chat may never outrank it.
 _URGENCY = {KIND_REFACTOR: 0, KIND_INTERFACE: 0, KIND_BLOCKED: 1,
-            KIND_DEFECT: 2, KIND_CONVENTION: 3, KIND_LANDED: 4}
+            KIND_DEFECT: 2, KIND_CONVENTION: 3, KIND_LANDED: 4,
+            KIND_MESSAGE: 5}
 
 #: A finding nobody acknowledged eventually stops being news. Read-time only:
 #: nothing is deleted, because the history is the point (§9 answer 1).
@@ -115,6 +164,15 @@ _BUS_LIMITS: tuple[str, ...] = (
     "records that and does not prevent it.",
     "Silence is not consent. An unacknowledged finding means nobody pressed the "
     "button, not that nobody was affected.",
+    "A channel is not private and not access-controlled. Every session that can "
+    "open the database can read every channel and join any of them; membership "
+    "organises attention, it does not restrict who can see what.",
+    "Nobody is obliged to be in a channel. A room's members are the sessions "
+    "that joined, so posting to a quiet channel can reach nobody at all, which "
+    "is why a message that matters should still name the paths it is about.",
+    "A mention is resolved by prefix against sessions something else already "
+    "knows about. One that matches nothing, or matches two sessions at once, "
+    "delivers to NOBODY rather than guessing.",
 )
 
 
@@ -141,6 +199,13 @@ class Finding:
     to_area: str = ""
     broadcast: bool = False
     severity: str = "info"
+    #: The channel this was posted to, without the `#`. Empty for a finding
+    #: published the original way, which is every row written before schema 2.
+    channel: str = ""
+    #: The finding this answers, making the two a thread. Empty for a root
+    #: message. Not a foreign key: a reply must survive its parent ageing out of
+    #: an inbox, and a dangling `reply_to` is readable evidence that it did.
+    reply_to: str = ""
 
     def areas_in(self, space=None) -> tuple[Area, ...]:
         """Where this finding lands in ``space``'s coordinate vocabulary.
@@ -197,6 +262,47 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class Channel:
+    """A named room. Created by whoever first posts to or joins it.
+
+    There is no admin, no private channel and no invite. Every session that can
+    open the database can read every channel, and pretending otherwise would be
+    a security claim this substrate cannot make: the file is a local SQLite
+    database with filesystem permissions and nothing else (§9's "no silent
+    security claims"). A channel organises attention. It does not contain
+    anything.
+    """
+
+    name: str
+    at: int
+    created_by: str
+    topic: str = ""
+
+    @property
+    def display(self) -> str:
+        return f"#{self.name}"
+
+
+@dataclass(frozen=True)
+class Membership:
+    """A session's declared subscription to a channel.
+
+    The same shape as `Claim` and for the same reason — see the module docstring.
+    Joining is a self-report; nothing verifies that a member has any business in
+    the channel, and nothing needs to.
+    """
+
+    channel: str
+    session_id: str
+    at: int
+    left_at: int | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.left_at is None
+
+
+@dataclass(frozen=True)
 class AreaState:
     """What the fleet is doing in one area — the answer to "is this free?"."""
 
@@ -250,25 +356,132 @@ _DDL = (
            note TEXT NOT NULL,
            released_at INTEGER,
            PRIMARY KEY (area, session_id, at))""",
+    """CREATE TABLE IF NOT EXISTS channel (
+           name TEXT PRIMARY KEY,
+           at INTEGER NOT NULL,
+           created_by TEXT NOT NULL,
+           topic TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS membership (
+           channel TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           at INTEGER NOT NULL,
+           left_at INTEGER,
+           PRIMARY KEY (channel, session_id))""",
     "CREATE INDEX IF NOT EXISTS finding_at ON finding(at)",
     "CREATE INDEX IF NOT EXISTS delivery_session ON delivery(to_session)",
     "CREATE INDEX IF NOT EXISTS claim_area ON claim(area)",
+    "CREATE INDEX IF NOT EXISTS membership_session ON membership(session_id)",
+)
+
+#: Indexes over columns that schema 2 ADDS, so they cannot live in `_DDL`: those
+#: statements run against a v1 table where `finding.channel` does not exist yet,
+#: and `CREATE INDEX IF NOT EXISTS` on a missing column is a hard error, not a
+#: no-op. Applied by `_migrate` immediately after the column it indexes — caught
+#: by opening a copy of this repository's real 278-finding database, which is the
+#: only shape that reproduces it. A fresh database never does.
+_INDEXES_V2 = (
+    "CREATE INDEX IF NOT EXISTS finding_channel ON finding(channel, at)",
+    "CREATE INDEX IF NOT EXISTS finding_reply ON finding(reply_to)",
+)
+
+#: Columns added to `finding` after schema 1 shipped, with the default a v1 row
+#: gets. Applied by `_migrate` rather than declared in `_DDL`, because
+#: `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table and would
+#: silently leave a populated database on the old shape — which is the failure
+#: this list exists to prevent. The live bus in this repository held 278 findings
+#: and 1303 deliveries when schema 2 was written; none of them may be lost, and
+#: a v1 row is not wrong, it simply predates channels.
+_FINDING_COLUMNS_V2 = (
+    ("channel", "TEXT NOT NULL DEFAULT ''"),
+    ("reply_to", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
-def _finding_id(at: int, session: str, kind: str, body: str) -> str:
+def _finding_id(at: int, session: str, kind: str, body: str,
+                channel: str = "", reply_to: str = "") -> str:
     """Content-derived, so republishing the same finding twice is detectable.
 
     Includes the timestamp: a session that genuinely learns the same thing again
     later has news, and collapsing that into the first report would hide a
     recurrence behind a duplicate check.
+
+    Channel and parent are in the material because `publish` writes with
+    `INSERT OR REPLACE`: without them, one session posting the same sentence to
+    two channels inside the same second produces one id, and the second post
+    silently overwrites the first. Chat makes that ordinary — "done" and "ack"
+    land in several rooms a second apart — where for findings it was rare enough
+    to have never been hit.
     """
-    material = f"{at}\x1f{session}\x1f{kind}\x1f{body}".encode("utf-8")
+    material = (f"{at}\x1f{session}\x1f{kind}\x1f{body}"
+                f"\x1f{channel}\x1f{reply_to}").encode("utf-8")
     return hashlib.blake2b(material, digest_size=8).hexdigest()
 
 
 def _now() -> int:
     return int(time.time())
+
+
+#: Channel names are lowercase, dash-separated, and bounded. Not cosmetic: a
+#: channel is created by being posted to, so `#Runtime-Common`, `#runtime common`
+#: and `#runtime-common` would otherwise become three rooms holding one
+#: conversation, and nobody would see the other two.
+_CHANNEL_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_."
+MAX_CHANNEL_NAME = 48
+
+#: `@here` and `@channel` both mean everyone; Slack users type both and would not
+#: thank us for a distinction we cannot enforce.
+EVERYONE_MENTIONS = ("here", "channel", "everyone")
+
+
+def normalise_channel(name: str) -> str:
+    """Canonical form of a channel name, or `""` for no channel.
+
+    Refuses rather than mangles when nothing survives normalisation: a name that
+    reduces to the empty string would silently post to no channel, and the
+    author would believe they had spoken to a room.
+    """
+    given = str(name or "").strip()
+    if not given:
+        return ""          # no channel asked for, which is not the same thing
+                           # as one asked for badly -- see below
+    text = given.lstrip("#").strip().lower()
+    if not text:
+        # `###` reduces to nothing, and returning "" here would report it as "no
+        # channel given" -- the caller then fails with "a finding needs an
+        # audience", which names the wrong cause and sends the author looking at
+        # their subject paths instead of at what they typed.
+        raise ValueError(
+            f"channel name {name!r} is only '#' characters; a channel needs a "
+            f"name after the hash")
+    text = "-".join(text.split())
+    kept = "".join(c for c in text if c in _CHANNEL_OK).strip("-")
+    if not kept:
+        raise ValueError(
+            f"channel name {name!r} contains no usable characters; expected "
+            f"letters, digits, dash, dot or underscore")
+    return kept[:MAX_CHANNEL_NAME]
+
+
+def parse_mentions(body: str) -> tuple[tuple[str, ...], bool]:
+    """`@handles` in a message body, and whether it addressed everyone.
+
+    Deliberately literal: it reads the text and reports what it found. It
+    resolves nothing, because resolving is routing's job and routing is the half
+    of this module that is not allowed to trust the writer.
+    """
+    handles: list[str] = []
+    everyone = False
+    for token in str(body or "").split():
+        if not token.startswith("@") or len(token) < 2:
+            continue
+        handle = token[1:].strip(".,;:!?)(<>[]\"'").lower()
+        if not handle:
+            continue
+        if handle in EVERYONE_MENTIONS:
+            everyone = True
+        elif handle not in handles:
+            handles.append(handle)
+    return tuple(handles), everyone
 
 
 class FleetBus:
@@ -300,9 +513,39 @@ class FleetBus:
         with self._connect() as conn:
             for statement in _DDL:
                 conn.execute(statement)
+            self._migrate(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO bus_meta(name, value) VALUES('schema', ?)",
                 (str(BUS_SCHEMA_VERSION),))
+            conn.execute(
+                "UPDATE bus_meta SET value = ? WHERE name = 'schema' "
+                "AND CAST(value AS INTEGER) < ?",
+                (str(BUS_SCHEMA_VERSION), BUS_SCHEMA_VERSION))
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> tuple[str, ...]:
+        """Bring an existing `finding` table up to the current column set.
+
+        Idempotent and additive: every column is added with a constant default,
+        so SQLite rewrites no rows and an interrupted run resumes correctly. It
+        reads the table's ACTUAL shape rather than trusting the recorded schema
+        version, because those two disagree in exactly the case that matters — a
+        database written by a build that had the version bumped and the migration
+        half-applied. The columns are the truth; `bus_meta` is a label.
+
+        Returns what it added, so a caller can log a migration that really
+        happened instead of one that was merely attempted.
+        """
+        have = {row["name"] for row in conn.execute("PRAGMA table_info(finding)")}
+        added = []
+        for column, declaration in _FINDING_COLUMNS_V2:
+            if column in have:
+                continue
+            conn.execute(f"ALTER TABLE finding ADD COLUMN {column} {declaration}")
+            added.append(column)
+        for statement in _INDEXES_V2:
+            conn.execute(statement)
+        return tuple(added)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.database), timeout=10.0)
@@ -325,7 +568,7 @@ class FleetBus:
                 from_evidence: str = "self-reported", mesh: WorktreeMesh | None = None,
                 subject_paths=(), to_session: str = "", to_area: str = "",
                 broadcast: bool = False, severity: str = "info",
-                cache=None,
+                cache=None, channel: str = "", reply_to: str = "",
                 at: int | None = None) -> tuple[Finding, tuple[Delivery, ...]]:
         """Record a finding and resolve who it reaches.
 
@@ -340,31 +583,61 @@ class FleetBus:
         body = " ".join(str(body or "").split())
         if not body:
             raise ValueError("a finding with no body is not a finding")
-        if not (subject_paths or to_session or to_area or broadcast):
+        channel = normalise_channel(channel)
+        reply_to = str(reply_to or "").strip()
+        # `@here` is an audience expansion, not decoration: it means everyone the
+        # mesh can see working, which is exactly what `broadcast` already routes.
+        # Resolved HERE rather than in `_route` so the stored row genuinely is a
+        # broadcast — a finding whose deliveries say "broadcast" while its own
+        # row says otherwise would misinform every later reader of the table.
+        if parse_mentions(body)[1]:
+            broadcast = True
+        if not (subject_paths or to_session or to_area or broadcast
+                or channel or reply_to):
             raise ValueError(
                 "a finding needs an audience: subject paths, an area, an "
-                "explicit session, or broadcast. Refusing rather than "
+                "explicit session, a channel, a message to reply to, or "
+                "broadcast. Refusing rather than "
                 "defaulting to broadcast, which would make every unaddressed "
                 "note interrupt everybody.")
         at = _now() if at is None else int(at)
+        if reply_to:
+            # Flattened at WRITE time, not merely resolved at read time. A reply
+            # to a reply is stored against the root, so "a thread is one level
+            # deep" is a property of the data rather than a convention every
+            # reader has to reimplement -- and a reader that forgot would drop
+            # the third message in a conversation and show nothing missing.
+            # One hop suffices: by induction every stored parent is already a root.
+            reply_to = self._root_of(reply_to)
+        if channel:
+            self.ensure_channel(channel, created_by=from_session, at=at)
+        elif reply_to:
+            # A reply inherits its parent's room, so answering from an inbox --
+            # where the channel is not something the replier had to know -- keeps
+            # the answer in the conversation instead of orphaning it.
+            channel = self._channel_of(reply_to)
         paths = tuple(dict.fromkeys(
             str(p).replace("\\", "/") for p in (subject_paths or ()) if str(p).strip()))
         finding = Finding(
-            id=_finding_id(at, from_session, kind, body), at=at, kind=kind,
+            id=_finding_id(at, from_session, kind, body, channel, reply_to),
+            at=at, kind=kind,
             from_session=from_session or UNATTRIBUTED, from_evidence=from_evidence,
             body=body, subject_paths=paths, to_session=to_session,
-            to_area=to_area, broadcast=bool(broadcast), severity=severity)
+            to_area=to_area, broadcast=bool(broadcast), severity=severity,
+            channel=channel, reply_to=reply_to)
         deliveries = self._route(finding, mesh, cache)
         with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO finding
                    (id, at, kind, from_session, from_evidence, body,
-                    subject_paths, to_session, to_area, broadcast, severity)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    subject_paths, to_session, to_area, broadcast, severity,
+                    channel, reply_to)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (finding.id, finding.at, finding.kind, finding.from_session,
                  finding.from_evidence, finding.body,
                  json.dumps(list(finding.subject_paths)), finding.to_session,
-                 finding.to_area, int(finding.broadcast), finding.severity))
+                 finding.to_area, int(finding.broadcast), finding.severity,
+                 finding.channel, finding.reply_to))
             for delivery in deliveries:
                 conn.execute(
                     """INSERT OR IGNORE INTO delivery
@@ -373,6 +646,25 @@ class FleetBus:
                     (finding.id, delivery.to_session, delivery.provenance,
                      delivery.reason, at))
         return finding, deliveries
+
+    def _root_of(self, finding_id: str) -> str:
+        """The root of the thread `finding_id` belongs to.
+
+        Returns the id unchanged when it names nothing. A dangling `reply_to` is
+        readable evidence that a parent aged out or was never written, and
+        refusing the reply would lose the only message that still described the
+        exchange.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT reply_to FROM finding WHERE id = ?",
+                               (finding_id,)).fetchone()
+        return (row["reply_to"] or finding_id) if row is not None else finding_id
+
+    def _channel_of(self, finding_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute("SELECT channel FROM finding WHERE id = ?",
+                               (finding_id,)).fetchone()
+        return (row["channel"] or "") if row is not None else ""
 
     def _route(self, finding: Finding, mesh: WorktreeMesh | None,
                cache=None) -> tuple[Delivery, ...]:
@@ -407,6 +699,70 @@ class FleetBus:
                 "addressed explicitly by the publisher; not derived from any "
                 "observed work" + unknown))
 
+        # Channel members. The same shape as the claim below and justified the
+        # same way: a subscription is a self-report, so it is DECLARED, it never
+        # merges with observed work, and it is worth what a self-report is worth.
+        #
+        # What it must NOT do is replace derived routing. A channel post that
+        # names subject paths still reaches whoever the mesh sees editing them,
+        # joined or not — the two legs are additive, and the dedup at the bottom
+        # keeps the DERIVED reason when a session qualifies both ways. That is
+        # the property in the module docstring: you cannot be talked about in a
+        # room you are not in without being told.
+        if finding.channel:
+            for member in self.members(finding.channel):
+                if member.session_id == finding.from_session:
+                    continue
+                out.append(Delivery(
+                    finding, member.session_id, DECLARED,
+                    f"you joined #{finding.channel}, where this was posted; "
+                    f"that is your own declaration, not observed work"))
+
+        # A thread reaches the audience of the message it answers.
+        #
+        # Each recipient keeps THEIR OWN provenance from the parent delivery
+        # rather than a fresh label for the reply. A reply cannot promote a
+        # DECLARED audience to a DERIVED one — nothing new was observed, someone
+        # merely spoke again — and §5 grades a compound by its weakest link.
+        if finding.reply_to:
+            for parent in self.deliveries_of(finding.reply_to):
+                if parent.to_session == finding.from_session:
+                    continue
+                out.append(Delivery(
+                    finding, parent.to_session, parent.provenance,
+                    f"you received the message this replies to, which reached "
+                    f"you because: {parent.reason}"))
+
+        # Mentions. DECLARED without exception — this is a publisher naming an
+        # address, the one thing a publisher is never trusted to do alone.
+        #
+        # A handle is resolved against sessions something else already knows
+        # about: the mesh, the channel's members, and claim holders. An
+        # unresolvable handle produces NO delivery, deliberately. Inventing one
+        # addressed to a typo is the "filed against a string" failure the
+        # explicit-address branch above was already caught by; the chat layer
+        # re-parses the body and reports which mentions matched nobody.
+        handles, _everyone = parse_mentions(finding.body)
+        if handles:
+            known = {claim.session_id for claim in self.active_claims()}
+            if finding.channel:
+                known |= {m.session_id for m in self.members(finding.channel)}
+            if mesh is not None:
+                known |= {w.session for w in mesh.worktrees
+                          if w.session != UNATTRIBUTED}
+            known.discard(finding.from_session)
+            for handle in handles:
+                matched = sorted(s for s in known if s.lower().startswith(handle))
+                if len(matched) != 1:
+                    # Zero is a typo or an invisible session; more than one is a
+                    # prefix short enough to be ambiguous. Guessing between two
+                    # sessions is worse than delivering to neither, because the
+                    # author would never learn it went to the wrong one.
+                    continue
+                out.append(Delivery(
+                    finding, matched[0], DECLARED,
+                    f"the author wrote @{handle}, which matches your session id; "
+                    f"an address the publisher chose, not derived from your work"))
         # A claim doubles as a subscription, and it has to, because derived
         # routing has one blind spot big enough to make the feature useless
         # without it: **two sessions sharing the primary checkout**. Session
@@ -431,7 +787,12 @@ class FleetBus:
                     f"that is your own declaration, not observed work"))
 
         if mesh is None:
-            return tuple(out)
+            # Deduplicated on this path too. Channel membership and an @mention
+            # routinely name the same session, and the delivery table collapses
+            # them on its primary key -- so without this, `publish` REPORTS
+            # reaching two sessions and stores one. Over-reporting reach is the
+            # one lie this module is built to prevent.
+            return self._strongest(out)
 
         # Declared OCCUPANTS of a worktree, from `worktree_cache.declare()`.
         #
@@ -489,12 +850,19 @@ class FleetBus:
             overlap = self._overlap(finding, touched, wanted, self.space)
             if overlap:
                 out.append(Delivery(finding, session, DERIVED, overlap))
-        # One session may hold several worktrees, and may also have claimed the
-        # area. Keep its STRONGEST reason once: observed work outranks anything
-        # self-reported, so a session that is demonstrably editing the files is
-        # told that, not "you claimed this".
+        return self._strongest(out)
+
+    @staticmethod
+    def _strongest(deliveries) -> tuple[Delivery, ...]:
+        """One delivery per session, keeping its best-evidenced reason.
+
+        A session may hold several worktrees, have claimed the area, have joined
+        the channel and be mentioned by name in the body. Observed work outranks
+        anything self-reported, so a session that is demonstrably editing the
+        files is told that, not "you joined a room".
+        """
         best: dict[str, Delivery] = {}
-        for delivery in out:
+        for delivery in deliveries:
             held = best.get(delivery.to_session)
             if held is None or (held.provenance == DECLARED
                                 and delivery.provenance == DERIVED):
@@ -552,7 +920,12 @@ class FleetBus:
             body=row["body"],
             subject_paths=tuple(json.loads(row["subject_paths"] or "[]")),
             to_session=row["to_session"], to_area=row["to_area"],
-            broadcast=bool(row["broadcast"]), severity=row["severity"])
+            broadcast=bool(row["broadcast"]), severity=row["severity"],
+            # `keys()` rather than a bare subscript: a row selected by a build
+            # mid-migration, or by a query written before schema 2, has no such
+            # column, and a pre-channel finding is a valid finding.
+            channel=(row["channel"] if "channel" in row.keys() else "") or "",
+            reply_to=(row["reply_to"] if "reply_to" in row.keys() else "") or "")
 
     def acknowledge(self, finding_id: str, session_id: str,
                     at: int | None = None) -> bool:
@@ -580,16 +953,31 @@ class FleetBus:
         not mean read, understood or agreed, and an unacknowledged delivery is
         not evidence that nobody looked.
         """
+        # Every delivery column is ALIASED. `finding` and `delivery` both have a
+        # `to_session`, so `SELECT f.*, d.to_session` yields two columns of that
+        # name and `sqlite3.Row` returns the first -- the finding's explicit
+        # ADDRESSEE, which is empty for every path-routed finding. This function
+        # therefore reported "" as the recipient of the deliveries the mesh had
+        # derived, which is most of them, and `mail.py sent` printed "read by"
+        # followed by nothing.
+        #
+        # It shipped that way because every test addressed its finding with
+        # `to_session=`, where the two columns agree and the bug is invisible.
+        # The one test that used path routing asserted an EMPTY result, so it
+        # never read the field. `test_deliveries_of_names_a_path_routed_recipient`
+        # is the falsifier that was missing.
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT f.*, d.to_session, d.provenance, d.reason,
-                          d.acknowledged_at
+                """SELECT f.*, d.to_session AS delivered_to,
+                          d.provenance AS delivered_by,
+                          d.reason AS delivered_because,
+                          d.acknowledged_at AS delivered_read_at
                    FROM delivery d JOIN finding f ON f.id = d.finding_id
                    WHERE d.finding_id = ?
                    ORDER BY d.at""", (finding_id,)).fetchall()
-        return tuple(Delivery(self._finding(r), r["to_session"],
-                              r["provenance"], r["reason"],
-                              r["acknowledged_at"]) for r in rows)
+        return tuple(Delivery(self._finding(r), r["delivered_to"],
+                              r["delivered_by"], r["delivered_because"],
+                              r["delivered_read_at"]) for r in rows)
 
     def findings(self, *, limit: int = 100) -> tuple[Finding, ...]:
         with self._connect() as conn:
@@ -611,6 +999,170 @@ class FleetBus:
                    LEFT JOIN delivery d ON d.finding_id = f.id
                    WHERE d.finding_id IS NULL
                    ORDER BY f.at DESC LIMIT ?""", (int(limit),)).fetchall()
+        return tuple(self._finding(r) for r in rows)
+
+    # ── channels ────────────────────────────────────────────────────────────
+    def ensure_channel(self, name: str, *, created_by: str = "",
+                       topic: str = "", at: int | None = None) -> Channel:
+        """Create a channel if it does not exist; return it either way.
+
+        Creation is implicit — posting to `#foo` makes `#foo` — because the
+        alternative is a session discovering it must run a second command before
+        it can speak, at the moment it has something to say. `INSERT OR IGNORE`
+        keeps the original creator and topic when two sessions race to first
+        post, so the record says who really opened the room.
+        """
+        name = normalise_channel(name)
+        if not name:
+            raise ValueError("a channel needs a name")
+        at = _now() if at is None else int(at)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO channel (name, at, created_by, topic)
+                   VALUES (?,?,?,?)""",
+                (name, at, created_by or UNATTRIBUTED, topic))
+            row = conn.execute(
+                "SELECT * FROM channel WHERE name = ?", (name,)).fetchone()
+        return Channel(name=row["name"], at=row["at"],
+                       created_by=row["created_by"], topic=row["topic"])
+
+    def set_topic(self, name: str, topic: str) -> bool:
+        with self._connect() as conn:
+            changed = conn.execute(
+                "UPDATE channel SET topic = ? WHERE name = ?",
+                (str(topic or ""), normalise_channel(name)))
+            return changed.rowcount > 0
+
+    def channels(self) -> tuple[Channel, ...]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM channel ORDER BY name").fetchall()
+        return tuple(Channel(name=r["name"], at=r["at"],
+                             created_by=r["created_by"], topic=r["topic"])
+                     for r in rows)
+
+    def join(self, name: str, session_id: str,
+             at: int | None = None) -> Membership:
+        """Subscribe a session to a channel. Never refuses — see `Channel`."""
+        name = normalise_channel(name)
+        self.ensure_channel(name, created_by=session_id, at=at)
+        record = Membership(channel=name, session_id=session_id,
+                            at=_now() if at is None else int(at))
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO membership
+                   (channel, session_id, at, left_at) VALUES (?,?,?,NULL)""",
+                (record.channel, record.session_id, record.at))
+        return record
+
+    def leave(self, name: str, session_id: str, at: int | None = None) -> bool:
+        with self._connect() as conn:
+            changed = conn.execute(
+                """UPDATE membership SET left_at = ?
+                   WHERE channel = ? AND session_id = ? AND left_at IS NULL""",
+                (_now() if at is None else int(at),
+                 normalise_channel(name), session_id))
+            return changed.rowcount > 0
+
+    def members(self, name: str) -> tuple[Membership, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM membership
+                   WHERE channel = ? AND left_at IS NULL ORDER BY at""",
+                (normalise_channel(name),)).fetchall()
+        return tuple(Membership(channel=r["channel"], session_id=r["session_id"],
+                                at=r["at"], left_at=r["left_at"]) for r in rows)
+
+    def memberships_of(self, session_id: str) -> tuple[Membership, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM membership
+                   WHERE session_id = ? AND left_at IS NULL ORDER BY channel""",
+                (session_id,)).fetchall()
+        return tuple(Membership(channel=r["channel"], session_id=r["session_id"],
+                                at=r["at"], left_at=r["left_at"]) for r in rows)
+
+    def history(self, name: str, *, limit: int = 50,
+                before: int | None = None) -> tuple[Finding, ...]:
+        """A channel's messages, oldest first within the page.
+
+        Reads the `finding` table directly rather than the reader's deliveries,
+        so a session that joins late sees what was said before it arrived. That
+        is the difference between a channel and an inbox, and it is why joining a
+        room is worth anything: the conversation predates you.
+        """
+        clause = " AND at < ?" if before is not None else ""
+        params: list = [normalise_channel(name)]
+        if before is not None:
+            params.append(int(before))
+        params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                # `rowid`, not `id`. Ids are content hashes, so two messages in
+                # the same second sort at random and a rapid exchange renders out
+                # of order -- which for a conversation inverts question and
+                # answer. The rowid is insertion order and needs no new column.
+                f"""SELECT * FROM finding WHERE channel = ?{clause}
+                    ORDER BY at DESC, rowid DESC LIMIT ?""", params).fetchall()
+        return tuple(reversed([self._finding(r) for r in rows]))
+
+    def channel_stats(self) -> dict[str, tuple[int, int]]:
+        """`{channel: (message count, newest at)}` in one pass.
+
+        A rail listing every room needs both numbers for each, and asking
+        `history()` per channel to get them reads every message in the database
+        to count them. One grouped query instead.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT channel, count(*) AS n, max(at) AS last
+                   FROM finding WHERE channel <> '' GROUP BY channel""").fetchall()
+        return {r["channel"]: (r["n"], r["last"]) for r in rows}
+
+    def thread(self, finding_id: str) -> tuple[Finding, ...]:
+        """A root message and its replies, oldest first.
+
+        One level deep on purpose. Slack made the same choice, and the reason
+        holds here: a reply to a reply is a tree, a tree needs indentation to
+        read, and a terminal inbox that indents arbitrarily deep becomes
+        unreadable at exactly the moment a conversation gets interesting. A reply
+        addressed at a reply is recorded against the same root.
+        """
+        with self._connect() as conn:
+            root = conn.execute(
+                "SELECT * FROM finding WHERE id = ?", (finding_id,)).fetchone()
+            if root is None:
+                return ()
+            if root["reply_to"]:
+                parent = conn.execute("SELECT * FROM finding WHERE id = ?",
+                                      (root["reply_to"],)).fetchone()
+                if parent is not None:
+                    root = parent
+            replies = conn.execute(
+                # `rowid` for the same reason `history` uses it: two replies in
+                # one second must read in the order they were sent.
+                "SELECT * FROM finding WHERE reply_to = ? ORDER BY at, rowid",
+                (root["id"],)).fetchall()
+        return tuple([self._finding(root)] + [self._finding(r) for r in replies])
+
+    def search(self, text: str, *, channel: str = "",
+               limit: int = 50) -> tuple[Finding, ...]:
+        """Substring search over message bodies, newest first.
+
+        `LIKE`, not FTS5. The corpus is one repository's fleet chatter, the
+        largest observed table was under 300 rows, and a full-text index would be
+        a second schema to migrate for a scan that costs nothing at this size.
+        Revisit if a channel ever holds enough to notice.
+        """
+        needle = f"%{str(text or '').strip()}%"
+        clause = " AND channel = ?" if channel else ""
+        params: list = [needle]
+        if channel:
+            params.append(normalise_channel(channel))
+        params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM finding WHERE body LIKE ?{clause}
+                    ORDER BY at DESC LIMIT ?""", params).fetchall()
         return tuple(self._finding(r) for r in rows)
 
     # ── territory ───────────────────────────────────────────────────────────

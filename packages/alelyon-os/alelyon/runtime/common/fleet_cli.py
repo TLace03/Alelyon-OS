@@ -228,6 +228,29 @@ def _cmd_status(args, mesh, bus, session, evidence, space) -> int:
               "derived.")
         print("  CLAIMED counts sessions that said so (self-reported).")
 
+    # Rows written before the bus was anchored on the repository rather than on
+    # a worktree. Reported here because their AUTHORS believed they had reached
+    # the fleet -- `publish` told them so -- and this is the only place that
+    # says otherwise.
+    try:
+        stranded = C.stranded_buses(mesh.repo_root)
+    except Exception:                                          # noqa: BLE001
+        stranded = ()
+    if stranded:
+        findings = sum(f for _p, f, _c in stranded)
+        claims = sum(c for _p, _f, c in stranded)
+        print()
+        print(f"STRANDED - {findings} finding(s) and {claims} claim(s) sit in "
+              f"{len(stranded)} per-worktree database(s)")
+        print("  that predate the repository-wide bus. Nobody but their author "
+              "ever read them.")
+        print("  Not merged: a closed finding folded back in would return as "
+              "live work.")
+        for path, found, held in stranded[:5]:
+            print(f"    {found:>3} finding(s) {held:>3} claim(s)  {path}")
+        if len(stranded) > 5:
+            print(f"    ... and {len(stranded) - 5} more")
+
     contested = bus.contested()
     if contested:
         print()
@@ -804,12 +827,80 @@ def _print_limits(limits) -> None:
         print(f"  - {line}")
 
 
+def _cmd_waiting(args, mesh, bus, session, evidence, space) -> int:
+    """Which sessions have stopped and are waiting for the owner.
+
+    The terminal reading of the Lattice `Waiting on You` view. It exists
+    because the person this answers for is usually in a terminal, and opening
+    a desktop window to find out which terminal to go back to is a poor trade.
+    """
+    from alelyon.runtime.common import session_attention as ATT
+    board = ATT.read_board(mesh.repo_root, max_sessions=args.max_sessions)
+
+    if not board.sessions:
+        print("No session transcripts could be read for this repository.")
+        for note in board.notes:
+            print(f"  {note}")
+        print("  This is a missing reading, not a quiet fleet.")
+        return 0
+
+    # The state is DERIVED and the blocker is DECLARED. They are printed on
+    # separate lines, and the blocker names its own provenance, because a reader
+    # who reads "BLOCKED" as an observation will trust a stale self-report.
+    stuck = ATT.blockers(bus)
+
+    queue = board.needs_owner
+    if not queue:
+        print(f"Nothing is waiting on you. {len(board.working)} session(s) "
+              f"working, {len(board.stalled)} with a call outstanding, "
+              f"{len(board.dormant)} dormant.")
+    else:
+        live = [e for e in queue
+                if e.session_id in stuck and not stuck[e.session_id].stale]
+        headline = f"{len(queue)} session(s) are waiting on you, longest first"
+        if live:
+            headline += (f" -- {len(live)} of them published a blocker they "
+                         f"have not spoken since")
+        print(headline + ":")
+        print()
+        for entry in queue:
+            mark = "ASKING " if entry.state == ATT.ASKING else "waiting"
+            print(f"  {mark}  {entry.short_id}  {entry.waited:>7}  "
+                  f"{entry.branch or '-'}")
+            if entry.summary:
+                print(f"           {entry.summary[:96]}")
+            block = stuck.get(entry.session_id)
+            if block is not None and not block.stale:
+                print(f"           BLOCKED (its own words, {int(block.age_minutes)}m "
+                      f"ago): {block.summary[:88]}")
+        print()
+
+    if board.stalled:
+        print(f"{len(board.stalled)} session(s) have a tool call outstanding. "
+              f"That is a slow command, a permission prompt waiting for a "
+              f"click, or a dead session -- this cannot tell which:")
+        for entry in board.stalled:
+            print(f"  {entry.short_id}  {entry.waited:>7}  "
+                  f"{entry.last_tool or '-'}")
+        print()
+
+    if args.verbose:
+        for entry in board.working:
+            print(f"  working  {entry.short_id}  {entry.waited:>7}  "
+                  f"{entry.last_tool}")
+        print()
+    for note in board.notes:
+        print(f"  NOTE: {note}")
+    _print_limits(board.limits)
+    return 0
+
+
 _COMMANDS = {
     "status": _cmd_status, "inbox": _cmd_inbox, "publish": _cmd_publish,
     "open-areas": _cmd_open_areas, "claim": _cmd_claim,
     "release": _cmd_release, "ack": _cmd_ack,
     "disciplines": _cmd_disciplines, "areas": _cmd_areas,
-    "supply": _cmd_supply, "resume": _cmd_resume,
+    "supply": _cmd_supply, "resume": _cmd_resume, "waiting": _cmd_waiting,
 }
 
 
@@ -895,6 +986,18 @@ def build_parser() -> argparse.ArgumentParser:
     supply.add_argument("--no-chain", action="store_true",
                         help="skip the harness transcripts; no fleet or agent "
                              "then appears on the graph")
+
+    waiting = sub.add_parser(
+        "waiting", help="which sessions have stopped and are waiting for you")
+    from alelyon.runtime.common.session_attention import (
+        DEFAULT_MAX_SESSIONS as ATT_MAX_SESSIONS,
+    )
+    waiting.add_argument("--max-sessions", type=int,
+                         default=ATT_MAX_SESSIONS,
+                         help="how many transcripts to read, newest first. "
+                              "Anything the cap hides is reported as hidden")
+    waiting.add_argument("--verbose", action="store_true",
+                         help="also list the sessions that are working")
 
     resume = sub.add_parser(
         "resume", help="what is dormant, and what waking it would involve")

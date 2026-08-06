@@ -54,12 +54,15 @@ not its rank: a new worktree never repaints the ones already on screen.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import functools
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import time
 
+from alelyon.runtime.common import toolpath
 from alelyon.runtime.common.worktree import (
     UNATTRIBUTED, WorktreeMesh, observe, session_for_path,
 )
@@ -493,9 +496,101 @@ class WorktreeCache:
         return int(held), len(COLOUR_SLOTS)
 
 
+@functools.lru_cache(maxsize=8)
+def _repository_globals(anchor: str) -> Path | None:
+    """`<primary checkout>/globals` for the repository `anchor` sits in, or None.
+
+    `git rev-parse --git-common-dir` is the whole point: every linked worktree
+    answers with the SAME `.git`, which is exactly the scope this database is
+    supposed to have. `--git-dir` would answer per-worktree and reintroduce the
+    split.
+
+    Cached because `default_database()` is called per operation and this is a
+    subprocess. None means "not a checkout" -- an installed wheel -- and the
+    caller falls back.
+    """
+    try:
+        found = subprocess.run(
+            toolpath.argv("git", "-C", anchor, "rev-parse",
+                          "--path-format=absolute", "--git-common-dir"),
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if found.returncode != 0 or not found.stdout.strip():
+        return None
+    # `--path-format=absolute` because the bare form answers '.git' from the
+    # repository root and an absolute path from a linked worktree, which is a
+    # difference this caller would otherwise have to undo by hand. Same idiom as
+    # `pr_relay.default_database`.
+    root = Path(found.stdout.strip()).resolve().parent
+    return root / "globals" if root.is_dir() else None
+
+
 def default_database() -> Path:
+    """The fleet bus, anchored on the REPOSITORY rather than on this worktree.
+
+    `GLOBALS_DIR` is "the directory holding `pyproject.toml`", which is right
+    for state a checkout owns -- and wrong for this file, because a linked
+    worktree passes that test too. It is a real checkout with its own
+    `pyproject.toml`, so every session working in one got a PRIVATE bus.
+
+    That silently defeats the thing this database is for. Findings, claims and
+    deliveries are cross-session by definition, and working in a worktree is the
+    documented pattern, so the recommended workflow was the one that guaranteed
+    nobody could hear you. Measured 2026-08-05: 12 worktree-local databases held
+    70 findings and 22 claims invisible to the shared bus, while `publish`
+    reported "reached N session(s)" to each of their authors.
+
+    The repository is the correct scope and git already knows it: every linked
+    worktree reports the same `--git-common-dir`. An installed wheel has no git
+    and no checkout, so it keeps the per-user `GLOBALS_DIR` answer -- that case
+    was never the broken one.
+
+    **This is not a new decision.** `pr_relay.default_database` already anchors
+    on `--git-common-dir` for exactly this reason and says so: "Deliberately not
+    `GLOBALS_DIR`, which resolves to `<repo>/globals` and therefore gives each
+    worktree its own file." The rule was written down; the bus never got it,
+    because it inherited this module's location and this module's OTHER schemas
+    -- colour slots, occupancy declarations -- genuinely are per-checkout.
+
+    This does NOT migrate the stranded rows. A finding is a claim about a moment
+    and some of those are long closed; folding twelve private histories into the
+    shared one would resurrect them as live work. `stranded_buses()` reports
+    them so the choice is somebody's rather than this function's.
+    """
     from alelyon.runtime.common.paths import GLOBALS_DIR
+    shared = _repository_globals(str(GLOBALS_DIR))
+    if shared is not None:
+        return shared / "worktree_cache.db"
     return Path(GLOBALS_DIR) / "worktree_cache.db"
+
+
+def stranded_buses(repo_root: str | Path = ".") -> tuple:
+    """Per-worktree databases holding rows the shared bus cannot see.
+
+    Reported rather than merged, and never emptied: this says what was lost, so
+    that a session which spent an afternoon talking to itself can find out.
+    """
+    shared = default_database().resolve()
+    out = []
+    for tree in observe(repo_root).worktrees:
+        candidate = (Path(tree.path) / "globals" / "worktree_cache.db").resolve()
+        if candidate == shared or not candidate.exists():
+            continue
+        try:
+            with sqlite3.connect(f"file:{candidate}?mode=ro", uri=True) as conn:
+                tables = {r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "finding" not in tables:
+                    continue
+                findings = conn.execute("SELECT COUNT(*) FROM finding").fetchone()[0]
+                claims = (conn.execute("SELECT COUNT(*) FROM claim").fetchone()[0]
+                          if "claim" in tables else 0)
+        except sqlite3.Error:
+            continue
+        if findings or claims:
+            out.append((str(candidate), int(findings), int(claims)))
+    return tuple(sorted(out))
 
 
 def record_now(repo_root: str | Path = ".", *, database: str | Path | None = None,
@@ -511,5 +606,5 @@ __all__ = [
     "COLOUR_SLOTS", "FOREIGN_OCCUPANT", "LOW_CONTRAST_LIGHT", "SCHEMA_VERSION",
     "SHARED_OCCUPANCY", "UNATTRIBUTED", "UNSLOTTED", "Declaration", "Occupancy",
     "Operation", "WorktreeCache", "WorktreeIdentity",
-    "default_database", "record_now",
+    "default_database", "record_now", "stranded_buses",
 ]

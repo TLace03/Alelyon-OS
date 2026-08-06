@@ -394,6 +394,33 @@ Paper I.
 > `tests/regression/test_paper_reproduction_claims.py` now fails if a paper names
 > a script the repository does not carry.
 
+> **Second correction, 2026-08-05 (EXP-3) — "gone" was wrong, and three of the ten
+> are now tracked.** The correction above says the ten scripts "were run inline,
+> outside version control, and are gone." The first half was true; the last word
+> was not. They were still in the originating session's scratchpad under
+> `%LOCALAPPDATA%\Temp\claude`, which is unswept rather than safe, and EXP-3 found
+> them there while auditing the frontier programme's record. Recovering them
+> raised no attribution problem at all — nothing was reconstructed, the 2026-07-19
+> files were copied verbatim — so the reasoning above for recording rather than
+> repairing applied to a reconstruction nobody needed to do.
+>
+> Committed at `research/experiments/expllm/` (in the private source repo):
+> the two `exp_kv` scripts, the instrumented `qwen2_forward.py`, and the EXP-LLM
+> Part A/B/C scripts and figure generators, with all nine raw result JSONs. Of the
+> ten this appendix enumerates, **three are now tracked**; the four exp1 scripts,
+> the two exp2 scripts and the tecert gate benchmark are not, and remain described
+> rather than named. EXP-LLM Part C is still not re-runnable from a clean clone —
+> it needs a 988 MB fp16 checkpoint that is deliberately not in git, recorded
+> instead as a hashed `world-state` claim in `tools/claim_capsule.json`.
+>
+> **How this was caught is the point.** The sentence above became false the moment
+> the files were committed, and no reader, linter or reviewer noticed — the test
+> did, because it resolves against the *tracked file set* rather than against
+> prose. A gate aimed at what produces the fact fires when the fact changes; one
+> aimed at the narration cannot. That is the finding EXP-3 was running down when
+> it walked into this appendix
+> (docs/AI_INFRA_FRONTIER.md (in the private source repo), Part V).
+
 **Environment.** Python 3.12; the canonical interpreter for this repository is
 `.venv312/Scripts/python.exe`. Experiments used NumPy for the decompositions and a
 hand-written forward pass for the perplexity measurement of EXP-LLM Part C, so

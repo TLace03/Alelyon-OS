@@ -701,32 +701,55 @@ class FleetLedger:
         Every refusal names the condition and the number that failed it, so a
         caller can act on the answer rather than guess at it. The decision is
         `assess()`'s; what this adds is the append that makes it durable.
+
+        **Read and write are one transaction.** This is a ratchet: it reads the
+        incumbent, decides against it, and appends. Between those two steps
+        another session's `propose` could commit, and then both would read the
+        same incumbent, both find their margin against it, and both append LIVE
+        — two live standings at one coordinate, or an incumbent demoted after it
+        had already been replaced. The margin gate would have been evaluated
+        against a standing that no longer existed.
+
+        `BEGIN IMMEDIATE` takes the writer lock before the read, so proposers
+        serialise and the second one assesses against what the first actually
+        wrote. `pr_relay.register` does the same thing for the same reason, and
+        this module was the one that did not; `alelyon/runtime/atlas/data/
+        history.py` and `runtime/common/db.py` carry the pattern too.
+
+        Readers are unaffected — a RESERVED lock does not exclude them — so
+        `report`, `standing` and the panels keep working while a proposal is in
+        flight.
         """
         moment = int(now if now is not None else time.time())
-        verdict = self._assess(layer, work_kind, model)
-        if not verdict.accepted:
-            return verdict
+        with self._connect() as guard:
+            guard.execute("BEGIN IMMEDIATE")
+            verdict = self._assess(layer, work_kind, model)
+            if not verdict.accepted:
+                return verdict
 
-        card, incumbent = verdict.challenger, verdict.incumbent
-        assert card is not None      # an accepted verdict always carries one
-        if incumbent is not None and incumbent.model == model:
-            # Re-affirming an incumbent is not a promotion. It is recorded so
-            # the standing carries a current score rather than a stale one, and
-            # it can still be DEMOTED later.
+            card, incumbent = verdict.challenger, verdict.incumbent
+            assert card is not None   # an accepted verdict always carries one
+            if incumbent is not None and incumbent.model == model:
+                # Re-affirming an incumbent is not a promotion. It is recorded
+                # so the standing carries a current score rather than a stale
+                # one, and it can still be DEMOTED later.
+                self._append(layer, work_kind, model, LIVE, card.mean_score,
+                             card.runs, moment,
+                             "incumbent re-affirmed on later runs", conn=guard)
+                return verdict
+            if incumbent is not None:
+                self._append(layer, work_kind, incumbent.model, DEMOTED,
+                             incumbent.score, incumbent.runs, moment,
+                             f"beaten by {model} at {card.mean_score:.3f}",
+                             conn=guard)
             self._append(layer, work_kind, model, LIVE, card.mean_score,
-                         card.runs, moment, "incumbent re-affirmed on later runs")
+                         card.runs, moment,
+                         (f"beat {incumbent.model} by "
+                          f"{card.mean_score - incumbent.score:.3f}"
+                          if incumbent
+                          else f"first standing at this coordinate over "
+                               f"{card.runs} run(s)"), conn=guard)
             return verdict
-        if incumbent is not None:
-            self._append(layer, work_kind, incumbent.model, DEMOTED,
-                         incumbent.score, incumbent.runs, moment,
-                         f"beaten by {model} at {card.mean_score:.3f}")
-        self._append(layer, work_kind, model, LIVE, card.mean_score, card.runs,
-                     moment,
-                     (f"beat {incumbent.model} by "
-                      f"{card.mean_score - incumbent.score:.3f}" if incumbent
-                      else f"first standing at this coordinate over "
-                           f"{card.runs} run(s)"))
-        return verdict
 
     def _assess(self, layer: str, work_kind: str, model: str) -> Verdict:
         target = H.layer(layer)
@@ -911,15 +934,26 @@ class FleetLedger:
         return best
 
     def _append(self, layer: str, work_kind: str, model: str, state: str,
-                score: float, runs: int, at: int, reason: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO standings
-                   (layer, work_kind, model, state, score, runs, set_at,
-                    reason, space)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (layer, work_kind, model, state, float(score), int(runs),
-                 int(at), reason, H.LAYER_SPACE_VERSION))
+                score: float, runs: int, at: int, reason: str,
+                conn: sqlite3.Connection | None = None) -> None:
+        """Write one standing row, on `conn` when a caller is holding one.
+
+        `propose` holds the writer lock across its whole decision and passes
+        that connection in. Opening a second connection here would block on the
+        lock the caller already holds — the same process deadlocking against
+        itself — so the parameter is not a convenience.
+        """
+        statement = """INSERT INTO standings
+                       (layer, work_kind, model, state, score, runs, set_at,
+                        reason, space)
+                       VALUES (?,?,?,?,?,?,?,?,?)"""
+        row = (layer, work_kind, model, state, float(score), int(runs),
+               int(at), reason, H.LAYER_SPACE_VERSION)
+        if conn is not None:
+            conn.execute(statement, row)
+            return
+        with self._connect() as owned:
+            owned.execute(statement, row)
 
     # ── reporting ────────────────────────────────────────────────────────────
     def report(self) -> str:

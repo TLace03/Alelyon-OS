@@ -109,6 +109,12 @@ alelyon-verify = "alelyon.verify.cli:main"
 # package: a CLI under `tools/` in the source repo cannot travel with the wheel, and
 # what shipped before was a library with no way to run it.
 alelyon-fleet = "alelyon.runtime.common.fleet_cli:main"
+# Channels, threads and mentions over the same store and the same router.
+# Separate from `alelyon-fleet` because the two answer different questions -- one
+# is "who is where and what did they find", the other is "what are we saying" --
+# and folding chat subcommands into the operational tool would put `post` beside
+# `claim`, where a routine message reads as an operational act.
+alelyon-chat = "alelyon.runtime.common.chat_cli:main"
 # The ledger's own front door. Separate from `alelyon-fleet` because it writes a
 # DIFFERENT store: overloading that command's `--database`, which means the bus,
 # would make one flag point at two files depending on the subcommand.

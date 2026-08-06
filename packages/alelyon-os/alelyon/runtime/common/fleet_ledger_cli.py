@@ -52,6 +52,7 @@ SQLite file, and `status` will not even create that.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -70,7 +71,10 @@ DEFAULT_MAX_SESSIONS = 400
 LIMITS: tuple[str, ...] = (
     "Nothing here runs unattended. Every command is a deliberate act, because a "
     "durable write made on a timer is a write nobody decided to make - and once "
-    "the answer is stored, re-reading the branch graph is a durable write.",
+    "the answer is stored, re-reading the branch graph is a durable write. The "
+    "Model Careers view can drive `record` through `record_runs`, which is the "
+    "same rule and not an exception to it: a person clicked it, with the count "
+    "it appended shown back to them afterwards. Nothing records on being drawn.",
     # This limit said `record` marks no run CONTESTED. That stopped being true
     # when the timed pairs shipped (2026-08-05, FLEET-HIERARCHY.md section 6),
     # and a limit that understates what a command does is as misleading as one
@@ -191,40 +195,110 @@ def contested_paths(database: str = "", *, repo: str = ".") -> tuple:
                  for subject in finding.subject_paths)
 
 
+@dataclass(frozen=True)
+class RecordOutcome:
+    """What one `record` pass read, and what it appended.
+
+    Returned rather than printed, because the terminal is not the only place
+    this pass has to be driven from. The Model Careers view reads the ledger and
+    had no way to fill it: its empty state named `alelyon-ledger record`, a
+    command that is not in the window, so in any checkout where nobody had typed
+    it the view was empty forever and said so as though it were a fact about
+    models. A window can now run the same pass — and to stay the *same* pass
+    rather than a second copy of it that drifts, the deriving lives here and the
+    printing lives in `_cmd_record`.
+
+    `written` is separate from `added` on purpose: a dry run and a pass that
+    recorded nothing new both report `added == 0`, and only one of them created
+    a file.
+    """
+
+    database: str
+    sessions: int
+    records_root: str
+    derived: int
+    contested: int
+    added: int
+    written: bool
+    used_bus: bool
+    contested_files: int = 0
+    by_coordinate: tuple[tuple[str, str, int], ...] = ()
+    notes: tuple[str, ...] = ()
+
+    @property
+    def already_there(self) -> int:
+        """Runs offered again that were already recorded. Never a failure."""
+        return max(0, self.derived - self.added) if self.written else 0
+
+
+def record_runs(*, database=None, cwd: str = "", records_root: str = "",
+                max_sessions: int = DEFAULT_MAX_SESSIONS, bus: str = "",
+                use_bus: bool = True, repo: str = ".",
+                dry_run: bool = False) -> RecordOutcome:
+    """Derive every settled agent run from the transcripts and append it.
+
+    The whole of `record`, with no printing in it. `dry_run` stops before the
+    ledger is opened rather than after — `FleetLedger(...)` creates its file, so
+    a preview that opened one to decide not to write has already written.
+    """
+    activity = SA.read_activity(cwd=cwd or None,
+                                records_root=records_root or None,
+                                max_sessions=max_sessions)
+    contested = contested_paths(bus, repo=repo) if use_bus else ()
+    runs = L.runs_from_activity(activity, contested_paths=contested)
+    shape = dict(
+        sessions=len(activity.sessions),
+        records_root=str(activity.records_root),
+        derived=len(runs),
+        contested=sum(1 for run in runs if run.contested),
+        used_bus=bool(use_bus),
+        contested_files=len({path for path, _at in contested}),
+        by_coordinate=tuple(sorted(
+            (layer_key, kind, count)
+            for (layer_key, kind), count in _by_coordinate(runs).items())),
+        notes=tuple(activity.notes),
+    )
+    if dry_run:
+        path = Path(database) if database else L.default_database()
+        return RecordOutcome(database=str(path), added=0, written=False, **shape)
+
+    ledger = L.FleetLedger(database or None)
+    added = ledger.record_all(runs)
+    return RecordOutcome(database=str(ledger.database), added=added,
+                         written=True, **shape)
+
+
 def _cmd_record(args) -> int:
     """Copy every settled agent run the harness recorded into the ledger."""
-    activity = SA.read_activity(cwd=args.cwd or None,
-                                records_root=args.records_root or None,
-                                max_sessions=args.max_sessions)
-    contested = () if args.no_bus else contested_paths(args.bus, repo=args.repo)
-    runs = L.runs_from_activity(activity, contested_paths=contested)
+    outcome = record_runs(
+        database=args.database or None, cwd=args.cwd,
+        records_root=args.records_root, max_sessions=args.max_sessions,
+        bus=args.bus, use_bus=not args.no_bus, repo=args.repo,
+        dry_run=args.dry_run)
 
-    print(f"{len(activity.sessions)} session(s) read from "
-          f"{activity.records_root}")
-    for note in activity.notes:
+    print(f"{outcome.sessions} session(s) read from {outcome.records_root}")
+    for note in outcome.notes:
         print(f"  note: {note}")
-    if args.no_bus:
+    if not outcome.used_bus:
         print("  --no-bus: no run is marked contested, whatever the fleet found")
-    elif contested:
-        print(f"  {len(set(p for p, _ in contested))} path(s) carry a defect or "
+    elif outcome.contested_files:
+        print(f"  {outcome.contested_files} path(s) carry a defect or "
               f"interface finding, ordered against each run's settle time")
     else:
         print("  no defect or interface finding was read from the bus")
-    print(f"{len(runs)} settled agent run(s) derived, "
-          f"{sum(1 for r in runs if r.contested)} contested")
-    for (layer_key, kind), count in sorted(_by_coordinate(runs).items()):
+    print(f"{outcome.derived} settled agent run(s) derived, "
+          f"{outcome.contested} contested")
+    for layer_key, kind, count in outcome.by_coordinate:
         print(f"    {layer_key:<11} {kind:<18} {count:>5}")
 
-    if args.dry_run:
+    if not outcome.written:
         print("\n--dry-run: nothing was written, and no ledger was created.")
         _limits()
         return 0
 
-    ledger = L.FleetLedger(_database(args))
-    added = ledger.record_all(runs)
-    print(f"\n{added} new run(s) recorded in {ledger.database}")
-    print(f"{len(runs) - added} were already there — `record` is idempotent on "
-          f"the run id, because the same finished agent is offered again on "
+    print(f"\n{outcome.added} new run(s) recorded in {outcome.database}")
+    print(f"{outcome.already_there} were already there — `record` is idempotent "
+          f"on the run id, because the same finished agent is offered again on "
           f"every pass.")
     _limits()
     return 0
