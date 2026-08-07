@@ -162,6 +162,54 @@ jobs:
             exit 1
           fi
 
+      # PyPI filenames are immutable: once alelyon_os-<v>.tar.gz has been uploaded,
+      # no run can ever upload that version again, and without this step the refusal
+      # arrives as `400 File already exists` AFTER the build, the attestations, and
+      # the environment approval. Measured 2026-08-06: a duplicate push of
+      # alelyon-os-v0.2.0 spent 5h34m (mostly waiting for a human to approve the
+      # `pypi` environment) reaching an upload that could never have succeeded.
+      # Asking the index first costs one credential-free JSON request and turns that
+      # into a 30-second refusal that names the fix.
+      #
+      # Fail-closed only on a definitive "these files exist" answer. A 404 is the
+      # first-release case, and an unreachable index must not veto a legitimate
+      # release here - the upload step settles that authoritatively either way.
+      - name: Refuse a version PyPI already serves
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - "$VERSION" <<'EOF'
+          import json, sys, urllib.error, urllib.request
+          version = sys.argv[1]
+          url = f"https://pypi.org/pypi/alelyon-os/{version}/json"
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  files = json.load(response).get("urls", [])
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  print(f"alelyon-os {version} is not on PyPI; proceeding")
+                  sys.exit(0)
+              print(f"::warning::PyPI answered {exc.code} for {url}; "
+                    "letting the upload step decide")
+              sys.exit(0)
+          except OSError as exc:
+              print(f"::warning::could not reach PyPI ({exc}); "
+                    "letting the upload step decide")
+              sys.exit(0)
+          if files:
+              names = ", ".join(sorted(f["filename"] for f in files))
+              print(f"::error::alelyon-os {version} is already on PyPI ({names}), "
+                    "and PyPI filenames are immutable, so this run can never "
+                    "publish. Bump version in packaging/alelyon-os/pyproject.toml "
+                    "in the private monorepo, re-export the mirror, and push a new "
+                    "annotated alelyon-os-v<version> tag.")
+              sys.exit(1)
+          print(f"alelyon-os {version} exists on PyPI with no files; proceeding")
+          EOF
+
   build:
     name: build and check alelyon-os
     needs: resolve
