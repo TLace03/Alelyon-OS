@@ -137,7 +137,7 @@
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-input-data.json": "4d02ffe7fa0ac18a8e4cd5962b25130d4fec4663e68790166fffc1cb88bdd86b",
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-pinned-key.json": "d56c71a1c3b4464387c9316c570233f1be32f83b5262fc1020abbc2b91aa053a",
     "packages/alelyon-os/alelyon/verify/vectors/partial-substrate-mismatch.json": "2eb08b820c4eadd4534f4390f030e08128b016fd28502d94dfa43eeead41d98b",
-    "packages/alelyon-os/pyproject.toml": "0d748e3bf2e287693379828afede056012fd5a2f9171226fba0379a605cc4715",
+    "packages/alelyon-os/pyproject.toml": "fcc8e603921cb58873fb0df07e6f12f2529453131e9757dda4731092262f9762",
     "packages/alelyon-os/tests/test_conformance.py": "9b197ce3aabd526d89086fd82bd7f1bb9f9480d23136a66a2dc8b435356435a1",
     "packages/alelyon-os/tests/test_hardening.py": "5d0c14ba7d6827f8a981d775e736b8d361108bff0969cba92794c696dc79ad5d",
     "papers/00-research-log.md": "c80d6c9c27460b4f9b095fb0106913cbde14bb3f9dc7c9b5c973db080025ee33",
@@ -160,6 +160,6 @@
     "spec/cne-v0.md": "c170d046a7388dadf0e0f5ce341abb9150561efb4da68a4975de4737e35e407d"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "349c4772cff802fd3ded3d04c446843eb30b5dd0",
+  "source_commit": "94eab32d55db6cc370242bcdee36bca5807e9c2b",
   "source_repository": "TLace03/famMain"
 }
