@@ -513,7 +513,8 @@ def _repository_globals(anchor: str) -> Path | None:
         found = subprocess.run(
             toolpath.argv("git", "-C", anchor, "rev-parse",
                           "--path-format=absolute", "--git-common-dir"),
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30,
+            **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     if found.returncode != 0 or not found.stdout.strip():

@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from alelyon.runtime.common import actor as ACT
 from alelyon.runtime.common import cli_flags as CLI
 from alelyon.runtime.common import fleet_chat as CHAT
 from alelyon.runtime.common import worktree as W
@@ -161,13 +162,23 @@ def _short(session: str, width: int = 12) -> str:
 
 def _limits(bus) -> None:
     print("\nWHAT THIS CANNOT TELL YOU")
+    print("  - A '~' after a speaker means NOTHING corroborated that id: they "
+          "typed it and no record they did not author agrees. A session may "
+          "post under any name, including another live session's.")
     for limit in bus.limits:
         print(f"  - {limit}")
 
 
 def _message_line(finding, now: int, *, indent: str = "") -> None:
     marker = "" if finding.kind == B.KIND_MESSAGE else f"[{finding.kind}] "
-    print(f"{indent}{_short(finding.from_session):>12}  {marker}{finding.body}")
+    # A trailing `~` where nothing corroborated the speaker's id. A room listing
+    # has no width for the evidence sentence `inbox` prints, and a bare handle
+    # reads as established -- which is how a session was credited for findings
+    # somebody else published under its name.
+    speaker = _short(finding.from_session, 11)
+    if ACT.is_uncorroborated(finding.from_evidence):
+        speaker += "~"
+    print(f"{indent}{speaker:>12}  {marker}{finding.body}")
     trail = f"{indent}              {finding.id}  {_ago(finding.at, now)}"
     if finding.subject_paths:
         shown = ", ".join(finding.subject_paths[:2])

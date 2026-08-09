@@ -93,7 +93,7 @@ def _git(*args: str, repo) -> tuple[int, str]:
     try:
         proc = subprocess.run(toolpath.argv("git", "-C", str(repo), *args),
                               capture_output=True, text=True,
-                              timeout=_GIT_TIMEOUT)
+                              timeout=_GIT_TIMEOUT, **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
         return 1, ""
     return proc.returncode, proc.stdout.strip()
@@ -363,7 +363,7 @@ def _git_common_dir(path: Path) -> str | None:
         proc = subprocess.run(
             toolpath.argv("git", "-C", str(path), "rev-parse",
                           "--path-format=absolute", "--git-common-dir"),
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT, **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:

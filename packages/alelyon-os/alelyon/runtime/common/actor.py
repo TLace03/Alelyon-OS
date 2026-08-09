@@ -34,11 +34,13 @@ failure is already reproducible in a single-owner repository.
 
 What this module does and does not do
 -------------------------------------
-It **adds a vocabulary and changes no behaviour**. Nothing here is wired into
-`worktree`, `worktree_bus`, `fleet_chat` or `fleet_cli`; those keep deriving
-exactly as they do, and `test_the_seam_agrees_with_todays_derivation` asserts
-that this module's answer matches `fleet_cli`'s for the same input, so adopting
-it cannot change what any existing surface reports.
+It **adds a vocabulary without changing fleet behaviour**. Nothing here is
+wired into `worktree`, `worktree_bus`, `fleet_chat` or fleet authorship; those
+keep deriving exactly as they do, and
+`test_the_seam_agrees_with_todays_derivation` asserts that this module's answer
+matches `fleet_cli`'s for the same input.  The local Teams contact repository is
+the first write consumer: it explicitly requires an authenticated human, while
+leaving every existing fleet surface unchanged.
 
 What it adds is that a future write path can say `require(actor,
 Assurance.CORROBORATED)` instead of hoping its caller passed something real.
@@ -273,6 +275,37 @@ class DeclaredOnCommandLine:
                      evidence=self.evidence or default)
 
 
+#: Evidence strings meaning NOTHING corroborated the name -- the writer typed it
+#: and no record the writer did not author agrees. Both forms in the tree are
+#: listed: `fleet_cli` and `relay` write the long one, `fleet_chat` defaults to
+#: the short one.
+UNCORROBORATED_EVIDENCE = frozenset({
+    "self-reported on the command line",
+    "self-reported",
+})
+
+
+def is_uncorroborated(evidence: str) -> bool:
+    """Whether `evidence` says a session id rests on nothing but the claim.
+
+    Driven off a set of KNOWN self-report strings rather than off "anything that
+    is not the corroborated phrase", so an evidence form this function has not
+    seen defaults to UNMARKED. The asymmetry is deliberate: failing to mark a
+    declaration understates it, while marking a derived or corroborated author
+    impugns somebody the records do vouch for, and that is the worse error.
+
+    Why this exists. A session may publish under any name it likes -- rejecting
+    the name loses findings rather than improving them, which
+    `DeclaredOnCommandLine` states as settled design. The cost lands on READERS:
+    on 2026-08-08 findings were published under another live session's id, that
+    session was credited in a merged commit message for work it had not done,
+    and it had to correct the record by hand. Only `fleet inbox` printed the
+    evidence; the mail and chat listings showed a bare id, which reads as
+    established.
+    """
+    return (evidence or "").strip() in UNCORROBORATED_EVIDENCE
+
+
 @dataclass(frozen=True)
 class AuthenticatedAccount:
     """A signed-in human. The only resolver that survives a shared machine.
@@ -313,9 +346,9 @@ LIMITS: tuple[str, ...] = (
     "There is exactly one organization today and it is implicit. Keying on "
     "`(organization, actor)` makes a future tenant expressible; it does not "
     "isolate anything now, and no store enforces it yet.",
-    "One consumer exists -- `alelyon-fleet whoami`, which REPORTS an "
-    "attribution and gates nothing. The bus, the chat and every other command "
-    "still identify exactly as they did: they carry on publishing under a "
-    "DECLARED session, and nothing here has started refusing anything. A grade "
-    "that is shown is not a grade that is enforced.",
+    "Two bounded consumers exist. `alelyon-fleet whoami` only REPORTS an "
+    "attribution; the local Teams ContactStore requires an AUTHENTICATED human "
+    "before a contact write. The bus, chat and every fleet authoring command "
+    "still identify exactly as they did and may publish under a DECLARED "
+    "session. Enforcement in one consumer does not promote the others.",
 )

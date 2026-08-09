@@ -399,6 +399,38 @@ def argv(tool: str, *args: str) -> List[str]:
     return [find(tool).path or tool, *args]
 
 
+#: Windows: do not give the child a console of its own.
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def no_window() -> dict:
+    """Keyword arguments that stop a child process flashing a console window.
+
+    Splat into every `subprocess` call that runs a CONSOLE tool — `git`, `npm`,
+    `python` — from code that can run inside the desktop application::
+
+        subprocess.run(toolpath.argv("git", "status"), **toolpath.no_window())
+
+    Why this is not cosmetic. The packaged application is built with
+    PyInstaller's windowed bootloader (`runw.exe`), so the process owns NO
+    console. On Windows a console child of a console-less parent does not
+    inherit one — it ALLOCATES ITS OWN, which appears as a terminal window.
+    The Fleet views poll on timers and shell out to `git` once per worktree per
+    tick, so the installed application showed terminal windows opening and
+    closing continuously, forever, with nothing visibly running in Task Manager
+    because each child lived only milliseconds.
+
+    It is empty on POSIX, where the flag does not exist and no window is
+    created either way, so call sites need no platform branch of their own.
+    `engine_lifecycle` and `supervisor` keep their own explicit flags: they also
+    want DETACHED_PROCESS and a new process group, which is a different
+    intention from "do not flash a window".
+    """
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
+
+
 def clear_cache() -> None:
     """Forget resolved locations. For tests, and for after an install."""
     _CACHE.clear()

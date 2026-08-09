@@ -82,7 +82,7 @@ INDEX_LIMITS: tuple[str, ...] = (
 def _git(*args: str, repo: str) -> tuple[int, str]:
     """A query. Nothing in this module writes to the repository."""
     proc = subprocess.run(toolpath.argv("git", "-C", repo, *args), capture_output=True,
-                          text=True, timeout=_GIT_TIMEOUT)
+                          text=True, timeout=_GIT_TIMEOUT, **toolpath.no_window())
     return proc.returncode, proc.stdout.strip()
 
 

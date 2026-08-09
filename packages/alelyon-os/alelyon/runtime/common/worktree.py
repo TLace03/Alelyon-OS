@@ -179,6 +179,7 @@ def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            **toolpath.no_window(),
         )
     except (OSError, subprocess.SubprocessError):
         return 1, ""

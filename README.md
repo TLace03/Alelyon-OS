@@ -1,10 +1,51 @@
-# Alelyon-OS
+<div align="center">
 
-The open part of the Alelyon Deterministic Quantitative Computational Operating System.
+<img src="assets/banner.svg" alt="Alelyon — numbers that carry their own evidence" width="820">
+
+<p>
+  <a href="https://pypi.org/project/alelyon-os/"><img alt="PyPI" src="https://img.shields.io/pypi/v/alelyon-os?style=flat-square&label=pypi&color=e6c46a&labelColor=0f0f0f"></a>
+  <a href="https://pypi.org/project/alelyon-os/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/alelyon-os?style=flat-square&color=57c7b0&labelColor=0f0f0f"></a>
+  <a href="#license"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-57c7b0?style=flat-square&labelColor=0f0f0f"></a>
+  <a href="spec/cne-v0.md"><img alt="Spec" src="https://img.shields.io/badge/spec-cne--v0-e6c46a?style=flat-square&labelColor=0f0f0f"></a>
+  <a href="skills/alelyon/"><img alt="Agent Skill" src="https://img.shields.io/badge/agent%20skill-%2Falelyon-e6c46a?style=flat-square&labelColor=0f0f0f"></a>
+</p>
+
+<b>The open part of the Alelyon Deterministic Quantitative Computational Operating System.</b>
+
+A number you are handed is a claim. This gives it a receipt that a stranger can check by
+replaying it against their own copy of the inputs — and that fails, loudly and
+specifically, the moment the inputs are revised after the fact.
 
 ```bash
 pip install alelyon-os
 ```
+
+<img src="https://raw.githubusercontent.com/TLace03/Alelyon-OS/main/assets/demo-verify.svg" alt="A terminal recording: alelyon-verify accepts a receipt whose data matches, then rejects the same receipt after one cent is changed." width="900">
+
+</div>
+
+> Every line in that recording is copied from an actual run — the reason classes, the
+> `width_trust` values and both exit codes. See [Verify a receipt](#verify-a-receipt).
+
+## The `/alelyon` agent skill
+
+Coding agents are confident about numbers they never measured. This repository ships an
+[Agent Skill](https://agentskills.io/) that teaches one the discipline — observed versus
+declared, say **UNMEASURED** out loud, never weaken an acceptance criterion — alongside
+the toolkit that makes a number checkable.
+
+```bash
+git clone https://github.com/TLace03/Alelyon-OS
+mkdir -p .agents/skills && cp -r Alelyon-OS/skills/alelyon .agents/skills/
+```
+
+`.agents/skills/` is the shared convention, so one copy works across
+**Claude Code, Codex, Cursor, Antigravity, Gemini CLI, GitHub Copilot, VS Code, Amp,
+Goose, OpenCode, Kiro** and others. Invoke it with `/alelyon` (`$alelyon` in Codex), or
+let the agent load it on its own when a task matches.
+
+The skill is [`skills/alelyon/`](skills/alelyon/) — a `SKILL.md` plus five reference
+files loaded only when the task needs them.
 
 ## What is here
 

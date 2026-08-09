@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="232" viewBox="0 0 820 232" role="img" aria-label="Alelyon - numbers that carry their own evidence">
+  <title>Alelyon</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#000000"/>
+      <stop offset="1" stop-color="#0f0f0f"/>
+    </linearGradient>
+  </defs>
+  <rect width="820" height="232" rx="14" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="819" height="231" rx="14"
+        fill="none" stroke="#e6c46a" stroke-opacity="0.28"/>
+  <g transform="translate(150,52.0)">
+<g fill="#b49953" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="64,25.6 76.1112,3.11285 78.695,28.523 " />
+</g>
+
+<g fill="#c5a85b" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="78.695,28.523 92.4452,21.4288 91.1529,36.8471 " />
+</g>
+
+<g fill="#d5b562" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="91.1529,36.8471 115.618,29.5102 99.477,49.305 " />
+</g>
+
+<g fill="#e4c269" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="99.477,49.305 114.216,54.0114 102.4,64 " />
+</g>
+
+<g fill="#f4d070" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="102.4,64 124.887,76.1112 99.477,78.695 " />
+</g>
+
+<g fill="#ffdb7a" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="99.477,78.695 106.571,92.4452 91.1529,91.1529 " />
+</g>
+
+<g fill="#ffdf8b" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="91.1529,91.1529 98.4898,115.618 78.695,99.477 " />
+</g>
+
+<g fill="#bb9f56" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="78.695,99.477 73.9886,114.216 64,102.4 " />
+</g>
+
+<g fill="#ccad5e" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="64,102.4 51.8888,124.887 49.305,99.477 " />
+</g>
+
+<g fill="#fbd674" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="28.523,78.695 13.7838,73.9886 25.6,64 " />
+</g>
+
+<g fill="#ffdd81" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="25.6,64 3.11285,51.8888 28.523,49.305 " />
+</g>
+
+<g fill="#ffe191" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="28.523,49.305 21.4288,35.5548 36.8471,36.8471 " />
+</g>
+
+<g fill="#c1a559" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="36.8471,36.8471 29.5102,12.3824 49.305,28.523 " />
+</g>
+
+<g fill="#d3b461" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="49.305,28.523 54.0114,13.7838 64,25.6 " />
+</g>
+
+<g fill="#ffda78" fill-opacity="1" stroke="none" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<rect x="-15.0583" y="-49.8422" width="4.66596" height="10.0214"/>
+</g>
+
+<g fill="#ffda78" fill-opacity="1" stroke="#fff2d0" stroke-opacity="1" stroke-width="0.653568" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polyline fill="none" vector-effect="none" points="-12.7253,-51.0447 -12.7253,-39.3197 " />
+</g>
+
+<g fill="#ffde86" fill-opacity="1" stroke="none" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<rect x="-6.57476" y="-53.7636" width="4.66596" height="13.9428"/>
+</g>
+
+<g fill="#ffde86" fill-opacity="1" stroke="#fff2d0" stroke-opacity="1" stroke-width="0.653568" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polyline fill="none" vector-effect="none" points="-4.24178,-55.4367 -4.24178,-39.1237 " />
+</g>
+
+<g fill="#ffe294" fill-opacity="1" stroke="none" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<rect x="1.9088" y="-57.685" width="4.66596" height="17.8642"/>
+</g>
+
+<g fill="#ffe294" fill-opacity="1" stroke="#fff2d0" stroke-opacity="1" stroke-width="0.653568" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polyline fill="none" vector-effect="none" points="4.24178,-59.8287 4.24178,-38.9276 " />
+</g>
+
+<g fill="#ffe5a2" fill-opacity="1" stroke="none" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<rect x="10.3924" y="-61.6064" width="4.66596" height="21.7856"/>
+</g>
+
+<g fill="#ffe5a2" fill-opacity="1" stroke="#fff2d0" stroke-opacity="1" stroke-width="0.653568" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(-0.707107,-0.707107,0.707107,-0.707107,64,64)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polyline fill="none" vector-effect="none" points="12.7253,-64.2207 12.7253,-38.7315 " />
+</g>
+
+<g fill="#d3b461" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.28" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+</g>
+
+<g fill="#1c1c1c" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<circle cx="64" cy="64" r="38.4"/>
+</g>
+
+<g fill="#202020" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="50.944,67.072 77.056,67.072 64,89.344 " />
+</g>
+
+<g fill="#e6c46a" fill-opacity="1" stroke="none" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polygon fill-rule="evenodd" vector-effect="none" points="50.176,54.4 54.4,58.624 50.176,62.848 45.952,58.624 " />
+<polygon fill-rule="evenodd" vector-effect="none" points="77.824,54.4 82.048,58.624 77.824,62.848 73.6,58.624 " />
+</g>
+
+<g fill="#e6c46a" fill-opacity="1" stroke="#000000" stroke-opacity="1" stroke-width="1.92" stroke-linecap="square" stroke-linejoin="bevel" transform="matrix(1,0,0,1,0,0)"
+font-family="" font-size="-1" font-weight="400" font-style="normal" 
+>
+<polyline fill="none" vector-effect="none" points="44.8,52.48 56.32,47.872 " />
+<polyline fill="none" vector-effect="none" points="83.2,52.48 71.68,47.872 " />
+</g>
+  </g>
+  <text x="322" y="108" font-family="Georgia, 'Times New Roman', serif" font-size="60"
+        letter-spacing="6" fill="#e6c46a">Alelyon</text>
+  <text x="325" y="146" font-family="Georgia, 'Times New Roman', serif" font-size="19"
+        letter-spacing="1.2" fill="#e5e5db">Numbers that carry their own evidence.</text>
+  <text x="325" y="175" font-family="'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace" font-size="14"
+        fill="#8a8a7e">pip install alelyon-os</text>
+</svg>

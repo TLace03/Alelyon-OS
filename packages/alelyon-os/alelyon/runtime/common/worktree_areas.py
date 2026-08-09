@@ -86,7 +86,15 @@ from alelyon.runtime.common import toolpath
 #:     the rule above is for. Within this repository the declared config
 #:     reproduces version 3 exactly, and `tests/runtime/test_worktree_areas.py`
 #:     asserts that path-by-path.
-AREA_SPACE_VERSION = 4
+#: 5 — this repository's `web/` rule REPOINTED to `www/`. The Streamlit surface
+#:     it named moved to `alelyon/frontend/web/` in `33c650c6` and has resolved
+#:     as `frontend/web` ever since, so the rule placed nothing while the
+#:     corporate website — public, claim-bearing, Tier 2 — was UNMAPPED. A
+#:     re-point rather than an addition: paths under `www/` that stored
+#:     `UNMAPPED` now store `web/src`, which is exactly the case rule 1 above
+#:     asks for a bump for. Only this repository's own declared space moves; a
+#:     stranger's checkout is unaffected because it never held this rule.
+AREA_SPACE_VERSION = 5
 
 #: Surface depth for a pillar that is a bag of files rather than a tree of
 #: subsystems. Named rather than written as a bare 0 at every call site.
@@ -534,7 +542,8 @@ def _tracked_paths(repo_root: str) -> Sequence[str]:
     try:
         probe = subprocess.run(
             toolpath.argv("git", "ls-files"), cwd=repo_root, check=False,
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+            **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
         return ()
     if probe.returncode != 0:
@@ -553,7 +562,8 @@ def repo_root_of(start: Optional[str] = None) -> Optional[str]:
         probe = subprocess.run(
             toolpath.argv("git", "rev-parse", "--show-toplevel"),
             cwd=str(start or Path.cwd()), check=False,
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+            **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     root = probe.stdout.strip()

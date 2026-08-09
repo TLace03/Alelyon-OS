@@ -30,6 +30,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import struct
 import tempfile
 import threading
@@ -218,6 +219,41 @@ def _atomic_private_key_write(path: Path, pem: bytes) -> None:
             pass
 
 
+#: Lowercase hex, and nothing else. `bytes.fromhex` accepts uppercase and mixed
+#: case, so `"AB..." != "ab..."` on the wire while decoding to identical bytes.
+_LOWER_HEX = re.compile(r"\A[0-9a-f]*\Z")
+
+
+def _decode_lower_hex(value: str, size: int) -> bytes:
+    """Exactly `size` bytes of CANONICAL lowercase hex, or `ValueError`.
+
+    Uppercase is rejected rather than normalized, because CNE structures freeze
+    lowercase fixed-width hex as part of their schema — the same rule the Rust
+    verifier states and tests in `languages/cne_verify/src/crypto.rs`
+    (`decode_lower_hex`, `decode_nibble`).
+
+    Python was the lax side of that pair. `bytes.fromhex` is case-insensitive
+    and tolerates whitespace, so an envelope whose signature was re-spelled in
+    uppercase had DIFFERENT WIRE BYTES and still verified `ok=true`,
+    `authenticity=true`, with no reason class. Two distinct documents then
+    verify as the same receipt while hashing differently — measured: the same
+    envelope spelled two ways gave sha256 `c8044be6…` and `f45c9b16…`. Anything
+    that identifies a receipt by digest (a bundle MANIFEST, a transparency leaf,
+    a stored envelope digest) therefore disagrees with the verifier about
+    whether two things are one thing, which is the property a signature exists
+    to settle. The Rust side already refused it, so this closes a parity gap by
+    making Python match the stricter implementation rather than by relaxing it.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"hex material must be str, got {type(value).__name__}")
+    if len(value) != size * 2:
+        raise ValueError(
+            f"hex material must be exactly {size * 2} characters, got {len(value)}")
+    if not _LOWER_HEX.match(value):
+        raise ValueError("hex material must be lowercase [0-9a-f]")
+    return bytes.fromhex(value)
+
+
 class KeyStore:
     """An ed25519 signing key, generated on first use and persisted to a
     gitignored PEM. `key_id` is a short public-key fingerprint that a verifier
@@ -281,15 +317,21 @@ class KeyStore:
     @staticmethod
     def key_id_of(public_key_hex: str) -> str:
         return "ed25519:" + hashlib.blake2b(
-            bytes.fromhex(public_key_hex), digest_size=8).hexdigest()
+            _decode_lower_hex(public_key_hex, 32), digest_size=8).hexdigest()
 
     @staticmethod
     def verify(public_key_hex: str, msg: bytes, signature_hex: str) -> bool:
         """True iff `signature_hex` is a valid ed25519 signature of `msg` under
-        the public key. Needs only the public key — the third-party check."""
+        the public key. Needs only the public key — the third-party check.
+
+        The hex must be CANONICAL: lowercase and exactly the right width. See
+        `_decode_lower_hex` for why that is a verification rule and not
+        pedantry.
+        """
         try:
-            pk = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
-            pk.verify(bytes.fromhex(signature_hex), msg)
+            pk = Ed25519PublicKey.from_public_bytes(
+                _decode_lower_hex(public_key_hex, 32))
+            pk.verify(_decode_lower_hex(signature_hex, 64), msg)
             return True
         except (InvalidSignature, ValueError, TypeError):
             return False
