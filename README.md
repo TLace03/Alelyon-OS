@@ -78,7 +78,7 @@ inputs were true when captured: a producer who fabricates an extract at capture 
 receipt that verifies perfectly. The normative specification is
 [spec/cne-v0.md](spec/cne-v0.md).
 
-## This tree is generated — do not edit it here
+## This tree is generated
 
 `packages/alelyon-os/**` and `spec/**` are produced from Alelyon's private monorepo by an
 exporter that builds them from the same allowlist that builds the published wheel, so the
