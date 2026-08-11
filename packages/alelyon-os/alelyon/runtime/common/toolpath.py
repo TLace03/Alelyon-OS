@@ -192,6 +192,42 @@ _WINDOWS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 
+#: Paths that carry a tool's NAME without being that tool. A PATH hit landing on
+#: one is passed over rather than returned, and recorded in `searched` so the
+#: refusal names the namesake it declined.
+#:
+#: This is the PATH-branch half of the exclusion the `bash` table above already
+#: describes. That comment was right about the danger and could not act on it:
+#: `find` consults PATH *before* the well-known table and returns on the first
+#: hit, so a namesake on PATH is answered with before any table is read. It also
+#: named `%SystemRoot%\System32\bash.exe`, which on this workstation does not
+#: exist -- the launcher that actually shadows Git's bash is the WindowsApps one
+#: below.
+#:
+#: Windows ships "app execution aliases" in `WindowsApps`: reparse points that
+#: launch a Store app. `bash.exe` there is WSL's launcher, and WSL is a different
+#: machine wearing the same name. It does not inherit the Windows environment --
+#: a workflow step reading `$GITHUB_OUTPUT` gets an empty string and redirects
+#: into it -- and it does not accept a Windows path, silently eating the
+#: separators, so `C:\Users\...` arrives as `C:Users...: No such file or
+#: directory` and the exit code is 127. The same directory holds the `python3`
+#: alias stub that once had the pre-push hook print "checks failed; push
+#: refused" having run no checks at all.
+#:
+#: Kept as a filesystem comparison on purpose. `find` promises never to execute a
+#: candidate, and a probe would be a larger act than resolution: knowing that a
+#: named location is a launcher for something else needs no process.
+_NAMESAKES: Dict[str, Tuple[str, ...]] = {
+    "bash": (
+        r"%SystemRoot%\System32\bash.exe",
+        r"%LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe",
+    ),
+    "sh": (
+        r"%SystemRoot%\System32\sh.exe",
+        r"%LOCALAPPDATA%\Microsoft\WindowsApps\sh.exe",
+    ),
+}
+
 _DARWIN: Dict[str, Tuple[str, ...]] = {
     "git": ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git",
             "/Library/Developer/CommandLineTools/usr/bin/git"),
@@ -284,6 +320,25 @@ def _executable(path: Path) -> bool:
     return os.access(str(path), os.X_OK)
 
 
+def _is_namesake(tool: str, hit: str) -> bool:
+    """Whether a PATH hit is a known namesake of `tool` rather than `tool`.
+
+    Compared as paths, never by running anything, so this stays inside `find`'s
+    promise. `normcase` because Windows hands back `bash.EXE` where the table
+    says `bash.exe`, and a case-sensitive comparison would silently miss.
+    """
+    if os.name != "nt":
+        return False
+    target = os.path.normcase(os.path.abspath(hit))
+    for template in _NAMESAKES.get(tool, ()):
+        expanded = os.path.expandvars(template)
+        if "%" in expanded:  # an unset variable; nothing to compare against
+            continue
+        if os.path.normcase(os.path.abspath(expanded)) == target:
+            return True
+    return False
+
+
 def _match(candidate: str) -> Optional[str]:
     """Resolve one candidate, which may contain a `*`. Highest match wins."""
     if "*" not in candidate:
@@ -353,6 +408,13 @@ def find(tool: str, *, refresh: bool = False) -> Found:
 
     searched.append("PATH")
     hit = shutil.which(tool)
+    if hit and _is_namesake(tool, hit):
+        # Recorded rather than dropped: a machine where Git's bash is missing
+        # entirely should refuse with "I found WSL's launcher and would not use
+        # it", which is actionable, instead of a bare "not found" that argues
+        # with the user's own `where bash`.
+        searched.append(f"{hit} (a namesake, not {tool})")
+        hit = None
     if hit:
         return _remember(Found(tool, hit, PATH, tuple(searched)))
 

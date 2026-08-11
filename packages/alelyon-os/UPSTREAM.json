@@ -30,7 +30,7 @@
     "packages/alelyon-os/alelyon/runtime/common/session_activity.py": "ed288f4f95cb78f8cbe02adb444f1a84759db4b4b801f47734ee006522aa9a9d",
     "packages/alelyon-os/alelyon/runtime/common/session_attention.py": "465f20522873ea3952a0d3f7f5a9c87c565e9ad9ec3e00cf81a14fa6c5add8e5",
     "packages/alelyon-os/alelyon/runtime/common/session_records.py": "72182e2d690dffca23b810381b7857354624f8f259bf299dcde25c618e07195b",
-    "packages/alelyon-os/alelyon/runtime/common/toolpath.py": "875825f6dd82d68f0402a2db92f938bfef1a9a002a3ec6b1e873364ef5350649",
+    "packages/alelyon-os/alelyon/runtime/common/toolpath.py": "12d90a6738bcf1cf13fc3ef1dcfa0fae433a10ee9baf7a31f105111585fc98fa",
     "packages/alelyon-os/alelyon/runtime/common/worktree.py": "afc946a698bca8835be7cbbacb4bd10eb2492f5aada53f5556cf11fb42649a24",
     "packages/alelyon-os/alelyon/runtime/common/worktree_areas.py": "b71a469a59b20bd0da21262a98e5ff642387daeab6174dd82e9acb96e74122d7",
     "packages/alelyon-os/alelyon/runtime/common/worktree_bus.py": "da88f9a80399fbe3905ca1fec46e96f8be0735ad7fd1209c307cda9c9d857fee",
@@ -141,7 +141,7 @@
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-input-data.json": "1664da864c77fd7642618a1c171db1d2be3ecaef6ffe8eaab4e848ac24d53daf",
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-pinned-key.json": "fb6ca366f2ace5d7d2e77eecaad613329b759e04e1c6d57771fb23436b47ce7c",
     "packages/alelyon-os/alelyon/verify/vectors/partial-substrate-mismatch.json": "a3361b7c449bf5ee4ed2fce6e05eee2beceac20f307f5b31adc29b4e374fc600",
-    "packages/alelyon-os/pyproject.toml": "fcc8e603921cb58873fb0df07e6f12f2529453131e9757dda4731092262f9762",
+    "packages/alelyon-os/pyproject.toml": "6aa24a7255d250d74b9e062c9593c8e6591d965f0349513bd26b2ce6f62199ad",
     "packages/alelyon-os/tests/test_conformance.py": "9b197ce3aabd526d89086fd82bd7f1bb9f9480d23136a66a2dc8b435356435a1",
     "packages/alelyon-os/tests/test_hardening.py": "5d0c14ba7d6827f8a981d775e736b8d361108bff0969cba92794c696dc79ad5d",
     "papers/00-research-log.md": "c80d6c9c27460b4f9b095fb0106913cbde14bb3f9dc7c9b5c973db080025ee33",
@@ -164,6 +164,6 @@
     "spec/cne-v0.md": "3690b655d57f3044a7b7b5f50485c39a843ca8f0c12c525cd818aa7a9ea7e8c9"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "a8bea689b8db5ad1691a08db72617326c37fb514",
+  "source_commit": "dc04f06b259599483bfb42e7144221ec347921fa",
   "source_repository": "TLace03/famMain"
 }
