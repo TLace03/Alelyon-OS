@@ -57,10 +57,13 @@ from dataclasses import dataclass
 import functools
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 import time
+from typing import Iterable
 
 from alelyon.runtime.common import toolpath
 from alelyon.runtime.common.worktree import (
@@ -272,7 +275,7 @@ class WorktreeCache:
             for tree in mesh.worktrees:
                 key = _key_for(mesh.repo_root, tree.path)
                 seen_keys.add(key)
-                identity = self._upsert_identity(conn, key, tree, mesh.observed_at)
+                self._upsert_identity(conn, key, tree, mesh.observed_at)
                 touched = sorted(tree.touched_paths)
                 previous = conn.execute(
                     "SELECT head, touched, present FROM snapshot WHERE key=? "
@@ -284,7 +287,6 @@ class WorktreeCache:
                     " VALUES(?,?,?,?,?)",
                     (key, mesh.observed_at, tree.head, json.dumps(touched),
                      int(tree.present)))
-                del identity
             # A worktree the cache knows and this observation does not is gone.
             for row in conn.execute(
                     "SELECT key, label FROM worktree WHERE last_seen < ?",
@@ -496,19 +498,79 @@ class WorktreeCache:
         return int(held), len(COLOUR_SLOTS)
 
 
-@functools.lru_cache(maxsize=8)
-def _repository_globals(anchor: str) -> Path | None:
-    """`<primary checkout>/globals` for the repository `anchor` sits in, or None.
+class _RepositoryIdentityUnavailable(Exception):
+    """Internal signal whose exception semantics prevent negative caching."""
+
+
+class RepositoryDatabaseAmbiguity(RuntimeError):
+    """More than one fallback store claims one recovered Git repository."""
+
+
+class RepositoryDatabaseUnavailable(RuntimeError):
+    """A Git repository's durable Fleet database identity is unavailable."""
+
+
+class RepositoryScopeUnavailable(RuntimeError):
+    """A selected Git checkout's privacy boundary could not be established."""
+
+
+def _anchor_cache_marker(anchor: str) -> tuple[int, ...]:
+    """Cheap incarnation stamp preventing stale path-to-repository cache hits."""
+    values: list[int] = []
+    root = Path(anchor).expanduser().resolve()
+    for entry in (root, root / ".git"):
+        try:
+            metadata = entry.lstat()
+        except OSError:
+            values.extend((-1, -1, -1, -1, -1))
+            continue
+        values.extend((
+            int(metadata.st_dev), int(metadata.st_ino),
+            int(getattr(metadata, "st_size", 0)),
+            int(getattr(metadata, "st_mtime_ns", 0)),
+            int(getattr(metadata, "st_ctime_ns", 0)),
+        ))
+    return tuple(values)
+
+
+def _root_incarnation_marker(anchor: str) -> tuple[int, ...]:
+    """Stable root/.git identity, insensitive to ordinary repository edits."""
+    values: list[int] = []
+    root = Path(anchor).expanduser().resolve()
+    for entry in (root, root / ".git"):
+        try:
+            metadata = entry.lstat()
+        except OSError:
+            values.extend((-1, -1, -1, -1))
+            continue
+        birth = getattr(metadata, "st_birthtime_ns", None)
+        if birth is None and os.name == "nt":
+            birth = getattr(metadata, "st_ctime_ns", None)
+        values.extend((
+            int(metadata.st_dev), int(metadata.st_ino),
+            int(metadata.st_mode), int(birth or -1)))
+    return tuple(values)
+
+
+@functools.lru_cache(maxsize=32)
+def _known_repository_identity(anchor: str,
+                               anchor_marker: tuple[int, ...]) -> Path:
+    """The exact shared Git directory for ``anchor``.
 
     `git rev-parse --git-common-dir` is the whole point: every linked worktree
-    answers with the SAME `.git`, which is exactly the scope this database is
-    supposed to have. `--git-dir` would answer per-worktree and reintroduce the
-    split.
+    answers with the SAME path, while sibling submodules answer with distinct
+    paths below ``.git/modules``. The complete path is the repository identity;
+    taking only its parent would collapse those submodules onto one store.
 
-    Cached because `default_database()` is called per operation and this is a
-    subprocess. None means "not a checkout" -- an installed wheel -- and the
-    caller falls back.
+    Successful identities are cached because resolving a selected project
+    otherwise starts a subprocess per reading. Failures raise rather than
+    return a cached sentinel: a transient Git refusal must be retried instead
+    of pinning the process to a fallback namespace until restart. The selected
+    root/.git incarnation participates in the cache key, so reassigning a
+    linked-worktree path to an unrelated repository cannot reuse a successful
+    identity cached for its predecessor.
     """
+    del anchor_marker
     try:
         found = subprocess.run(
             toolpath.argv("git", "-C", anchor, "rev-parse",
@@ -516,15 +578,730 @@ def _repository_globals(anchor: str) -> Path | None:
             capture_output=True, text=True, timeout=30,
             **toolpath.no_window())
     except (OSError, subprocess.SubprocessError):
-        return None
+        raise _RepositoryIdentityUnavailable from None
     if found.returncode != 0 or not found.stdout.strip():
-        return None
+        raise _RepositoryIdentityUnavailable
     # `--path-format=absolute` because the bare form answers '.git' from the
     # repository root and an absolute path from a linked worktree, which is a
     # difference this caller would otherwise have to undo by hand. Same idiom as
     # `pr_relay.default_database`.
-    root = Path(found.stdout.strip()).resolve().parent
-    return root / "globals" if root.is_dir() else None
+    return Path(found.stdout.strip()).resolve()
+
+
+def _repository_identity(anchor: str) -> Path | None:
+    """Return a positively cached Git identity, retrying every prior refusal."""
+    try:
+        return _known_repository_identity(anchor, _anchor_cache_marker(anchor))
+    except _RepositoryIdentityUnavailable:
+        return None
+
+
+# A few hermetic callers clear path caches after monkeypatching Git. Preserve
+# that small private testing seam while keeping the actual cache positive-only.
+setattr(_repository_identity, "cache_clear",
+        _known_repository_identity.cache_clear)
+
+
+@functools.lru_cache(maxsize=32)
+def _known_repository_globals(
+        anchor: str, marker: tuple[int, ...]) -> Path | None:
+    """The ordinary primary checkout's legacy ``globals`` directory.
+
+    A normal repository and all of its linked worktrees share ``<primary>/.git``.
+    A submodule or a repository using a separated Git directory does not have
+    that shape; guessing ``common_dir.parent`` for either is what made sibling
+    submodules collide. Those repositories use the hashed namespace below.
+    """
+    identity = _repository_identity(anchor)
+    if identity is None or identity.name != ".git":
+        return None
+    primary = identity.parent
+    return primary / "globals" if primary.is_dir() else None
+
+
+def _repository_globals(anchor: str) -> Path | None:
+    """Return legacy globals without trusting a stale path assignment."""
+    return _known_repository_globals(anchor, _anchor_cache_marker(anchor))
+
+
+# Preserve the private test seam used by hermetic Git-path fixtures.
+setattr(_repository_globals, "cache_clear",
+        _known_repository_globals.cache_clear)
+
+
+def _selected_repository_state_root() -> Path:
+    """Per-user state root for repositories that have no legacy Fleet bus.
+
+    The path module already owns the platform convention. Its helper is private
+    because ordinary callers should use ``GLOBALS_DIR``; this selected-project
+    case is deliberately different in a source checkout, where ``GLOBALS_DIR``
+    points back into the source repository. An explicit ``ALELYON_HOME`` remains
+    authoritative, as it is for every other runtime path.
+    """
+    from alelyon.runtime.common import paths
+    if os.environ.get("ALELYON_HOME"):
+        return Path(paths.GLOBALS_DIR)
+    return paths._user_state_dir()
+
+
+def _repository_namespace(identity: Path, *, git_common: bool) -> str:
+    """Opaque name for one filesystem incarnation (path only as fallback).
+
+    Per-user state outlives a checkout. A path alone would therefore let an
+    unrelated repository recreated at the same location inherit the retired
+    checkout's session ids, notes and operation history. Device/file identity
+    separates those incarnations while every linked worktree still shares the
+    one Git-common directory marker.
+    """
+    resolved = identity.resolve()
+    normalized = os.path.normcase(str(resolved))
+    try:
+        metadata = resolved.stat()
+        incarnation = f"{metadata.st_dev}:{metadata.st_ino}"
+        birth = getattr(metadata, "st_birthtime_ns", None)
+        if birth is None and os.name == "nt":
+            birth = getattr(metadata, "st_ctime_ns", None)
+        if birth is not None:
+            incarnation += f":{int(birth)}"
+    except OSError:
+        # Callers use existing selected roots/common dirs. If metadata becomes
+        # unreadable between validation and this read, keep the path scoped;
+        # downstream opening will refuse rather than fall back to another DB.
+        incarnation = "metadata-unavailable"
+    kind = "git-common-dir" if git_common else "selected-root"
+    # A strong filesystem identity is deliberately path-independent: moving a
+    # checkout on the same volume preserves its Fleet history. Only the
+    # degraded metadata-unavailable case falls back to the resolved path.
+    identity_key = (incarnation if incarnation != "metadata-unavailable"
+                    else f"{normalized}\0{incarnation}")
+    return hashlib.sha256(
+        f"{kind}\0{identity_key}".encode("utf-8")).hexdigest()
+
+
+@functools.lru_cache(maxsize=64)
+def _known_repository_context(
+        anchor: str, marker: tuple[int, ...]) -> str:
+    normalized = os.path.normcase(str(Path(anchor).expanduser().resolve()))
+    # Device/inode/birth identity is the context. The path is used only when a
+    # platform/filesystem supplied no usable identity marker at all.
+    usable = any(marker[index] not in (-1, 0)
+                 for index in (0, 1, 3, 4, 5, 7)
+                 if index < len(marker))
+    material = repr(marker) if usable else f"{normalized}\0{marker!r}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def repository_context_id(anchor: str | Path) -> str:
+    """Opaque identity for the selected checkout incarnation at `anchor`.
+
+    Unlike a resolved path string, this changes when an unrelated checkout is
+    placed at the same path. Unlike a directory mtime, it does not change when
+    an ordinary source file is added or removed.
+    """
+    root = str(Path(anchor).expanduser().resolve())
+    return _known_repository_context(root, _root_incarnation_marker(root))
+
+
+def _created_at(path: Path) -> int | None:
+    """Best available filesystem-incarnation time for one stable marker."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None
+    birth = getattr(metadata, "st_birthtime_ns", None)
+    if birth is not None:
+        return int(birth) // 1_000_000_000
+    if os.name == "nt":
+        return int(metadata.st_ctime_ns) // 1_000_000_000
+    # POSIX exposes metadata-change time rather than birth time. Git's stable
+    # template markers below are chosen precisely because at least one normally
+    # retains its repository-creation ctime for the checkout's lifetime.
+    return int(metadata.st_ctime_ns) // 1_000_000_000
+
+
+def _git_pointer(path: Path, *, prefix: str = "") -> Path | None:
+    """Read one bounded Git administrative path file without guessing."""
+    try:
+        if _is_reparse_like(path) or path.stat().st_size > 4096:
+            return None
+        value = path.read_text(encoding="utf-8", errors="strict").strip()
+    except (OSError, UnicodeError):
+        return None
+    if prefix:
+        if not value.lower().startswith(prefix.lower()):
+            return None
+        value = value[len(prefix):].strip()
+    if not value or len(value) > 4096:
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = path.parent / candidate
+    try:
+        return candidate.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _linked_worktree_arrival(root: Path, common: Path) -> int | None:
+    """When Git last bound this linked worktree to its current path.
+
+    A linked worktree's own ``.git`` file moves with the directory and therefore
+    retains its original birth time. Git separately rewrites the admin
+    ``worktrees/<name>/gitdir`` pointer when ``git worktree move`` changes the
+    checkout path. That bounded structural file is the independent arrival
+    signal needed on a first-ever Lattice selection; without it, a transcript
+    from the retired occupant of the destination path could look newer than an
+    older worktree moved in there.
+    """
+    dot_git = root / ".git"
+    if not dot_git.is_file():
+        return None
+    admin = _git_pointer(dot_git, prefix="gitdir:")
+    if admin is None:
+        raise RepositoryScopeUnavailable(
+            "the linked-worktree administrative pointer could not be read")
+    worktrees = (common / "worktrees").resolve()
+    if admin.parent != worktrees:
+        # A separated Git directory is not the standard linked-worktree shape;
+        # repository inception remains the available lower boundary.
+        return None
+    reverse = admin / "gitdir"
+    pointed_back = _git_pointer(reverse)
+    try:
+        same_checkout = pointed_back == dot_git.resolve(strict=True)
+        metadata = reverse.stat()
+    except OSError:
+        same_checkout = False
+    if not same_checkout:
+        raise RepositoryScopeUnavailable(
+            "the linked-worktree path binding could not be validated")
+    # Transcript timestamps are truncated to whole seconds. The file could have
+    # been rewritten at any point inside this second, so the first defensible
+    # accepted timestamp is the following second.
+    return int(metadata.st_mtime_ns) // 1_000_000_000 + 1
+
+
+def _linked_worktree_binding_marker(root: Path) -> tuple[int, ...]:
+    """Cheap revision token for a linked worktree's path binding.
+
+    Moving a linked worktree away and back preserves both the checkout root and
+    its ``.git`` file identity. Git does rewrite the reverse administrative
+    pointer, however, and that rewrite is the arrival evidence consumed by
+    :func:`_linked_worktree_arrival`. Include both bounded structural files in
+    the inception cache key so that evidence cannot be hidden by an ABA move.
+    """
+    dot_git = root / ".git"
+    if not dot_git.is_file():
+        return ()
+
+    values: list[int] = []
+
+    def extend(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            values.extend((-1, -1, -1, -1, -1))
+            return
+        values.extend((
+            int(metadata.st_dev), int(metadata.st_ino),
+            int(getattr(metadata, "st_size", 0)),
+            int(getattr(metadata, "st_mtime_ns", 0)),
+            int(getattr(metadata, "st_ctime_ns", 0)),
+        ))
+
+    extend(dot_git)
+    admin = _git_pointer(dot_git, prefix="gitdir:")
+    if admin is None:
+        values.extend((-2, -2, -2, -2, -2))
+    else:
+        extend(admin / "gitdir")
+    return tuple(values)
+
+
+def _repository_inception_marker(anchor: str | Path) -> tuple[int, ...]:
+    root = Path(anchor).expanduser().resolve()
+    return (_root_incarnation_marker(str(root))
+            + _linked_worktree_binding_marker(root))
+
+
+@functools.lru_cache(maxsize=64)
+def _known_repository_inception(
+        anchor: str, marker: tuple[int, ...]) -> int | None:
+    del marker
+    root = Path(anchor).expanduser().resolve()
+    common = _repository_identity(str(root))
+    if common is None:
+        # A plain directory has no repository-incarnation boundary to apply.
+        # A directory carrying Git metadata is different: a transient Git
+        # refusal must not become permission to project exact-cwd transcripts.
+        if (root / ".git").exists():
+            raise RepositoryScopeUnavailable(
+                "the selected Git checkout identity could not be read")
+        return None
+    candidates = (
+        common / "description",
+        common / "hooks",
+        common / "info" / "exclude",
+        common / "refs" / "tags",
+        common / "objects" / "info",
+    )
+    times = [stamp for stamp in (_created_at(path) for path in candidates)
+             if stamp is not None]
+    common_started = min(times) if times else _created_at(common)
+    git_marker = root / ".git"
+    linked_started = _created_at(git_marker) if git_marker.is_file() else None
+    linked_arrived = _linked_worktree_arrival(root, common)
+    known = [stamp for stamp in (common_started, linked_started, linked_arrived)
+             if stamp is not None]
+    if not known:
+        raise RepositoryScopeUnavailable(
+            "the selected Git checkout inception could not be established")
+    return max(known)
+
+
+def repository_inception(anchor: str | Path) -> int | None:
+    """Lower time boundary for activity belonging to this checkout instance."""
+    root = str(Path(anchor).expanduser().resolve())
+    return _known_repository_inception(root, _repository_inception_marker(root))
+
+
+_PATH_CONTEXT_SCHEMA = "alelyon.fleet-selected-path-context/0.1"
+
+
+def _path_context_database() -> Path:
+    return _selected_repository_state_root() / "fleet_repository_paths.sqlite3"
+
+
+def _path_context_key(anchor: str | Path) -> str:
+    resolved = Path(anchor).expanduser().resolve()
+    normalized = os.path.normcase(str(resolved))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _path_context_boundary(anchor: str | Path, context: str, *,
+                           observed_at: int,
+                           database: str | Path | None = None) -> int | None:
+    """Persist a content-free path assignment and return its arrival floor.
+
+    Repository state is path-independent so moving one checkout preserves its
+    Fleet history. Transcript scoping needs the complementary fact: when a
+    *different* checkout arrives at a path, records stamped for the retired
+    occupant must not follow it. The ledger stores only a path hash, opaque
+    context id, and second-resolution observation time -- never the path,
+    session ids, or transcript content.
+
+    First observation preserves the repository-inception boundary. A known
+    context transition returns the first acceptable whole second after the
+    transition was observed. SQLite's immediate transaction makes concurrent
+    readers monotonic, and any persistence failure is a refusal rather than a
+    fail-open content read.
+    """
+    target = Path(database) if database is not None else _path_context_database()
+    key = _path_context_key(anchor)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(target, timeout=1.0) as connection:
+            connection.execute("PRAGMA busy_timeout = 1000")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS selected_path_context ("
+                "path_hash TEXT PRIMARY KEY, context_id TEXT NOT NULL, "
+                "observed_at INTEGER NOT NULL, transitioned INTEGER NOT NULL "
+                "CHECK (transitioned IN (0, 1)), schema TEXT NOT NULL)")
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT context_id, observed_at, transitioned, schema "
+                "FROM selected_path_context WHERE path_hash = ?", (key,)
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO selected_path_context "
+                    "(path_hash, context_id, observed_at, transitioned, schema) "
+                    "VALUES (?, ?, ?, 0, ?)",
+                    (key, context, int(observed_at), _PATH_CONTEXT_SCHEMA))
+                return None
+            previous_context, previous_at, transitioned, schema = row
+            if schema != _PATH_CONTEXT_SCHEMA:
+                raise RepositoryScopeUnavailable(
+                    "the selected-path context ledger schema is unsupported")
+            if previous_context == context:
+                return int(previous_at) + 1 if int(transitioned) else None
+            transition_at = max(int(previous_at), int(observed_at))
+            connection.execute(
+                "UPDATE selected_path_context SET context_id = ?, "
+                "observed_at = ?, transitioned = 1, schema = ? "
+                "WHERE path_hash = ?",
+                (context, transition_at, _PATH_CONTEXT_SCHEMA, key))
+            return transition_at + 1
+    except RepositoryScopeUnavailable:
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise RepositoryScopeUnavailable(
+            "the selected-path context ledger could not be updated") from exc
+
+
+_PathContextRevision = tuple[str, int, bool]
+
+
+def _path_context_revision(
+        anchor: str | Path, *, database: str | Path | None = None,
+        required: bool = False) -> _PathContextRevision | None:
+    """Read one content-free durable path revision without creating state."""
+    target = Path(database) if database is not None else _path_context_database()
+    key = _path_context_key(anchor)
+    try:
+        uri = target.resolve(strict=True).as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("PRAGMA busy_timeout = 1000")
+            row = connection.execute(
+                "SELECT context_id, observed_at, transitioned, schema "
+                "FROM selected_path_context WHERE path_hash = ?", (key,)
+            ).fetchone()
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        if not required and not target.exists():
+            return None
+        raise RepositoryScopeUnavailable(
+            "the selected-path context ledger could not be read") from exc
+    if row is None:
+        if not required:
+            return None
+        raise RepositoryScopeUnavailable(
+            "the selected-path context ledger has no selected-path row")
+    context, observed_at, transitioned, schema = row
+    try:
+        observed = int(observed_at)
+        transition_flag = int(transitioned)
+    except (TypeError, ValueError) as exc:
+        raise RepositoryScopeUnavailable(
+            "the selected-path context ledger row is malformed") from exc
+    if schema != _PATH_CONTEXT_SCHEMA or transition_flag not in (0, 1):
+        raise RepositoryScopeUnavailable(
+            "the selected-path context ledger schema is unsupported")
+    return str(context), observed, bool(transition_flag)
+
+
+class RepositoryScopeCache:
+    """Per-reader repository inception cache with incarnation invalidation.
+
+    Fleet can expose hundreds of linked worktrees. A small process-global LRU
+    thrashes at that cardinality and would spawn one Git probe per root on every
+    two-second activity tick. This cache is owned by the composite activity
+    index, is unbounded only by that index's explicit mesh roots, and rechecks a
+    cheap filesystem incarnation token before reusing each boundary.
+    """
+
+    def __init__(self, *, context_database: str | Path | None = None) -> None:
+        self._entries: dict[
+            str,
+            tuple[str, int | None, tuple[int, ...], _PathContextRevision],
+        ] = {}
+        self._context_database = (Path(context_database)
+                                  if context_database is not None else None)
+
+    def inception(self, anchor: str | Path, *, now: float | None = None) -> int | None:
+        root = str(Path(anchor).expanduser().resolve())
+        context = repository_context_id(root)
+        marker = _repository_inception_marker(root)
+        cached = self._entries.get(root)
+        if (cached is not None and cached[0] == context
+                and cached[2] == marker):
+            revision = _path_context_revision(
+                root, database=self._context_database, required=True)
+            if revision == cached[3]:
+                return cached[1]
+            if revision is not None and revision[0] == context:
+                arrival = revision[1] + 1 if revision[2] else None
+                boundary = cached[1]
+                if arrival is not None:
+                    boundary = (arrival if boundary is None
+                                else max(boundary, arrival))
+                self._entries[root] = (
+                    context, boundary, marker, revision)
+                return boundary
+        inception = repository_inception(root)
+        if inception is None:
+            if (Path(root) / ".git").exists():
+                # Keep this check here as well as in the default probe: tests
+                # and embedders can inject the repository clock, but ``None``
+                # must never become a valid boundary for a known Git checkout.
+                raise RepositoryScopeUnavailable(
+                    "the selected Git checkout inception is unavailable")
+            # Non-Git directory scopes are supported by the standalone parser
+            # for compatibility, but are not cached as repository truth. A path
+            # that becomes a Git checkout on the next poll must be reprobed.
+            return None
+        arrival = _path_context_boundary(
+            root, context, observed_at=int(time.time() if now is None else now),
+            database=self._context_database)
+        boundary = max(inception, arrival) if arrival is not None else inception
+        revision = _path_context_revision(
+            root, database=self._context_database, required=True)
+        if revision is None or revision[0] != context:
+            raise RepositoryScopeUnavailable(
+                "the selected-path context changed during repository scoping")
+        self._entries[root] = (context, boundary, marker, revision)
+        return boundary
+
+    def validated_roots(self, selected: str | Path | None,
+                        candidates: Iterable[str | Path]) -> tuple[
+                            tuple[str, ...], tuple[str, ...]]:
+        """Current Git checkouts from ``candidates`` belonging to ``selected``.
+
+        A worktree mesh is a point-in-time reading. Between that read and an
+        activity poll, one of its paths can be removed or reassigned. Treating
+        an ordinary directory (or an unrelated Git checkout) as another exact
+        cwd would revive retired transcripts. Validation is strict only when
+        the selected scope is itself Git; standalone non-Git parser callers
+        retain their historical exact-directory behavior.
+        """
+        values = tuple(dict.fromkeys(
+            str(Path(value).expanduser().resolve())
+            for value in candidates if str(value)))
+        if not selected:
+            return values, ()
+        selected_root = Path(selected).expanduser().resolve()
+        if not (selected_root / ".git").exists():
+            return values, ()
+        common = _repository_identity(str(selected_root))
+        if common is None:
+            raise RepositoryScopeUnavailable(
+                "the selected Git checkout identity could not be read")
+        accepted: list[str] = []
+        refused = 0
+        for value in values:
+            root = Path(value)
+            if not (root / ".git").exists() \
+                    or _repository_identity(str(root)) != common:
+                refused += 1
+                continue
+            accepted.append(value)
+        notes = () if not refused else (
+            f"{refused} stale or unrelated mesh root(s) were withheld from "
+            "activity because they are not current Git checkouts of the "
+            "selected repository.",)
+        return tuple(accepted), notes
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+def _fallback_database(root: Path) -> Path:
+    # A selected-root fallback must follow the complete checkout context, not
+    # only the root directory inode. ``git init`` deliberately leaves that
+    # inode in place, so a root-only namespace would let the newly-created Git
+    # repository inherit coordination rows written before it was a repository.
+    # The context includes the structural ``.git`` incarnation and remains
+    # stable across transient Git probe failures and ordinary path moves.
+    context = repository_context_id(root)
+    namespace = hashlib.sha256(
+        f"selected-root-context\0{context}".encode("utf-8")).hexdigest()
+    return (_selected_repository_state_root() / "fleet_repositories" /
+            namespace / "worktree_cache.db")
+
+
+def _repository_member_roots(common: Path, current: Path) -> tuple[Path, ...]:
+    """Known checkout roots sharing ``common``, primary first.
+
+    Git stores a bounded ``gitdir`` pointer for each linked worktree. Reading
+    those structural path files lets a recovered Git probe find a fallback DB
+    established by any sibling without opening project content.
+    """
+    members: list[Path] = []
+    if common.name == ".git":
+        members.append(common.parent.resolve())
+    current = current.resolve()
+    if current not in members:
+        members.append(current)
+    worktrees = common / "worktrees"
+    try:
+        entries = sorted(entry for entry in worktrees.iterdir()
+                         if entry.is_dir() and not _is_reparse_like(entry))
+    except OSError:
+        entries = []
+    for entry in entries:
+        pointer = entry / "gitdir"
+        try:
+            if _is_reparse_like(pointer) or pointer.stat().st_size > 4096:
+                continue
+            with pointer.open("r", encoding="utf-8", errors="strict") as handle:
+                value = handle.read(4097).strip()
+            if not value or len(value) > 4096:
+                continue
+            dot_git = Path(value).expanduser().resolve()
+        except (OSError, UnicodeError):
+            continue
+        member = dot_git.parent if dot_git.name == ".git" else None
+        if (member is not None and member not in members
+                and _repository_identity(str(member)) == common):
+            members.append(member)
+    return tuple(members)
+
+
+def _established_fallback(common: Path, current: Path) -> Path | None:
+    """The one existing fallback, refusing split histories explicitly."""
+    candidates = tuple(dict.fromkeys(
+        candidate for member in _repository_member_roots(common, current)
+        if (candidate := _fallback_database(member)).exists()))
+    if len(candidates) > 1:
+        raise RepositoryDatabaseAmbiguity(
+            "multiple repository fallback stores exist after Git recovery; "
+            "Fleet refuses to choose one and hide the other")
+    return candidates[0] if candidates else None
+
+
+def _is_reparse_like(path: Path) -> bool:
+    """Whether ``path`` can redirect traversal to another filesystem path.
+
+    ``is_symlink`` covers POSIX links and Windows symbolic links; Python 3.12's
+    ``is_junction`` and the Windows file-attribute check cover junctions and
+    other reparse points. An entry that cannot be inspected is unsafe to adopt.
+    """
+    try:
+        metadata = path.lstat()
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
+def _resolved_path_within(path: Path, boundary: Path) -> bool:
+    """Whether two existing paths resolve with ``path`` beneath ``boundary``."""
+    try:
+        path.resolve(strict=True).relative_to(boundary.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _safe_legacy_database(legacy_globals: Path) -> Path | None:
+    """Return an adoptable repository-local legacy database, else ``None``.
+
+    A selected repository controls these path entries. It may supply an ordinary
+    existing database for compatibility, but it may not redirect Lattice through
+    a symlink, junction, or other reparse point to a database outside the selected
+    checkout.
+    """
+    database = legacy_globals / "worktree_cache.db"
+    if not database.is_file():
+        return None
+    primary = legacy_globals.parent
+    if _is_reparse_like(legacy_globals) or _is_reparse_like(database):
+        return None
+    if not _resolved_path_within(legacy_globals, primary):
+        return None
+    if not _resolved_path_within(database, primary):
+        return None
+    # A filename is not a compatibility contract. Read the marker and complete
+    # table vocabulary through a query-only connection before allowing normal
+    # Fleet collection to mutate this file.
+    try:
+        uri = database.resolve(strict=True).as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            tables = {str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            cache_schema = (connection.execute(
+                "SELECT value FROM meta WHERE name = 'schema'").fetchone()
+                if "meta" in tables else None)
+            bus_schema = (connection.execute(
+                "SELECT value FROM bus_meta WHERE name = 'schema'").fetchone()
+                if "bus_meta" in tables else None)
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    cache_tables = {"meta", "worktree", "snapshot", "operation", "declaration"}
+    cache_ok = (cache_schema is not None
+                and str(cache_schema[0]) == str(SCHEMA_VERSION)
+                and cache_tables <= tables)
+    try:
+        from alelyon.runtime.common import worktree_bus
+        bus_version = int(bus_schema[0]) if bus_schema is not None else 0
+        bus_tables = {"bus_meta", "finding", "delivery", "claim"}
+        bus_ok = (1 <= bus_version <= worktree_bus.BUS_SCHEMA_VERSION
+                  and bus_tables <= tables
+                  and (bus_version < 2
+                       or {"channel", "membership"} <= tables))
+    except (ImportError, TypeError, ValueError):
+        bus_ok = False
+    if not (cache_ok or bus_ok):
+        return None
+
+    # A tracked database is source, not runtime state. Opening a selected
+    # arbitrary repository must never dirty one of its committed files merely
+    # because it reused Alelyon's historical filename.
+    try:
+        relative = database.resolve(strict=True).relative_to(
+            primary.resolve(strict=True)).as_posix()
+        tracked = subprocess.run(
+            toolpath.argv("git", "-C", str(primary), "ls-files",
+                          "--error-unmatch", "--", relative),
+            capture_output=True, text=True, timeout=30,
+            **toolpath.no_window())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if tracked.returncode == 0:
+        return None
+    if tracked.returncode != 1:
+        # Only Git's specific "path is not tracked" result licenses legacy
+        # adoption. A fatal/refusal code is missing evidence, not evidence that
+        # the file is safe runtime state.
+        return None
+    return database
+
+
+def database_for(anchor: str | Path) -> Path:
+    """The shared fleet database for the repository containing `anchor`.
+
+    Unlike `default_database`, this does not inherit the process/import
+    checkout. Packaged Lattice supplies the repository the user selected, so
+    two open projects cannot silently share coordination rows. An existing
+    ordinary ``<primary>/globals/worktree_cache.db`` remains authoritative so a
+    packaged application can see the repository's current Fleet bus. Otherwise
+    the exact Git common directory -- or exact selected root when Git refuses --
+    selects an opaque per-user namespace. This function only computes a path;
+    it creates no directory or database.
+    """
+    root = Path(anchor).expanduser().resolve()
+    fallback_database = _fallback_database(root)
+    common = _repository_identity(str(root))
+    if common is None:
+        if fallback_database.exists():
+            # Compatibility for a fallback established by an older release.
+            # New fallbacks are not created while a Git checkout's common-dir
+            # identity is unavailable: an established scoped store may exist
+            # under that unknown identity, and choosing another DB would split
+            # one repository's coordination history.
+            return fallback_database
+        if (root / ".git").exists():
+            raise RepositoryDatabaseUnavailable(
+                "Git refused the selected repository identity; Fleet will not "
+                "create a second coordination database")
+        return fallback_database
+    established = _established_fallback(common, root)
+    if established is not None:
+        return established
+    identity = common if common is not None else root
+    namespace = _repository_namespace(identity, git_common=common is not None)
+    scoped_database = (_selected_repository_state_root() / "fleet_repositories" /
+                       namespace / "worktree_cache.db")
+    # Once this repository has created its scoped store, that path is its stable
+    # identity. A legacy file appearing later must not silently switch the
+    # running project's history to a different database.
+    if scoped_database.exists():
+        return scoped_database
+
+    legacy_globals = _repository_globals(str(root)) if common is not None else None
+    if legacy_globals is not None:
+        legacy_database = _safe_legacy_database(legacy_globals)
+        if legacy_database is not None:
+            return legacy_database
+
+    return scoped_database
 
 
 def default_database() -> Path:
@@ -560,7 +1337,7 @@ def default_database() -> Path:
     them so the choice is somebody's rather than this function's.
     """
     from alelyon.runtime.common.paths import GLOBALS_DIR
-    shared = _repository_globals(str(GLOBALS_DIR))
+    shared = _repository_globals(str(Path(GLOBALS_DIR).resolve()))
     if shared is not None:
         return shared / "worktree_cache.db"
     return Path(GLOBALS_DIR) / "worktree_cache.db"
@@ -572,7 +1349,7 @@ def stranded_buses(repo_root: str | Path = ".") -> tuple:
     Reported rather than merged, and never emptied: this says what was lost, so
     that a session which spent an afternoon talking to itself can find out.
     """
-    shared = default_database().resolve()
+    shared = database_for(repo_root).resolve()
     out = []
     for tree in observe(repo_root).worktrees:
         candidate = (Path(tree.path) / "globals" / "worktree_cache.db").resolve()
@@ -598,7 +1375,7 @@ def record_now(repo_root: str | Path = ".", *, database: str | Path | None = Non
                mainline: str = "origin/main") -> tuple[WorktreeCache, WorktreeMesh,
                                                        tuple[Operation, ...]]:
     """Observe and fold into the cache in one call."""
-    cache = WorktreeCache(database or default_database())
+    cache = WorktreeCache(database or database_for(repo_root))
     mesh = observe(repo_root, mainline=mainline)
     return cache, mesh, cache.record(mesh)
 
@@ -606,6 +1383,11 @@ def record_now(repo_root: str | Path = ".", *, database: str | Path | None = Non
 __all__ = [
     "COLOUR_SLOTS", "FOREIGN_OCCUPANT", "LOW_CONTRAST_LIGHT", "SCHEMA_VERSION",
     "SHARED_OCCUPANCY", "UNATTRIBUTED", "UNSLOTTED", "Declaration", "Occupancy",
-    "Operation", "WorktreeCache", "WorktreeIdentity",
-    "default_database", "record_now", "stranded_buses",
+    "Operation", "RepositoryDatabaseAmbiguity", "RepositoryDatabaseUnavailable",
+    "RepositoryScopeCache",
+    "RepositoryScopeUnavailable",
+    "WorktreeCache",
+    "WorktreeIdentity",
+    "database_for", "default_database", "record_now", "repository_context_id",
+    "repository_inception", "stranded_buses",
 ]

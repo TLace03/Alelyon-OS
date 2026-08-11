@@ -1,10 +1,10 @@
 {
   "category": "forgery",
-  "description": "ALE-COR-001's last residual (PLATFORM.md §3 item 4). The signer captures a batch, then OVERWRITES one stored value by a raw, uncertified write, and anchors the revised series to the leaf that covered it beforehand. Every earlier guard passes: the timestamp is still inside that capture, the Δ is still the one the log vouches for, and the batch's all-column value_digest is not something a holder of `close` could ever re-derive. The per-row value commitment is what refuses it — the leaf no longer commits the value now at that row, so it stops covering the row it used to vouch for.",
+  "description": "ALE-COR-001's last residual (PLATFORM.md \u00a73 item 4). The signer captures a batch, then OVERWRITES one stored value by a raw, uncertified write, and anchors the revised series to the leaf that covered it beforehand. Every earlier guard passes: the timestamp is still inside that capture, the \u0394 is still the one the log vouches for, and the batch's all-column value_digest is not something a holder of `close` could ever re-derive. The per-row value commitment is what refuses it \u2014 the leaf no longer commits the value now at that row, so it stops covering the row it used to vouch for.",
   "envelope": {
     "assumptions": [
       "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
-      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms"
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms"
     ],
     "created": 1000.0,
     "error_budget": {
@@ -12,8 +12,8 @@
       "provider": {
         "inputs": {},
         "origins": {},
-        "reason": "no data layer supplied — nothing was asked about the sources; NOT a finding that they agree",
-        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "reason": "no data layer supplied \u2014 nothing was asked about the sources; NOT a finding that they agree",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
         "status": "unmeasured",
         "trust": "signer-attested"
       },

@@ -1,11 +1,11 @@
 {
   "category": "forgery",
-  "description": "The cycle-5j red-team forgery: a signer holding the key writes `\"delta\": 0.0` — a claim of EXACT storage — into a capture payload over data that is plainly nonzero, relinks the leaf so the chain still verifies, and ships a zero-width bound as transparency-anchored. The verifier holds its own copy of the data and rejects the claim on its own arithmetic.",
+  "description": "The cycle-5j red-team forgery: a signer holding the key writes `\"delta\": 0.0` \u2014 a claim of EXACT storage \u2014 into a capture payload over data that is plainly nonzero, relinks the leaf so the chain still verifies, and ships a zero-width bound as transparency-anchored. The verifier holds its own copy of the data and rejects the claim on its own arithmetic.",
   "envelope": {
     "assumptions": [
       "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
-      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms",
-      "every consumed input was stored EXACTLY (Δ = 0 on every row — e.g. the exact-cents monetary capture law), so the storage-quantization term is genuinely zero rather than merely small. This bounds STORAGE only: floating-point rounding in the computation itself (the division in a mean, say) is a compute-side error this certificate does not cover"
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms",
+      "every consumed input was stored EXACTLY (\u0394 = 0 on every row \u2014 e.g. the exact-cents monetary capture law), so the storage-quantization term is genuinely zero rather than merely small. This bounds STORAGE only: floating-point rounding in the computation itself (the division in a mean, say) is a compute-side error this certificate does not cover"
     ],
     "created": 1000.0,
     "error_budget": {
@@ -74,7 +74,7 @@
         "inputs": {},
         "origins": {},
         "reason": "this data layer publishes no origin catalogue, so the number of upstreams behind these inputs is unknown",
-        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
         "status": "unmeasured",
         "trust": "transparency-anchored"
       },

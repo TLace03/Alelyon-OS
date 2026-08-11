@@ -115,12 +115,11 @@ a declaration constrained by nothing.
 Privacy: this reads structure, never content
 --------------------------------------------
 A transcript is chat history, which `AGENTS.md` §9 names sensitive. The parser
-extracts three keys — `sessionId`, `cwd`, `timestamp` — and discards every other
-field without inspecting it, stopping as soon as it has what it needs. Message
-content is never read into memory beyond the line buffer that carried it, never
-returned, and never logged. That is redaction by construction rather than after
-printing, per §4 rule 8, and `test_session_records.py` asserts it by feeding the
-parser a record whose content would be recognisable in any output.
+extracts four top-level keys — `type`, `sessionId`, `cwd`, `timestamp` — and
+stops before a later object or array can lead into message content. Only those
+bounded structural scalar tokens reach JSON decoding; content is never returned
+or logged. That is redaction by construction rather than after printing, per
+§4 rule 8, and `test_session_records.py` asserts it with decoder canaries.
 
 Read-only and side-effect free: opens files for reading, writes nothing, and
 creates nothing.
@@ -128,7 +127,9 @@ creates nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -146,7 +147,22 @@ DEFAULT_RECORDS_ROOT = Path.home() / ".claude" / "projects"
 
 #: Only these keys are read out of a transcript record. Everything else is
 #: discarded unexamined — see the privacy note above.
-_WANTED_KEYS = ("sessionId", "cwd", "timestamp")
+_WANTED_KEYS = ("type", "sessionId", "cwd", "timestamp")
+_WANTED_KEY_SET = frozenset(_WANTED_KEYS)
+
+#: What a record must carry to be USABLE, as opposed to what this reader would
+#: like to have. The two are not the same set, and conflating them is what made
+#: a record without a `timestamp` weigh exactly as much as no record at all.
+#:
+#: `timestamp` is the repository-incarnation privacy boundary for the
+#: content-bearing activity reader. Identity does not need it: `_records_in_dir`
+#: requires only `cwd`, takes the session id from the filename, and already
+#: passes `head.get("timestamp")` through `_timestamp_seconds`, which answers
+#: None for an absent one. So an absent timestamp was always modelled downstream
+#: as NOT ESTABLISHED -- it was only the parser that treated it as disqualifying,
+#: and it discarded the whole record rather than the one field it was missing.
+_REQUIRED_KEYS = frozenset({"type", "sessionId", "cwd"})
+_STRUCTURAL_VALUE_BYTES = 8192
 
 #: How far into a transcript to look for the `cwd` field before giving up.
 #:
@@ -226,6 +242,10 @@ class SessionRecord:
     #: Empty for a record built by a caller rather than read off disk, which is
     #: why the filing rule never fires on one.
     filed_under: str = ""
+    #: Original transcript timestamp, used only to refuse records older than a
+    #: selected repository incarnation. It is structural metadata from the
+    #: bounded head read, never message content.
+    original_at: int | None = None
 
     @property
     def moved(self) -> bool:
@@ -278,6 +298,40 @@ def project_slug(directory: str | Path) -> str:
     return _NON_ALNUM.sub("-", text)
 
 
+def project_slug_spellings(directory: str | Path) -> tuple[str, ...]:
+    """Finite folder spellings Claude Code may use for one directory.
+
+    The harness preserves drive-letter case and sometimes records a literal
+    spelling after the path has disappeared.  Those alternatives are derived
+    from the selected directory itself; callers never need to enumerate the
+    projects store to discover them.
+    """
+    raw = str(directory)
+    candidates = [project_slug(directory), _NON_ALNUM.sub("-", raw)]
+    if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":
+        for drive in (raw[0].lower(), raw[0].upper()):
+            candidates.append(_NON_ALNUM.sub("-", drive + raw[1:]))
+    return tuple(dict.fromkeys(value for value in candidates if value))
+
+
+def _project_directories(root: Path, directory: str | Path) -> tuple[Path, ...]:
+    """Existing directly-addressed project folders for ``directory``."""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for slug in project_slug_spellings(directory):
+        candidate = root / slug
+        try:
+            if not candidate.is_dir():
+                continue
+            key = os.path.normcase(str(candidate.resolve(strict=False)))
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            out.append(candidate)
+    return tuple(out)
+
+
 def filed_under(directory: str | Path, project: str) -> bool:
     """Whether `project` is the folder name the harness would file `directory` in.
 
@@ -310,45 +364,276 @@ def same_directory(left: str, right: str) -> bool:
     """
     if not left or not right:
         return False
+    original_left, original_right = str(left), str(right)
     try:
         lhs, rhs = Path(left).resolve(), Path(right).resolve()
     except OSError:
         lhs, rhs = Path(left), Path(right)
     left_text, right_text = str(lhs), str(rhs)
-    if os.name == "nt" or left_text[:1].isalpha() and left_text[1:2] == ":":
-        return left_text.casefold() == right_text.casefold()
+    windows_like = (os.name == "nt" or "\\" in original_left
+                    or "\\" in original_right
+                    or (original_left[:1].isalpha()
+                        and original_left[1:2] == ":")
+                    or (original_right[:1].isalpha()
+                        and original_right[1:2] == ":"))
+    if windows_like:
+        def normalized(value: str) -> str:
+            text = value.replace("/", "\\")
+            folded = text.casefold()
+            if folded.startswith("\\\\?\\unc\\"):
+                text = "\\\\" + text[8:]
+            elif folded.startswith("\\\\?\\"):
+                text = text[4:]
+            return ntpath.normpath(text).casefold()
+
+        return normalized(left_text) == normalized(right_text)
     return left_text == right_text
+
+
+def directory_key(value: object) -> str:
+    """Closed normalized equality key matching :func:`same_directory`."""
+    text = str(value or "")
+    if not text or "\x00" in text or "\n" in text or "\r" in text:
+        return ""
+    try:
+        resolved = str(Path(text).resolve(strict=False))
+    except (OSError, ValueError):
+        resolved = text
+    windows_like = (os.name == "nt" or "\\" in text
+                    or (text[:1].isalpha() and text[1:2] == ":"))
+    if not windows_like:
+        return resolved
+    normalized = resolved.replace("/", "\\")
+    folded = normalized.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        normalized = "\\\\" + normalized[8:]
+    elif folded.startswith("\\\\?\\"):
+        normalized = normalized[4:]
+    return ntpath.normpath(normalized).casefold()
+
+
+def _string_end(raw: bytes, start: int) -> int | None:
+    if start >= len(raw) or raw[start] != ord('"'):
+        return None
+    escaped = False
+    for position in range(start + 1, len(raw)):
+        byte = raw[position]
+        if escaped:
+            escaped = False
+        elif byte == ord("\\"):
+            escaped = True
+        elif byte == ord('"'):
+            return position + 1
+    return None
+
+
+def _space(raw: bytes, position: int) -> int:
+    while position < len(raw) and raw[position] in b" \t\r\n":
+        position += 1
+    return position
+
+
+def _scalar_end(raw: bytes, start: int) -> int | None:
+    if start >= len(raw) or raw[start] in b"{[":
+        return None
+    if raw[start] == ord('"'):
+        return _string_end(raw, start)
+    position = start
+    while position < len(raw) and raw[position] not in b",}":
+        position += 1
+    return position if position > start else None
+
+
+#: The only bytes that can change composite-skipping state. Everything else in
+#: a transcript — which is almost all of it, since the composite being skipped
+#: is usually a message body — is stepped over inside `re`, in C, rather than
+#: one byte at a time in Python. A message composite here runs to 145 KB.
+_STRUCTURAL_BYTES = re.compile(rb'["\\{}\[\]]')
+
+
+def _composite_end(raw: bytes, start: int) -> int | None:
+    """End of one JSON object/array, found LEXICALLY without decoding it.
+
+    This is what lets an unrelated composite be stepped over rather than
+    traversed. Nothing inside it is decoded, kept, or looked at for structural
+    fields: the scan counts brackets, respecting strings and their escapes, and
+    returns the offset just past the close. A record whose composite never
+    closes on this line is refused, because guessing where it ended is how a
+    parser starts reading content it was told not to read.
+
+    It jumps between structurally significant bytes instead of visiting each
+    one. A naive per-byte loop made the head read 5.6x slower than the
+    `json.loads` reader this parser replaced, and put ~49% of a 2s poll inside
+    this function, because the composite it skips is the message body and the
+    body is nearly all ordinary text. Same answer, same refusals; the states
+    that matter are only ever reached at one of six bytes.
+    """
+    if start >= len(raw) or raw[start] not in b"{[":
+        return None
+    stack: list[int] = []
+    quoted = False
+    escaped_at = -1
+    pairs = {ord("}"): ord("{"), ord("]"): ord("[")}
+    for match in _STRUCTURAL_BYTES.finditer(raw, start):
+        position = match.start()
+        if position == escaped_at:
+            # The byte after a backslash inside a string is literal, whatever
+            # it is. Skipping it here is what keeps \\" from closing a string
+            # and \\\\ from escaping the quote that follows it.
+            continue
+        byte = raw[position]
+        if quoted:
+            if byte == ord("\\"):
+                escaped_at = position + 1
+            elif byte == ord('"'):
+                quoted = False
+            continue
+        if byte == ord('"'):
+            quoted = True
+        elif byte in b"{[":
+            stack.append(byte)
+        elif byte in b"}]":
+            if not stack or stack[-1] != pairs.get(byte):
+                return None
+            stack.pop()
+            if not stack:
+                return position + 1
+        # A backslash OUTSIDE a string is an ordinary byte and means nothing
+        # here. It is matched only because the same pattern has to catch it
+        # inside one; falling through to the close-bracket branch would refuse
+        # records this has always accepted. A fuzz differential against the
+        # per-byte reference caught exactly that, on inputs like b'{\\}'.
+    return None
+
+
+def _decode_scalar(raw: bytes) -> object | None:
+    if len(raw) > _STRUCTURAL_VALUE_BYTES:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _structural_record(raw: bytes) -> dict:
+    """Extract one record's top-level structural prefix only.
+
+    An object/array belonging to an unrelated key is STEPPED OVER lexically by
+    `_composite_end` and never traversed: no byte inside it is decoded or
+    examined for structural fields. The privacy property that motivated this
+    parser is therefore intact — message content is still never read — while
+    the four wanted keys remain findable wherever the writer put them.
+
+    Refusing such a row outright, which is what this did before, made the
+    parser depend on key ORDER. The harness serialises `message` at key #4 and
+    `cwd` at #12, so every content-bearing record was refused and `_read_head`
+    returned {} for every transcript on disk. A composite belonging to an
+    unrelated key is not evidence about the record; it is a field this reader
+    has no business in, and stepping over it is the whole fix.
+
+    A composite that does not close on this line is still refused: guessing
+    where it ended is how a parser starts reading what it was told not to.
+
+    Completeness is judged against `_REQUIRED_KEYS`, not `_WANTED_KEYS`. The
+    early return below still fires only when all four are in hand, because that
+    is an optimisation — there is nothing left to look for — but reaching the
+    end of a record with three of them is a record, not a failure. Demanding
+    the fourth discarded any row the writer left a `timestamp` off, and it
+    discarded the whole row rather than the field, so a session that was
+    perfectly identifiable became invisible to `candidates()` and every caller
+    downstream of it refused for want of an id it actually had.
+    """
+    position = _space(raw, 0)
+    if position >= len(raw) or raw[position] != ord("{"):
+        return {}
+    position += 1
+    found: dict = {}
+    while position < len(raw):
+        position = _space(raw, position)
+        if position < len(raw) and raw[position] == ord("}"):
+            return found if _REQUIRED_KEYS.issubset(found) else {}
+        key_end = _string_end(raw, position)
+        if key_end is None or key_end - position > 256:
+            return {}
+        key = _decode_scalar(raw[position:key_end])
+        if not isinstance(key, str):
+            return {}
+        position = _space(raw, key_end)
+        if position >= len(raw) or raw[position] != ord(":"):
+            return {}
+        position = _space(raw, position + 1)
+        if key not in _WANTED_KEY_SET and position < len(raw) \
+                and raw[position] in b"{[":
+            # Not ours: step over it without decoding a byte of it. A wanted
+            # key holding a composite is still refused below, because a `cwd`
+            # that is an object is malformed rather than merely uninteresting.
+            value_end = _composite_end(raw, position)
+        else:
+            value_end = _scalar_end(raw, position)
+        if value_end is None:
+            return {}
+        if key in _WANTED_KEY_SET and key not in found:
+            value = _decode_scalar(raw[position:value_end])
+            if value is None:
+                return {}
+            found[key] = value
+            if _WANTED_KEY_SET.issubset(found):
+                return found
+        position = _space(raw, value_end)
+        if position >= len(raw):
+            return {}
+        if raw[position] == ord(","):
+            position += 1
+            continue
+        if raw[position] == ord("}"):
+            return found if _REQUIRED_KEYS.issubset(found) else {}
+        return {}
+    return {}
 
 
 def _read_head(path: Path) -> dict:
     """The structural fields of a transcript, from a bounded head read.
 
-    Returns only `_WANTED_KEYS`. Every other field of every record is discarded
-    without being examined, and the read stops as soon as a `cwd` is found.
+    Returns only `_WANTED_KEYS`. The read stops once all four structural keys
+    are found in one top-level prefix, before any later composite value. The
+    timestamp is the repository-incarnation privacy boundary used by the
+    content-bearing activity reader.
     """
-    found: dict = {}
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for index, line in enumerate(handle):
-                if index >= MAX_HEAD_LINES:
+        with path.open("rb") as handle:
+            for _index in range(MAX_HEAD_LINES):
+                line = handle.readline(MAX_LINE_BYTES + 1)
+                if not line:
                     break
                 if len(line) > MAX_LINE_BYTES:
+                    while line and not line.endswith(b"\n"):
+                        line = handle.readline(MAX_LINE_BYTES + 1)
                     continue
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                for key in _WANTED_KEYS:
-                    value = record.get(key)
-                    if value and key not in found:
-                        found[key] = value
-                if "cwd" in found:
-                    break
+                found = _structural_record(line)
+                if found:
+                    return found
     except OSError:
         return {}
-    return found
+    return {}
+
+
+def _timestamp_seconds(value) -> int | None:
+    """Parse one structural transcript timestamp without coercive guessing."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value >= 0 else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(
+            raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
 
 
 def _records_in_dir(directory: Path) -> list[SessionRecord]:
@@ -382,6 +667,7 @@ def _records_in_dir(directory: Path) -> list[SessionRecord]:
             evidence=("Claude Code transcript index; the harness wrote the "
                       "filename and the cwd field, not the agent" + note),
             filed_under=directory.name,
+            original_at=_timestamp_seconds(head.get("timestamp")),
         ))
     return out
 
@@ -421,32 +707,35 @@ def _member(record: SessionRecord, target: str) -> tuple[bool, str]:
 def sessions_in(directory: str | Path, *,
                 records_root: str | Path | None = None,
                 active_within_minutes: float | None = DEFAULT_ACTIVE_MINUTES,
-                now: float | None = None) -> tuple[SessionRecord, ...]:
+                now: float | None = None,
+                not_before: int | None = None,
+                exact_cwd: bool = False) -> tuple[SessionRecord, ...]:
     """Sessions whose harness record points at `directory`, most recent first.
 
-    Scans every project directory rather than computing the one whose name
-    encodes this path. The encoding replaces every non-alphanumeric character
-    with a dash, which is lossy — `\\.claude\\` and `--claude-` are
-    indistinguishable afterwards — and it preserves the drive letter's case, so
-    one directory can own two differently-named project folders. Reading the
-    `cwd` each transcript states avoids reconstructing a name that was never
-    invertible.
+    Directly probes the finite resolved, literal, and drive-case encodings of
+    this selected directory. The encoding is lossy, so transcripts within an
+    addressed collision folder are still resolved by their exact structural
+    `cwd`; unrelated project folders are never enumerated or opened.
 
     `active_within_minutes=None` returns every session ever recorded for the
     directory rather than only the live ones.
     """
     root = Path(records_root) if records_root is not None else DEFAULT_RECORDS_ROOT
     target = str(directory)
-    try:
-        project_dirs = [d for d in sorted(root.iterdir()) if d.is_dir()]
-    except OSError:
-        return ()
+    project_dirs = _project_directories(root, target)
 
     matches: list[SessionRecord] = []
     for project in project_dirs:
         for record in _records_in_dir(project):
-            counts, rule = _member(record, target)
+            if exact_cwd:
+                counts, rule = same_directory(record.cwd, target), record.evidence
+            else:
+                counts, rule = _member(record, target)
             if not counts:
+                continue
+            if not_before is not None and (
+                    record.original_at is None
+                    or record.original_at < int(not_before)):
                 continue
             if active_within_minutes is not None and not record.active(
                     within_minutes=active_within_minutes, now=now):
@@ -466,7 +755,9 @@ def sessions_in(directory: str | Path, *,
 def identify(directory: str | Path, *,
              records_root: str | Path | None = None,
              active_within_minutes: float | None = DEFAULT_ACTIVE_MINUTES,
-             now: float | None = None) -> tuple[str, str]:
+             now: float | None = None,
+             not_before: int | None = None,
+             exact_cwd: bool = False) -> tuple[str, str]:
     """(session, evidence) for a directory, or UNATTRIBUTED and why not.
 
     Derives an identity only where exactly one session is live in the directory.
@@ -474,7 +765,8 @@ def identify(directory: str | Path, *,
     exists to make visible — so the answer names both and derives neither.
     """
     found = sessions_in(directory, records_root=records_root,
-                        active_within_minutes=active_within_minutes, now=now)
+                        active_within_minutes=active_within_minutes, now=now,
+                        not_before=not_before, exact_cwd=exact_cwd)
     if not found:
         return UNATTRIBUTED, ("no Claude Code session record points at this "
                               "directory; another tool leaves no record here")
@@ -491,7 +783,9 @@ def identify(directory: str | Path, *,
 def candidates(directory: str | Path, *,
                records_root: str | Path | None = None,
                active_within_minutes: float | None = DEFAULT_ACTIVE_MINUTES,
-               now: float | None = None) -> tuple[str, ...]:
+               now: float | None = None,
+               not_before: int | None = None,
+               exact_cwd: bool = False) -> tuple[str, ...]:
     """The session ids a declaration for this directory may select from.
 
     A caller that must declare an identity should validate it against this
@@ -501,4 +795,5 @@ def candidates(directory: str | Path, *,
     """
     return tuple(record.session_id for record in sessions_in(
         directory, records_root=records_root,
-        active_within_minutes=active_within_minutes, now=now))
+        active_within_minutes=active_within_minutes, now=now,
+        not_before=not_before, exact_cwd=exact_cwd))

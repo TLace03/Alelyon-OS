@@ -269,6 +269,64 @@ class TensorRecord:
         return int(Fraction(self.parameters) * bits / 8)
 
 
+def _active_path_gap(
+    tensors: Sequence[TensorRecord],
+    used: int | None,
+    total: int | None,
+) -> str | None:
+    """Why routed active-parameter arithmetic is unavailable, if it is.
+
+    GGML expert-bank tensors store the expert slices on their final axis.  A
+    declared count is therefore not enough by itself: every routed tensor must
+    expose an axis of exactly that length before dividing its parameters by the
+    declaration.  Otherwise a contradictory payload would turn into an exact-
+    looking number even though no partition in the inventory supports it.
+    """
+    routed = tuple(t for t in tensors if _is_routed_expert(t.name))
+    if not routed:
+        if used is not None or total is not None:
+            return (
+                "the runtime declares routing metadata "
+                f"(expert_count={total}, expert_used_count={used}), but its "
+                "tensor inventory contains no recognized routed _exps expert "
+                "bank. Stored inventory counts remain measured; the active-"
+                "parameter figure is UNMEASURED."
+            )
+        return None
+    if used is None or total is None:
+        return (
+            "this model routes part of its feed-forward stack, and the runtime "
+            "does not declare a complete expert_count/expert_used_count pair "
+            f"(expert_count={total}, expert_used_count={used}). Parameter share "
+            "is exact; the active-parameter figure is UNMEASURED and the "
+            "totals here must not be read as the cost of one token."
+        )
+    if used <= 0 or total <= 0:
+        return (
+            f"the runtime declares non-positive routing counts "
+            f"(expert_count={total}, expert_used_count={used}). Parameter share "
+            "is exact; the active-parameter figure is UNMEASURED."
+        )
+    if used > total:
+        return (
+            f"the runtime declares expert_used_count={used}, greater than "
+            f"expert_count={total}. Parameter share is exact; the active-"
+            "parameter figure is UNMEASURED."
+        )
+    mismatched = sum(
+        1 for tensor in routed
+        if not tensor.shape or tensor.shape[-1] != total
+    )
+    if mismatched:
+        return (
+            f"the runtime declares expert_count={total}, but {mismatched} of "
+            f"{len(routed)} routed tensor shape(s) do not end in an expert axis "
+            f"of length {total}. Stored parameter counts still follow the "
+            "inventory; the active-parameter figure is UNMEASURED."
+        )
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class Cell:
     """One ``(block, module)`` cell of the canonical space.
@@ -294,11 +352,30 @@ class Cell:
 
         None is UNMEASURED: a routed cell whose runtime declared no routing is
         not the same as a dense cell, and returning ``parameters`` for it would
-        report an idle expert bank as fully active.
+        report an idle expert bank as fully active. A routed pool that does not
+        divide evenly by the declared expert count is likewise unavailable.
+
+        CALLERS MUST CHECK ``ModelMorphometry.active_path_gap`` FIRST. A cell
+        sees only its own tensors, so it cannot tell a genuinely dense cell from
+        one whose model declared routing that the inventory never corroborated:
+        both have ``routed_parameters == 0`` and both return ``parameters``
+        here, which is right for the first and a fabrication for the second.
+        The model-level fact that separates them is not reachable from a cell,
+        so this method cannot defend itself and does not pretend to. That is
+        why ``voxel_field`` blanks every cell when the gap is named rather than
+        asking each one, and why a new consumer that reads cells directly has
+        to repeat that check rather than inherit it.
         """
         if not self.routed_parameters:
             return self.parameters
-        if not used or not total or used > total:
+        if (
+            used is None
+            or total is None
+            or used <= 0
+            or total <= 0
+            or used > total
+            or self.routed_parameters % total != 0
+        ):
             return None
         dense = self.parameters - self.routed_parameters
         return dense + (self.routed_parameters * used) // total
@@ -360,6 +437,10 @@ class ModelMorphometry:
     #: required before any active-parameter figure is produced.
     expert_count: int | None = None
     expert_used_count: int | None = None
+    #: Present only when a routing key existed but could not be parsed. Keeping
+    #: this state prevents malformed metadata from disappearing into the dense
+    #: path when its parsed value is None.
+    routing_metadata_error: str = ""
     tensors: tuple[TensorRecord, ...] = ()
     cells: tuple[Cell, ...] = ()
     gaps: tuple[str, ...] = ()
@@ -417,18 +498,26 @@ class ModelMorphometry:
         routed = self.routed_expert_parameters
         if routed:
             return True
+        if self.active_path_gap is not None:
+            return True
         return bool(self.expert_count and self.expert_count > 1)
 
     @property
     def routed_expert_parameters(self) -> int | None:
         """Parameters held in routed expert stacks.
 
-        None when no inventory exists to identify them -- distinct from 0, which
-        is the true answer for a dense model.
+        None when no inventory exists, or when routing metadata says an expert
+        bank should exist but the inventory does not identify one. That is
+        distinct from 0, which is the true answer for a dense model.
         """
         if not self.tensors:
             return None
-        return sum(t.parameters for t in self.tensors if _is_routed_expert(t.name))
+        routed = sum(
+            t.parameters for t in self.tensors if _is_routed_expert(t.name)
+        )
+        if not routed and self.active_path_gap is not None:
+            return None
+        return routed
 
     @property
     def always_active_parameters(self) -> int | None:
@@ -437,7 +526,20 @@ class ModelMorphometry:
         routed = self.routed_expert_parameters
         if routed is None:
             return None
+        if not routed and self.active_path_gap is not None:
+            return None
         return self.counted_parameters - routed
+
+    @property
+    def active_path_gap(self) -> str | None:
+        """The named reason routed active arithmetic cannot be established."""
+        if self.routing_metadata_error:
+            return self.routing_metadata_error
+        return _active_path_gap(
+            self.tensors,
+            self.expert_used_count,
+            self.expert_count,
+        )
 
     @property
     def active_parameters(self) -> int | None:
@@ -449,17 +551,18 @@ class ModelMorphometry:
         a total here would report an idle expert bank as fully active.
 
         The routed term is an average over tokens rather than a property of any
-        one of them; it is exact whenever the stack divides evenly across
-        experts, which is what a per-expert slice of one tensor means.
+        one of them. It is produced only after every routed tensor's final GGML
+        axis agrees with the declared expert count, establishing equal slices.
         """
         routed = self.routed_expert_parameters
         if routed is None:
             return None
+        if self.active_path_gap is not None:
+            return None
         if not routed:
             return self.counted_parameters
         used, total = self.expert_used_count, self.expert_count
-        if not used or not total or used > total:
-            return None
+        assert used is not None and total is not None
         return (self.counted_parameters - routed) + (routed * used) // total
 
     @property
@@ -581,6 +684,33 @@ def _arch_key(info: Mapping[str, object], architecture: str, suffix: str):
         if isinstance(key, str) and key.endswith(tail) and not key.startswith("general."):
             return value
     return None
+
+
+def _routing_declaration(
+    info: Mapping[str, object],
+    architecture: str,
+    suffix: str,
+) -> tuple[bool, object]:
+    """Return ``(present, value)`` without erasing an unusable declaration.
+
+    `_arch_key` intentionally returns only a value. Routing needs the stronger
+    distinction because an absent key can describe a dense model, while a key
+    present with ``None`` or a non-integer value is malformed evidence that must
+    not silently select dense fallback arithmetic.
+    """
+    if architecture:
+        direct = f"{architecture}.{suffix}"
+        if direct in info:
+            return True, info[direct]
+    tail = "." + suffix
+    for key, value in info.items():
+        if (
+            isinstance(key, str)
+            and key.endswith(tail)
+            and not key.startswith("general.")
+        ):
+            return True, value
+    return False, None
 
 
 def _cells_from_tensors(tensors: Sequence[TensorRecord]) -> tuple[Cell, ...]:
@@ -789,8 +919,27 @@ def analyze(payload: Mapping[str, object], *, model: str = "") -> ModelMorphomet
     # Read on BOTH paths. These used to be consulted only where the dense
     # fallback refuses, so a runtime that published an inventory had its routing
     # measured cell by cell and then described as if every expert ran.
-    experts = _int(_arch_key(info, architecture, "expert_count"))
-    experts_used = _int(_arch_key(info, architecture, "expert_used_count"))
+    experts_present, experts_raw = _routing_declaration(
+        info, architecture, "expert_count")
+    experts_used_present, experts_used_raw = _routing_declaration(
+        info, architecture, "expert_used_count")
+    experts = _int(experts_raw)
+    experts_used = _int(experts_used_raw)
+    invalid_routing_fields = tuple(
+        field for field, present, parsed in (
+            ("expert_count", experts_present, experts),
+            ("expert_used_count", experts_used_present, experts_used),
+        )
+        if present and parsed is None
+    )
+    routing_metadata_error = ""
+    if invalid_routing_fields:
+        invalid_names = ", ".join(invalid_routing_fields)
+        routing_metadata_error = (
+            f"the runtime declares unusable routing metadata for {invalid_names}; "
+            "each value must be an integer. The expert partition is not "
+            "established, so the active-parameter figure is UNMEASURED."
+        )
 
     common = {
         "model": name,
@@ -803,6 +952,7 @@ def analyze(payload: Mapping[str, object], *, model: str = "") -> ModelMorphomet
         "block_count": blocks,
         "expert_count": experts,
         "expert_used_count": experts_used,
+        "routing_metadata_error": routing_metadata_error,
     }
 
     tensors, gaps = parse_tensor_inventory(payload)
@@ -821,16 +971,13 @@ def analyze(payload: Mapping[str, object], *, model: str = "") -> ModelMorphomet
                 f"the runtime declares {blocks} blocks; the inventory contains "
                 f"{len(observed_blocks)} — the breakdown follows the inventory",
             )
-        # Routed weights the runtime did not explain how it routes. The
-        # breakdown below is still exact about storage; what cannot be produced
-        # is the active-path figure, and that is said rather than defaulted.
-        if any(c.routed_parameters for c in cells) and not (experts and experts_used):
-            gaps = gaps + (
-                "this model routes part of its feed-forward stack, and the "
-                "runtime declares no expert_count/expert_used_count. Parameter "
-                "share is exact; the active-parameter figure is UNMEASURED and "
-                "the totals here must not be read as the cost of one token.",
-            )
+        # The breakdown remains exact about stored tensors even when the
+        # runtime's routing declarations are absent or contradict their shapes.
+        # Only the active path is withheld, and the reason travels with it.
+        routing_gap = _active_path_gap(tensors, experts_used, experts)
+        for gap in (routing_metadata_error, routing_gap):
+            if gap and gap not in gaps:
+                gaps = gaps + (gap,)
         return ModelMorphometry(
             source=SOURCE_TENSOR_INVENTORY,
             tensors=tensors,
@@ -841,15 +988,18 @@ def analyze(payload: Mapping[str, object], *, model: str = "") -> ModelMorphomet
 
     # No inventory. Fall back to arithmetic over declared dimensions — but only
     # for the shape that arithmetic describes.
-    if experts:
+    if experts_present or experts_used_present:
+        routing_refusal = routing_metadata_error or (
+            "this model declares routing metadata "
+            f"(expert_count={experts}, expert_used_count={experts_used}). The "
+            "dense decoder arithmetic below could understate it, so no "
+            "breakdown is produced. A runtime that publishes a tensor "
+            "inventory can establish the expert bank."
+        )
         return ModelMorphometry(
             source=SOURCE_DECLARED_ARCHITECTURE,
             refusal=REFUSED_MIXTURE_OF_EXPERTS,
-            gaps=gaps + (
-                f"this model declares {experts} experts per block. The dense "
-                f"decoder arithmetic below would understate it, so no breakdown "
-                f"is produced. A runtime that publishes a tensor inventory "
-                f"measures it exactly.",),
+            gaps=gaps + (routing_refusal,),
             **common)
     if not blocks:
         return ModelMorphometry(
@@ -1075,9 +1225,9 @@ class Voxel:
     intensity: float
     bits_per_weight: float | None
     #: Parameters one token reaches here, and that as a share of the busiest
-    #: cell's active count. Both None when the model routes and the runtime did
-    #: not say how — a routed cell drawn at its stored size would render an idle
-    #: expert bank as the brightest thing in the volume.
+    #: cell's active count. Both None when the model routes and its declarations
+    #: are absent or inconsistent — a routed cell drawn at its stored size would
+    #: render an idle expert bank as the brightest thing in the volume.
     active_parameters: int | None = None
     active_intensity: float | None = None
 
@@ -1139,7 +1289,10 @@ def voxel_field(morph: ModelMorphometry) -> VoxelField:
     # One cell that cannot state its active count sinks the whole mode: a volume
     # where some cells are drawn by what a token reaches and others by what is
     # stored is a picture of neither.
-    active_by_cell = [cell.active_parameters(used, total) for cell in cells]
+    if morph.active_path_gap is None:
+        active_by_cell = [cell.active_parameters(used, total) for cell in cells]
+    else:
+        active_by_cell = [None for _cell in cells]
     active_known = all(value is not None for value in active_by_cell)
     max_active = max(active_by_cell) if active_known else None  # type: ignore[type-var]
     voxels: list[Voxel] = []

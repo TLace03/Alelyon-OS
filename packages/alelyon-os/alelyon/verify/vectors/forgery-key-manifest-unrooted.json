@@ -1,10 +1,10 @@
 {
   "category": "forgery",
-  "description": "A key manifest supplied with no pinned root. Refused rather than half-checked: a succession chain verified against nothing is a set of keys vouching for each other, which an attacker generates wholesale — the same self-signing problem the STH and co-signature checks already refuse.",
+  "description": "A key manifest supplied with no pinned root. Refused rather than half-checked: a succession chain verified against nothing is a set of keys vouching for each other, which an attacker generates wholesale \u2014 the same self-signing problem the STH and co-signature checks already refuse.",
   "envelope": {
     "assumptions": [
       "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
-      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms"
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms"
     ],
     "created": 1000.0,
     "error_budget": {
@@ -73,7 +73,7 @@
         "inputs": {},
         "origins": {},
         "reason": "this data layer publishes no origin catalogue, so the number of upstreams behind these inputs is unknown",
-        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
         "status": "unmeasured",
         "trust": "transparency-anchored"
       },

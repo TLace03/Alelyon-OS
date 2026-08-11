@@ -68,8 +68,9 @@ does it, and current activity is by definition at the end.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,11 +78,22 @@ import re
 import time
 from typing import NamedTuple
 
+from alelyon.runtime.common import worktree_cache as WC
 from alelyon.runtime.common.session_records import (
-    DEFAULT_RECORDS_ROOT, MAX_LINE_BYTES, UNATTRIBUTED, same_directory,
+    DEFAULT_RECORDS_ROOT, MAX_LINE_BYTES, UNATTRIBUTED,
+    same_directory, _project_directories,
+    _read_head as _read_structural_head,
 )
 
 ACTIVITY_SCHEMA = "alelyon.session-activity/0.1"
+
+#: Provider identity is structural and stays separate from the model name. A
+#: model label alone cannot establish which API or harness produced a turn,
+#: and two providers may legitimately expose the same model alias.
+PROVIDER_ANTHROPIC = "anthropic"
+PROVIDER_OPENAI = "openai"
+SOURCE_CLAUDE_CODE = "claude-code"
+SOURCE_CODEX = "codex"
 
 #: How much of one assistant turn is kept. Enough to read the point of a
 #: paragraph, far short of the transcript. The cap is the "minimum necessary"
@@ -142,8 +154,15 @@ LIMITS: tuple[str, ...] = (
     "An agent that read a file it did not edit appears to be working on it, and "
     "an edit made through a shell command this cannot parse does not appear at "
     "all.",
-    "This is Claude Code's convention alone. A fleet run by another vendor's "
-    "tool writes nothing here and is absent rather than reported as empty.",
+    "This adapter reads Claude Code's convention alone. Provider-neutral "
+    "callers may join other structural adapters beside it; an unadapted tool "
+    "is absent rather than reported as empty.",
+    "A requested project is prefiltered by Claude Code's lossy filing slug and "
+    "then checked by exact recorded cwd. A rare slug collision can make an "
+    "unrelated transcript get opened, but it is not returned in the reading.",
+    "Claude Code records used here name models but do not establish the model "
+    "provider. Their source is Claude Code and their provider remains "
+    "UNATTRIBUTED rather than inferred from a model-shaped string.",
     "Tool RESULTS are never read, so what an agent was told back - including "
     "whether its command failed - is not visible here. Only what it did.",
     "Token counts are the harness's own usage figures for turns this pass "
@@ -202,10 +221,20 @@ class Turn:
     #: How many of those carried text after redaction. Never larger than
     #: `thinking_blocks`; the difference is what was withheld.
     thinking_readable: int = 0
+    #: The provider recorded by the source adapter. Claude transcripts do not
+    #: carry a provider field, so their provider stays unattributed and their
+    #: `source` carries the separate Claude Code identity. A model-shaped name
+    #: is not enough evidence to invent a provider.
+    provider: str = ""
+    source: str = SOURCE_CLAUDE_CODE
 
     @property
     def has_content(self) -> bool:
         return bool(self.text or self.thinking)
+
+    @property
+    def model_label(self) -> str:
+        return provider_model_label(self.provider, self.model)
 
 
 @dataclass(frozen=True)
@@ -310,10 +339,29 @@ class AgentRun:
     #: out when something reads the transcript back.
     cwd: str = ""
     branch: str = ""
+    provider: str = ""
+    #: False means this source established the run's identity/model but could
+    #: not separate input from output. Zero tokens is then not presented as a
+    #: measured zero.
+    usage_measured: bool = True
+    source: str = SOURCE_CLAUDE_CODE
+    #: Whether cumulative tokens can be assigned to `provider`/`model`, not
+    #: merely whether those current identity fields are known. A source may
+    #: expose today's model and a lifetime token total without proving that the
+    #: entire total was spent on that identity.
+    usage_attribution_measured: bool = True
+    #: Whether ``turns`` is an observed response count. Aggregate-only sources
+    #: can measure tokens without exposing a denominator; zero must then remain
+    #: unknown rather than being presented as a measured zero.
+    turns_measured: bool = True
 
     @property
     def model(self) -> str:
         return self.models[0] if self.models else UNATTRIBUTED
+
+    @property
+    def model_label(self) -> str:
+        return provider_model_label(self.provider, self.model)
 
     @property
     def repo_files(self) -> tuple[str, ...]:
@@ -386,8 +434,23 @@ class Fleet:
         return tuple(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
     @property
+    def provider_models(self) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for agent in self.agents:
+            key = agent.model_label
+            counts[key] = counts.get(key, 0) + 1
+        return tuple(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    @property
     def output_tokens(self) -> int:
-        return sum(a.output_tokens for a in self.agents)
+        return sum(a.output_tokens for a in self.agents if a.usage_measured)
+
+    @property
+    def usage_status(self) -> str:
+        measured = sum(agent.usage_measured for agent in self.agents)
+        if measured == len(self.agents):
+            return "MEASURED"
+        return "PARTIAL" if measured else "UNMEASURED"
 
     @property
     def label(self) -> str:
@@ -441,10 +504,21 @@ class SessionRun:
     #: most recent activity rather than an arbitrary window.
     tail_read: bool = True
     notes: tuple[str, ...] = ()
+    provider: str = ""
+    usage_measured: bool = True
+    source: str = SOURCE_CLAUDE_CODE
+    usage_attribution_measured: bool = True
+    #: Whether ``turns`` is an observed response count. Appended to preserve
+    #: the positional dataclass contract used by older callers.
+    turns_measured: bool = True
 
     @property
     def model(self) -> str:
         return self.models[0] if self.models else UNATTRIBUTED
+
+    @property
+    def model_label(self) -> str:
+        return provider_model_label(self.provider, self.model)
 
     @property
     def agents(self) -> tuple[AgentRun, ...]:
@@ -504,11 +578,40 @@ class Activity:
         return next((s for s in self.sessions if s.session_id == session_id), None)
 
     @property
+    def providers(self) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for session in self.sessions:
+            key = session.provider or UNATTRIBUTED
+            counts[key] = counts.get(key, 0) + 1
+            for agent in session.agents:
+                key = agent.provider or UNATTRIBUTED
+                counts[key] = counts.get(key, 0) + 1
+        return tuple(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    @property
+    def sources(self) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for session in self.sessions:
+            key = session.source or UNATTRIBUTED
+            counts[key] = counts.get(key, 0) + 1
+            for agent in session.agents:
+                key = agent.source or UNATTRIBUTED
+                counts[key] = counts.get(key, 0) + 1
+        return tuple(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    @property
     def headline(self) -> str:
         live = [s for s in self.sessions if s.active]
         return (f"{len(self.sessions)} session(s), {len(live)} active · "
                 f"{len(self.fleets)} fleet(s) · {len(self.agents)} agent(s), "
                 f"{len(self.running)} running")
+
+
+def provider_model_label(provider: str, model: str) -> str:
+    """A display label that cannot collapse equal aliases across providers."""
+    provider = str(provider or UNATTRIBUTED)
+    model = str(model or UNATTRIBUTED)
+    return f"{provider} / {model}"
 
 
 # ── parsing ──────────────────────────────────────────────────────────────────
@@ -523,6 +626,64 @@ def _stamp(value) -> int | None:
             text.replace("Z", "+00:00")).timestamp())
     except (ValueError, TypeError, OverflowError):
         return None
+
+
+class _TranscriptUsageRefused(ValueError):
+    """A usage field was not an exact non-negative integer."""
+
+
+class _TranscriptIdentityRefused(ValueError):
+    """Rows inside one transcript disagreed on structural run identity."""
+
+
+def _usage_count(value, field: str) -> int:
+    """Validate one harness usage scalar without lossy coercion."""
+    if value is None:
+        return 0
+    if type(value) is not int or value < 0:
+        raise _TranscriptUsageRefused(
+            f"{field} must be an exact non-negative integer")
+    return value
+
+
+def _usage_evidence(message: dict) \
+        -> tuple[int, int, bool, tuple[bool, int, int, int, int]]:
+    """Fold usage while retaining the complete evidence used by that fold.
+
+    Split Claude records for one response repeat usage. Optional cache fields
+    missing in one record and explicitly zero in another are equivalent, but a
+    changed component is conflicting evidence even when the folded headline
+    input happens to remain equal.
+    """
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0, False, (False, 0, 0, 0, 0)
+    raw_input_value = usage.get("input_tokens")
+    raw_output_value = usage.get("output_tokens")
+    measured = raw_input_value is not None and raw_output_value is not None
+    raw_input = _usage_count(raw_input_value, "input_tokens")
+    cache_read = _usage_count(
+        usage.get("cache_read_input_tokens"), "cache_read_input_tokens")
+    cache_creation = _usage_count(
+        usage.get("cache_creation_input_tokens"),
+        "cache_creation_input_tokens")
+    output_tokens = _usage_count(raw_output_value, "output_tokens")
+    input_tokens = raw_input + cache_read + cache_creation
+    signature = (measured, raw_input, cache_read, cache_creation, output_tokens)
+    return input_tokens, output_tokens, measured, signature
+
+
+def _usage_counts(message: dict) -> tuple[int, int, bool]:
+    """Return input, output, and whether both required counts were present.
+
+    A missing usage object or required scalar is an absence of measurement,
+    not evidence for zero. Optional cache components still default to zero;
+    any scalar that is present must retain the exact non-negative-integer
+    contract enforced by `_usage_count`.
+    """
+    input_tokens, output_tokens, measured, _signature = \
+        _usage_evidence(message)
+    return input_tokens, output_tokens, measured
 
 
 def _blocks(message: dict) -> tuple[str, str, list[str], list[str], int, int]:
@@ -848,6 +1009,11 @@ class _Accumulator:
     last_at: int | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    #: False once any assistant response lacks a usage object or either
+    #: required input/output scalar. Known partial counts remain available for
+    #: diagnosis, but downstream totals exclude the whole run rather than
+    #: presenting absence as a measured zero.
+    usage_measured: bool = True
     #: Thinking blocks over the WHOLE run, not only the `recent` window. The
     #: window is capped at `RECENT_TURNS`, so a total taken from it would
     #: under-report every run longer than that; these are accumulated per
@@ -864,6 +1030,17 @@ class _Accumulator:
     #: made several tool calls is written as several records, each carrying
     #: that ONE response's `usage` in full — see `_priced`.
     last_message_id: str = ""
+    #: Complete normalized usage evidence for ``last_message_id``. It is kept
+    #: so a split response completed by a later poll is checked before the new
+    #: record can mutate cumulative totals.
+    last_message_usage: tuple[bool, int, int, int, int] | None = None
+    last_message_model: str = ""
+    #: Every response id already admitted in this transcript. Consecutive rows
+    #: may share one id because Claude splits one response across tool blocks;
+    #: reuse after a different id is ambiguous and refuses the increment.
+    message_evidence: dict[
+        str, tuple[tuple[bool, int, int, int, int], str]
+    ] = field(default_factory=dict)
     #: The response the newest entry in `recent` belongs to. A later record of
     #: that same response merges into it instead of appending a second Turn.
     turn_of_message: str = ""
@@ -894,6 +1071,12 @@ class _Accumulator:
             return
         message = record.get("message")
         if not isinstance(message, dict):
+            if kind == _ROLE_ASSISTANT:
+                # The response envelope exists, but none of its required
+                # usage structure can be established. Preserve the structural
+                # run while preventing an absent measurement from reading as
+                # a measured zero. User and metadata rows carry no such claim.
+                self.usage_measured = False
             return
 
         model = str(message.get("model") or "")
@@ -907,13 +1090,10 @@ class _Accumulator:
             if not tools:
                 return
 
-        usage = message.get("usage")
-        input_tokens = output_tokens = 0
-        if isinstance(usage, dict):
-            input_tokens = int(usage.get("input_tokens") or 0) + int(
-                usage.get("cache_read_input_tokens") or 0) + int(
-                usage.get("cache_creation_input_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or 0)
+        (input_tokens, output_tokens, usage_measured,
+         usage_evidence) = _usage_evidence(message)
+        if kind == _ROLE_ASSISTANT and not usage_measured:
+            self.usage_measured = False
 
         # One model response that called three tools is written as three
         # records, and the harness stamps that response's whole `usage` on each
@@ -925,6 +1105,8 @@ class _Accumulator:
         message_id = str(message.get("id") or "")
         repeat = bool(message_id) and message_id == self.last_message_id
         self.last_message_id = message_id
+        self.last_message_usage = usage_evidence
+        self.last_message_model = model
         if not repeat:
             self.input_tokens += input_tokens
             self.output_tokens += output_tokens
@@ -1038,8 +1220,255 @@ class _Accumulator:
         return tuple(sorted(self.tools.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def _iter_records(path: Path, *, start: int = 0,
-                  tail_bytes: int | None = None) -> tuple[list, int]:
+def _prefix_fingerprint(path: Path, length: int | None, *,
+                        inode: int) -> tuple[int, int, bytes] | None:
+    """Stable identity probe for an append-only transcript.
+
+    The first pass fixes the prefix length. Later appends therefore leave the
+    digest unchanged, while a truncate/rewrite or atomic replacement resets the
+    accumulator before any new bytes are folded into old private excerpts.
+    """
+    try:
+        size = path.stat().st_size
+        probe = min(size, 4096) if length is None else min(size, int(length))
+        with path.open("rb") as handle:
+            raw = handle.read(probe)
+    except OSError:
+        return None
+    return (int(inode), probe,
+            hashlib.blake2b(raw, digest_size=16).digest())
+
+
+def _change_time(path: Path, stat_result: os.stat_result) -> int | None:
+    """Filesystem change marker that cannot be restored with ``utime``.
+
+    POSIX exposes this as ``st_ctime_ns``. On Windows Python's ``st_ctime`` is
+    the creation time, so ask NTFS for ``FILE_BASIC_INFO.ChangeTime`` using an
+    attributes-only handle. No transcript bytes are read. If that bounded
+    metadata query is unavailable, return ``None`` and the caller takes the
+    privacy-safe slow path instead of trusting an incomplete cursor stamp.
+    """
+    if os.name != "nt":
+        return int(getattr(stat_result, "st_ctime_ns", 0) or 0)
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        create.restype = wintypes.HANDLE
+        query = kernel32.GetFileInformationByHandleEx
+        query.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID,
+                          wintypes.DWORD)
+        query.restype = wintypes.BOOL
+        close = kernel32.CloseHandle
+        close.argtypes = (wintypes.HANDLE,)
+        close.restype = wintypes.BOOL
+        handle = create(
+            str(path), 0x0080, 0x0001 | 0x0002 | 0x0004, None, 3,
+            0x02000000, None)
+        if handle == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            info = _FileBasicInfo()
+            if not query(handle, 0, ctypes.byref(info), ctypes.sizeof(info)):
+                return None
+            return int(info.ChangeTime)
+        finally:
+            close(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+class StableFileIdentity(NamedTuple):
+    """Content-incarnation metadata safe to compare without reading content."""
+
+    size: int
+    mtime_ns: int
+    change_time: int | None
+    inode: int
+
+    @property
+    def cacheable(self) -> bool:
+        """Whether an unchanged comparison can safely skip reopening bytes."""
+        return self.change_time is not None
+
+
+class _AgentBoundary(NamedTuple):
+    identity: StableFileIdentity
+    prefix: tuple[int, int, bytes]
+    cwd: str
+    original_at: int | None
+    session_id: str
+
+
+def stable_file_identity(path: Path, stat_result: os.stat_result | None = None) \
+        -> StableFileIdentity | None:
+    """Return the path's stable incarnation markers, or ``None`` on refusal."""
+    try:
+        metadata = path.stat() if stat_result is None else stat_result
+        return StableFileIdentity(
+            int(metadata.st_size), int(metadata.st_mtime_ns),
+            _change_time(path, metadata),
+            int(getattr(metadata, "st_ino", 0) or 0))
+    except OSError:
+        return None
+
+
+_STRUCTURAL_VALUE_BYTES = 8192
+_IDENTITY_PREFIX_FIELDS = frozenset(("cwd", "sessionId"))
+_JOURNAL_PREFIX_FIELDS = frozenset(("type", "agentId"))
+
+
+def _string_end(raw: bytes, start: int) -> int | None:
+    """End of one JSON string without materialising its value."""
+    if start >= len(raw) or raw[start] != ord('"'):
+        return None
+    escaped = False
+    for position in range(start + 1, len(raw)):
+        byte = raw[position]
+        if escaped:
+            escaped = False
+        elif byte == ord("\\"):
+            escaped = True
+        elif byte == ord('"'):
+            return position + 1
+    return None
+
+
+def _space(raw: bytes, position: int) -> int:
+    while position < len(raw) and raw[position] in b" \t\r\n":
+        position += 1
+    return position
+
+
+def _scalar_end(raw: bytes, start: int) -> int | None:
+    """End of one non-composite JSON value in a top-level prefix."""
+    if start >= len(raw) or raw[start] in b"{[":
+        return None
+    if raw[start] == ord('"'):
+        return _string_end(raw, start)
+    position = start
+    while position < len(raw) and raw[position] not in b",}":
+        position += 1
+    return position if position > start else None
+
+
+def _composite_end(raw: bytes, start: int) -> int | None:
+    """End of one JSON object/array, found lexically without decoding it."""
+    if start >= len(raw) or raw[start] not in b"{[":
+        return None
+    stack: list[int] = []
+    quoted = False
+    escaped = False
+    pairs = {ord("}"): ord("{"), ord("]"): ord("[")}
+    for position in range(start, len(raw)):
+        byte = raw[position]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                quoted = False
+            continue
+        if byte == ord('"'):
+            quoted = True
+        elif byte in b"{[":
+            stack.append(byte)
+        elif byte in b"}]":
+            if not stack or stack[-1] != pairs.get(byte):
+                return None
+            stack.pop()
+            if not stack:
+                return position + 1
+    return None
+
+
+def _top_level_value_end(raw: bytes, start: int) -> int | None:
+    """End of a scalar or composite while materialising neither private value."""
+    if start < len(raw) and raw[start] in b"{[":
+        return _composite_end(raw, start)
+    return _scalar_end(raw, start)
+
+
+def _decode_structural_scalar(raw: bytes) -> object | None:
+    """Decode one bounded scalar, never a message or payload composite."""
+    if len(raw) > _STRUCTURAL_VALUE_BYTES:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _structural_prefix_fields(
+        raw: bytes, wanted: frozenset[str]) -> dict[str, object]:
+    """Extract allowlisted top-level scalars without decoding composites.
+
+    Object key order is not semantic JSON. A reserializer may place ``message``
+    before ``cwd``/``sessionId``, so composites are skipped with a bounded
+    lexical walk and only allowlisted scalar tokens ever reach ``json.loads``.
+    """
+    if len(raw) > MAX_LINE_BYTES:
+        return {}
+    position = _space(raw, 0)
+    if position >= len(raw) or raw[position] != ord("{"):
+        return {}
+    position += 1
+    found: dict[str, object] = {}
+    while position < len(raw):
+        position = _space(raw, position)
+        if position < len(raw) and raw[position] == ord("}"):
+            return found
+        key_end = _string_end(raw, position)
+        if key_end is None or key_end - position > 256:
+            return found
+        key = _decode_structural_scalar(raw[position:key_end])
+        if not isinstance(key, str):
+            return found
+        position = _space(raw, key_end)
+        if position >= len(raw) or raw[position] != ord(":"):
+            return found
+        position = _space(raw, position + 1)
+        composite = position < len(raw) and raw[position] in b"{["
+        value_end = _top_level_value_end(raw, position)
+        if value_end is None:
+            return found
+        if key in wanted and not composite:
+            value = _decode_structural_scalar(raw[position:value_end])
+            if value is not None:
+                # Match ``json.loads`` duplicate-key semantics within the
+                # structural prefix: the last scalar wins.
+                found[key] = value
+        position = _space(raw, value_end)
+        if position >= len(raw):
+            return found
+        if raw[position] == ord(","):
+            position += 1
+            continue
+        if raw[position] == ord("}"):
+            return found
+        return found
+    return found
+
+
+def _iter_records(
+        path: Path, *, start: int = 0, tail_bytes: int | None = None,
+        structural_gate: Callable[[bytes], bool] | None = None,
+) -> tuple[list, int]:
     """(records, new cursor) from `path`, reading only what is needed.
 
     `start` resumes from a byte offset — the incremental path, used on every
@@ -1059,15 +1488,33 @@ def _iter_records(path: Path, *, start: int = 0,
     try:
         with path.open("rb") as handle:
             handle.seek(offset)
-            raw = handle.read()
+            # Do not consume bytes appended after the captured stat size. The
+            # cursor below is expressed against that same snapshot; mixing a
+            # later write into this read would parse it once now and again on
+            # the next poll.
+            raw = handle.read(max(0, size - offset))
     except OSError:
         return records, start
+    base = offset
     if offset > start:
         # Dropped a partial line to get here: never parse half a record.
         cut = raw.find(b"\n")
-        raw = raw[cut + 1:] if cut >= 0 else b""
-    for line in raw.split(b"\n"):
+        if cut >= 0:
+            base = offset + cut + 1
+            raw = raw[cut + 1:]
+        else:
+            return records, size
+    # JSONL records become durable only at their newline. Retain an incomplete
+    # final record's starting offset so the next poll reparses the whole line
+    # after its writer finishes it instead of seeing only an invalid suffix.
+    newline = raw.rfind(b"\n")
+    if newline < 0:
+        return records, base
+    complete = raw[:newline + 1]
+    for line in complete.split(b"\n"):
         if not line.strip() or len(line) > MAX_LINE_BYTES:
+            continue
+        if structural_gate is not None and not structural_gate(line):
             continue
         try:
             record = json.loads(line.decode("utf-8", "replace"))
@@ -1075,7 +1522,7 @@ def _iter_records(path: Path, *, start: int = 0,
             continue
         if isinstance(record, dict):
             records.append(record)
-    return records, size
+    return records, base + newline + 1
 
 
 def _agent_status(last_at: int | None, journal: dict, agent_id: str,
@@ -1095,13 +1542,23 @@ def _agent_status(last_at: int | None, journal: dict, agent_id: str,
                    f"journal; a crashed agent looks exactly like this")
 
 
-def _read_journal(path: Path) -> dict:
+def _read_journal(path: Path, admitted: frozenset[str] | None = None) -> dict:
     """agentId → last event type, from a workflow's own ledger."""
     outcomes: dict[str, str] = {}
-    records, _cursor = _iter_records(path)
+
+    def admitted_before_decode(line: bytes) -> bool:
+        if admitted is None:
+            return True
+        structural = _structural_prefix_fields(
+            line, _JOURNAL_PREFIX_FIELDS)
+        agent_id = structural.get("agentId")
+        return isinstance(agent_id, str) and agent_id in admitted
+
+    records, _cursor = _iter_records(
+        path, structural_gate=admitted_before_decode)
     for record in records:
         agent_id = str(record.get("agentId") or "")
-        if agent_id:
+        if agent_id and (admitted is None or agent_id in admitted):
             outcomes[agent_id] = str(record.get("type") or "")
     return outcomes
 
@@ -1115,12 +1572,31 @@ class ActivityIndex:
     transcripts.
     """
 
-    def __init__(self, records_root: str | Path | None = None) -> None:
+    def __init__(self, records_root: str | Path | None = None, *,
+                 scope_cache: WC.RepositoryScopeCache | None = None) -> None:
         self.records_root = Path(records_root) if records_root is not None \
             else DEFAULT_RECORDS_ROOT
-        self._cursors: dict[str, tuple[int, float, int]] = {}
+        # size, mtime_ns, change-time, inode, byte cursor. Change-time is the
+        # only cheap marker that catches an equal-size rewrite whose mtime was
+        # deliberately restored; see `_change_time`.
+        self._cursors: dict[str, tuple[int, int, int | None, int, int]] = {}
         self._state: dict[str, _Accumulator] = {}
-        self._journals: dict[str, dict] = {}
+        self._journals: dict[
+            tuple[str, tuple[str, ...]],
+            tuple[StableFileIdentity, dict[str, str]]
+        ] = {}
+        # path -> (inode, prefix length, digest). A growing transcript keeps
+        # the same prefix; a replacement under the same path does not. Only a
+        # digest is retained, never another copy of transcript content.
+        self._prefixes: dict[str, tuple[int, int, bytes]] = {}
+        # path -> (recorded cwd, original structural timestamp). Kept apart
+        # from the tail accumulator because a long session's tail timestamp is
+        # not evidence that the session began under the current repository.
+        self._origins: dict[str, tuple[str, int | None, str]] = {}
+        self._pass_usage_refusals = 0
+        self._pass_identity_refusals = 0
+        self._pass_agent_scope_refusals = 0
+        self._scope_cache = scope_cache or WC.RepositoryScopeCache()
 
     # ── one pass ─────────────────────────────────────────────────────────────
     def read(self, *, cwd: str | Path | None = None,
@@ -1141,56 +1617,239 @@ class ActivityIndex:
         """
         moment = now if now is not None else time.time()
         notes: list[str] = []
+        self._pass_usage_refusals = 0
+        self._pass_identity_refusals = 0
+        self._pass_agent_scope_refusals = 0
+        root_values = tuple(str(root) for root in roots if str(root))
+        accepted_directories = tuple(dict.fromkeys(
+            value for value in (
+                str(cwd) if cwd is not None else "", *root_values)
+            if value))
+        scoped_inceptions: list[tuple[str, int]] = []
+        refused_directories: list[str] = []
+        for directory in accepted_directories:
+            try:
+                inception = self._scope_cache.inception(directory, now=moment)
+            except WC.RepositoryScopeUnavailable:
+                refused_directories.append(directory)
+                continue
+            if inception is not None:
+                scoped_inceptions.append((directory, inception))
+        if refused_directories:
+            notes.append(
+                f"{len(refused_directories)} selected Git checkout scope(s) "
+                "were UNMEASURED because their repository-incarnation privacy "
+                "boundary could not be established; no transcript from those "
+                "scopes was read.")
+            accepted_directories = tuple(
+                directory for directory in accepted_directories
+                if directory not in refused_directories)
+            if not accepted_directories:
+                return Activity(schema=ACTIVITY_SCHEMA, read_at=int(moment),
+                                records_root=str(self.records_root),
+                                notes=tuple(notes))
+        if not self.records_root.is_dir():
+            return Activity(schema=ACTIVITY_SCHEMA, read_at=int(moment),
+                            records_root=str(self.records_root),
+                            notes=("the harness records directory could not be "
+                                   "read; no session activity is available",))
         try:
-            projects = [d for d in sorted(self.records_root.iterdir())
-                        if d.is_dir()]
+            if accepted_directories:
+                projects = []
+                seen_projects: set[str] = set()
+                for directory in accepted_directories:
+                    for project in _project_directories(
+                            self.records_root, directory):
+                        key = os.path.normcase(str(project.resolve(strict=False)))
+                        if key not in seen_projects:
+                            seen_projects.add(key)
+                            projects.append(project)
+            else:
+                # Explicit global callers retain the historic whole-store
+                # view. A selected-directory read never takes this branch.
+                projects = [d for d in sorted(self.records_root.iterdir())
+                            if d.is_dir()]
         except OSError:
             return Activity(schema=ACTIVITY_SCHEMA, read_at=int(moment),
                             records_root=str(self.records_root),
                             notes=("the harness records directory could not be "
                                    "read; no session activity is available",))
 
-        candidates: list[tuple[float, Path]] = []
+        candidates: list[tuple[float, int, int, int | None, int, Path]] = []
         for project in projects:
             for transcript in project.glob("*.jsonl"):
                 try:
                     stat = transcript.stat()
                 except OSError:
                     continue
-                candidates.append((stat.st_mtime, transcript))
+                candidates.append((
+                    stat.st_mtime, stat.st_size, stat.st_mtime_ns,
+                    _change_time(transcript, stat),
+                    int(getattr(stat, "st_ino", 0) or 0), transcript))
         candidates.sort(key=lambda pair: -pair[0])
 
         sessions: list[SessionRun] = []
         examined = 0
-        for _mtime, transcript in candidates:
+        retired_incarnations = 0
+        boundary_races = 0
+        for (_transcript_mtime, transcript_size, transcript_mtime_ns,
+             transcript_change, transcript_inode, transcript) in candidates:
             if len(sessions) >= max_sessions:
                 notes.append(
                     f"{len(candidates) - examined} older transcript(s) were not "
                     f"read: the newest {max_sessions} are shown")
                 break
             examined += 1
-            session = self._session(transcript, moment, roots=roots,
-                                    tracked=tracked)
+            candidate_identity = StableFileIdentity(
+                transcript_size, transcript_mtime_ns, transcript_change,
+                transcript_inode)
+            expected_prefix: tuple[int, int, bytes] | None = None
+            origin_to_commit: tuple[str, int | None, str] | None = None
+            if accepted_directories:
+                key = str(transcript)
+                cursor = self._cursors.get(key)
+                cached = self._state.get(key)
+                unchanged = (cursor is not None and cached is not None
+                        and cursor[0] == transcript_size
+                        and cursor[1] == transcript_mtime_ns
+                        and transcript_change is not None
+                        and cursor[2] == transcript_change
+                        and cursor[3] == transcript_inode)
+                origin = self._origins.get(key)
+                if unchanged and origin is not None:
+                    # The content-bearing incremental reader already retained
+                    # this structural field. Reopening an unchanged transcript
+                    # here would defeat the poller's no-I/O cache contract.
+                    recorded_cwd, original_at, recorded_session_id = origin
+                    expected_prefix = self._prefixes.get(key)
+                else:
+                    prefix_before = _prefix_fingerprint(
+                        transcript, None, inode=transcript_inode)
+                    head = _read_structural_head(transcript)
+                    identity_after_head = stable_file_identity(transcript)
+                    prefix_after = (_prefix_fingerprint(
+                        transcript, prefix_before[1],
+                        inode=identity_after_head.inode)
+                        if prefix_before is not None
+                        and identity_after_head is not None else None)
+                    if (identity_after_head != candidate_identity
+                            or prefix_before is None
+                            or prefix_after != prefix_before):
+                        boundary_races += 1
+                        continue
+                    recorded_cwd = str(head.get("cwd") or "")
+                    original_at = _stamp(head.get("timestamp"))
+                    recorded_session_id = str(head.get("sessionId") or "")
+                    expected_prefix = prefix_after
+                    origin_to_commit = (
+                        recorded_cwd, original_at, recorded_session_id)
+                if not any(same_directory(recorded_cwd, directory)
+                           for directory in accepted_directories):
+                    # Resolve lossy Claude filing-slug collisions before the
+                    # content-bearing activity parser can retain an excerpt.
+                    continue
+                boundaries = [inception for directory, inception
+                              in scoped_inceptions
+                              if same_directory(recorded_cwd, directory)]
+                if boundaries and (original_at is None
+                                   or original_at < max(boundaries)):
+                    retired_incarnations += 1
+                    continue
+            session = self._session(
+                transcript, moment, roots=root_values, tracked=tracked,
+                admitted_roots=accepted_directories,
+                root_floors=tuple(scoped_inceptions),
+                expected_identity=candidate_identity,
+                expected_prefix=expected_prefix,
+                expected_cwd=(recorded_cwd if accepted_directories else ""),
+                expected_session_id=(recorded_session_id
+                                     if accepted_directories else ""))
             if session is None:
+                if stable_file_identity(transcript) != candidate_identity:
+                    boundary_races += 1
                 continue
-            if cwd is not None and not same_directory(session.cwd, str(cwd)):
+            if accepted_directories and not any(
+                    same_directory(session.cwd, directory)
+                    for directory in accepted_directories):
+                # Do not retain content from a path that crossed the structural
+                # scope boundary between validation and projection.
+                key = str(transcript)
+                self._state.pop(key, None)
+                self._cursors.pop(key, None)
+                self._prefixes.pop(key, None)
+                self._origins.pop(key, None)
                 continue
+            if origin_to_commit is not None:
+                self._origins[str(transcript)] = origin_to_commit
             sessions.append(session)
+
+        if self._pass_usage_refusals:
+            notes.append(
+                f"{self._pass_usage_refusals} Claude run(s) were omitted and "
+                "their usage is UNMEASURED because a token count was not an "
+                "exact non-negative integer or split records for one response "
+                "disagreed on usage/model identity, or a response id was "
+                "reused nonconsecutively.")
+        if self._pass_identity_refusals:
+            notes.append(
+                f"{self._pass_identity_refusals} Claude run(s) were "
+                "UNMEASURED and omitted because rows inside one transcript "
+                "disagreed on cwd or session identity; no excerpt or token "
+                "subtotal was retained.")
+        if self._pass_agent_scope_refusals:
+            notes.append(
+                f"{self._pass_agent_scope_refusals} nested Claude agent "
+                "transcript(s) were omitted before content parsing because "
+                "their exact checkout scope or repository-incarnation "
+                "boundary was not admitted.")
+        unmeasured_usage_runs = sum(
+            int(not session.usage_measured)
+            + sum(not agent.usage_measured for agent in session.agents)
+            for session in sessions)
+        if unmeasured_usage_runs:
+            notes.append(
+                f"{unmeasured_usage_runs} Claude run(s) have UNMEASURED usage "
+                "because at least one assistant response did not carry both "
+                "required input and output token counts.")
+        if retired_incarnations:
+            notes.append(
+                f"{retired_incarnations} Claude transcript(s) were omitted "
+                "because they began before the current repository incarnation "
+                "at that path; retired checkout excerpts were not read.")
+        if boundary_races:
+            notes.append(
+                f"{boundary_races} Claude transcript(s) were UNMEASURED and "
+                "omitted because their file incarnation changed between the "
+                "structural scope check and content read; no excerpt was "
+                "retained.")
 
         return Activity(schema=ACTIVITY_SCHEMA, read_at=int(moment),
                         records_root=str(self.records_root),
                         sessions=tuple(sessions), notes=tuple(notes))
 
     # ── one session ──────────────────────────────────────────────────────────
-    def _session(self, transcript: Path, now: float, *,
-                 roots: Iterable[str] = (),
-                 tracked: Iterable[str] = ()) -> SessionRun | None:
+    def _session(
+            self, transcript: Path, now: float, *,
+            roots: Iterable[str] = (), tracked: Iterable[str] = (),
+            admitted_roots: Iterable[str] = (),
+            root_floors: Iterable[tuple[str, int]] = (),
+            expected_identity: StableFileIdentity | None = None,
+            expected_prefix: tuple[int, int, bytes] | None = None,
+            expected_cwd: str = "", expected_session_id: str = "",
+    ) -> SessionRun | None:
         session_id = transcript.stem
-        accumulator, changed = self._absorb(transcript, tail_bytes=TAIL_BYTES)
+        accumulator, changed = self._absorb(
+            transcript, tail_bytes=TAIL_BYTES,
+            expected_identity=expected_identity,
+            expected_prefix=expected_prefix,
+            expected_cwd=expected_cwd,
+            expected_session_id=expected_session_id)
         if accumulator is None:
             return None
         fleets = self._fleets(transcript.with_suffix("") , session_id, now,
-                              roots=roots, tracked=tracked)
+                              roots=roots, tracked=tracked,
+                              admitted_roots=admitted_roots,
+                              root_floors=root_floors)
         return SessionRun(
             session_id=accumulator.session_id or session_id,
             cwd=accumulator.cwd,
@@ -1210,12 +1869,15 @@ class ActivityIndex:
             output_tokens=accumulator.output_tokens,
             thinking_blocks=accumulator.thinking_blocks,
             thinking_readable=accumulator.thinking_readable,
+            usage_measured=accumulator.usage_measured,
             notes=() if changed else (),
         )
 
     def _fleets(self, session_dir: Path, session_id: str,
                 now: float, *, roots: Iterable[str] = (),
-                tracked: Iterable[str] = ()) -> tuple[Fleet, ...]:
+                tracked: Iterable[str] = (),
+                admitted_roots: Iterable[str] = (),
+                root_floors: Iterable[tuple[str, int]] = ()) -> tuple[Fleet, ...]:
         subagents = session_dir / "subagents"
         if not subagents.is_dir():
             return ()
@@ -1223,10 +1885,18 @@ class ActivityIndex:
 
         direct = sorted(subagents.glob("agent-*.jsonl"))
         if direct:
-            agents = tuple(self._agent(p, FLEET_DIRECT, session_id, {}, now,
-                                       roots=roots, tracked=tracked)
-                           for p in direct)
-            agents = tuple(a for a in agents if a is not None)
+            direct_agents: list[AgentRun] = []
+            for path in direct:
+                boundary = self._agent_boundary(
+                    path, admitted_roots, root_floors)
+                if admitted_roots and boundary is None:
+                    continue
+                agent = self._agent(
+                    path, FLEET_DIRECT, session_id, {}, now,
+                    roots=roots, tracked=tracked, boundary=boundary)
+                if agent is not None:
+                    direct_agents.append(agent)
+            agents = tuple(direct_agents)
             if agents:
                 fleets.append(self._fleet(FLEET_DIRECT, FLEET_DIRECT, session_id,
                                           str(subagents), agents, {}))
@@ -1236,17 +1906,96 @@ class ActivityIndex:
             for run in sorted(workflows.iterdir()):
                 if not run.is_dir():
                     continue
-                journal = self._journal(run / "journal.jsonl")
-                agents = tuple(a for a in (
-                    self._agent(p, run.name, session_id, journal, now,
-                                roots=roots, tracked=tracked)
-                    for p in sorted(run.glob("agent-*.jsonl"))) if a is not None)
+                admitted_paths: list[tuple[Path, _AgentBoundary | None]] = []
+                for path in sorted(run.glob("agent-*.jsonl")):
+                    boundary = self._agent_boundary(
+                        path, admitted_roots, root_floors)
+                    if admitted_roots and boundary is None:
+                        continue
+                    admitted_paths.append((path, boundary))
+                if not admitted_paths:
+                    # A foreign-only/misfiled workflow cannot cause its
+                    # journal ids or outcomes to be materialized.
+                    continue
+                admitted_ids = frozenset(
+                    path.stem[len("agent-"):] if path.stem.startswith("agent-")
+                    else path.stem for path, _boundary in admitted_paths)
+                journal = self._journal(
+                    run / "journal.jsonl", admitted=admitted_ids)
+                workflow_agents: list[AgentRun] = []
+                for path, boundary in admitted_paths:
+                    agent = self._agent(
+                        path, run.name, session_id, journal, now,
+                        roots=roots, tracked=tracked, boundary=boundary)
+                    if agent is not None:
+                        workflow_agents.append(agent)
+                agents = tuple(workflow_agents)
                 if agents:
                     fleets.append(self._fleet(run.name, FLEET_WORKFLOW,
                                               session_id, str(run), agents,
                                               journal))
         fleets.sort(key=lambda f: -(f.last_at or 0))
         return tuple(fleets)
+
+    def _agent_boundary(
+            self, path: Path, admitted_roots: Iterable[str],
+            root_floors: Iterable[tuple[str, int]],
+    ) -> _AgentBoundary | None:
+        admitted = tuple(admitted_roots)
+        if not admitted:
+            return None
+        key = str(path)
+        try:
+            stat = path.stat()
+        except OSError:
+            self._pass_agent_scope_refusals += 1
+            return None
+        identity = stable_file_identity(path, stat)
+        if identity is None:
+            self._pass_agent_scope_refusals += 1
+            return None
+        cursor = self._cursors.get(key)
+        cached = self._state.get(key)
+        origin = self._origins.get(key)
+        unchanged = (cursor is not None and cached is not None
+                     and cursor[0] == identity.size
+                     and cursor[1] == identity.mtime_ns
+                     and identity.change_time is not None
+                     and cursor[2] == identity.change_time
+                     and cursor[3] == identity.inode)
+        prefix = self._prefixes.get(key)
+        if unchanged and origin is not None and prefix is not None:
+            recorded_cwd, original_at, recorded_session_id = origin
+        else:
+            prefix_before = _prefix_fingerprint(
+                path, None, inode=identity.inode)
+            head = _read_structural_head(path)
+            after = stable_file_identity(path)
+            prefix_after = (_prefix_fingerprint(
+                path, prefix_before[1], inode=after.inode)
+                if prefix_before is not None and after is not None else None)
+            if (after != identity or prefix_before is None
+                    or prefix_after != prefix_before):
+                self._pass_agent_scope_refusals += 1
+                return None
+            prefix = prefix_after
+            recorded_cwd = str(head.get("cwd") or "")
+            original_at = _stamp(head.get("timestamp"))
+            recorded_session_id = str(head.get("sessionId") or "")
+        matching = tuple(root for root in admitted
+                         if same_directory(recorded_cwd, root))
+        floors = [floor for root, floor in root_floors
+                  if same_directory(recorded_cwd, root)]
+        if not matching or (floors and (
+                original_at is None or original_at < max(floors))):
+            self._state.pop(key, None)
+            self._cursors.pop(key, None)
+            self._prefixes.pop(key, None)
+            self._origins.pop(key, None)
+            self._pass_agent_scope_refusals += 1
+            return None
+        return _AgentBoundary(
+            identity, prefix, recorded_cwd, original_at, recorded_session_id)
 
     @staticmethod
     def _fleet(fleet_id: str, kind: str, session_id: str, path: str,
@@ -1263,10 +2012,19 @@ class ActivityIndex:
 
     def _agent(self, path: Path, fleet_id: str, session_id: str, journal: dict,
                now: float, *, roots: Iterable[str] = (),
-               tracked: Iterable[str] = ()) -> AgentRun | None:
-        accumulator, _changed = self._absorb(path)
+               tracked: Iterable[str] = (),
+               boundary: _AgentBoundary | None = None) -> AgentRun | None:
+        accumulator, _changed = self._absorb(
+            path,
+            expected_identity=(boundary.identity if boundary else None),
+            expected_prefix=(boundary.prefix if boundary else None),
+            expected_cwd=(boundary.cwd if boundary else ""),
+            expected_session_id=(boundary.session_id if boundary else ""))
         if accumulator is None:
             return None
+        if boundary is not None:
+            self._origins[str(path)] = (
+                boundary.cwd, boundary.original_at, boundary.session_id)
         agent_id = path.stem[len("agent-"):] if path.stem.startswith("agent-") \
             else path.stem
         agent_type = accumulator.agent_type or self._meta_type(path)
@@ -1295,27 +2053,44 @@ class ActivityIndex:
             thinking_readable=accumulator.thinking_readable,
             cwd=accumulator.cwd,
             branch=accumulator.branch,
-            status=status, status_evidence=evidence)
+            status=status, status_evidence=evidence,
+            usage_measured=accumulator.usage_measured)
 
-    def _journal(self, path: Path) -> dict:
-        """A fleet's ledger, cached on (size, mtime) like every other file.
+    def _journal(self, path: Path, *, admitted: frozenset[str]) -> dict:
+        """A fleet's ledger, cached only for one stable file incarnation.
 
         A workflow run's journal is small, but a session can hold sixteen of
         them and the poll is every two seconds. Re-reading them all each pass
         was the one place the incremental design leaked, and a test now fails if
         it leaks again.
         """
-        key = str(path)
+        key = (str(path), tuple(sorted(admitted)))
         try:
             stat = path.stat()
         except OSError:
-            return self._journals.get(key, (0, 0.0, {}))[2]
+            # A vanished journal is absence of outcome evidence now. Reusing a
+            # cached ``result`` would call a quiet/failed run settled forever.
+            for cache_key in tuple(self._journals):
+                if cache_key[0] == str(path):
+                    self._journals.pop(cache_key, None)
+            return {}
+        identity = stable_file_identity(path, stat)
+        if identity is None:
+            self._journals.pop(key, None)
+            return {}
         cached = self._journals.get(key)
-        if cached is not None and cached[0] == stat.st_size \
-                and cached[1] == stat.st_mtime:
-            return cached[2]
-        outcomes = _read_journal(path)
-        self._journals[key] = (stat.st_size, stat.st_mtime, outcomes)
+        if cached is not None and identity.cacheable \
+                and cached[0] == identity:
+            return cached[1]
+        outcomes = _read_journal(path, admitted)
+        after = stable_file_identity(path)
+        if after != identity:
+            self._journals.pop(key, None)
+            return {}
+        if identity.cacheable:
+            self._journals[key] = (identity, outcomes)
+        else:
+            self._journals.pop(key, None)
         return outcomes
 
     @staticmethod
@@ -1329,8 +2104,12 @@ class ActivityIndex:
             else ""
 
     # ── the incremental core ─────────────────────────────────────────────────
-    def _absorb(self, path: Path, *,
-                tail_bytes: int | None = None) -> tuple[_Accumulator | None, bool]:
+    def _absorb(
+            self, path: Path, *, tail_bytes: int | None = None,
+            expected_identity: StableFileIdentity | None = None,
+            expected_prefix: tuple[int, int, bytes] | None = None,
+            expected_cwd: str = "", expected_session_id: str = "",
+    ) -> tuple[_Accumulator | None, bool]:
         """Fold whatever is new in `path` into its accumulator.
 
         Returns (accumulator, changed). A file whose size and mtime are both
@@ -1342,23 +2121,178 @@ class ActivityIndex:
             stat = path.stat()
         except OSError:
             return self._state.get(key), False
+        identity = stable_file_identity(path, stat)
+        if identity is None or (expected_identity is not None
+                                and identity != expected_identity):
+            return None, False
         previous = self._cursors.get(key)
+        inode = int(getattr(stat, "st_ino", 0) or 0)
+        change_time = _change_time(path, stat)
         if previous is not None:
-            size, mtime, cursor = previous
-            if size == stat.st_size and mtime == stat.st_mtime:
+            size, mtime_ns, prior_change, prior_inode, cursor = previous
+            if (size == stat.st_size and mtime_ns == stat.st_mtime_ns
+                    and change_time is not None
+                    and prior_change == change_time
+                    and prior_inode == inode):
                 return self._state.get(key), False
+            prior_prefix = self._prefixes.get(key)
+            current_prefix = _prefix_fingerprint(
+                path, prior_prefix[1] if prior_prefix is not None else None,
+                inode=inode)
+            replaced = (prior_prefix is not None
+                        and (current_prefix is None
+                             or current_prefix[0] != prior_prefix[0]
+                             or current_prefix[2] != prior_prefix[2]))
+            if replaced or stat.st_size <= size:
+                # A same-size rewrite and a truncation are replacements, not
+                # appended transcript bytes. Reusing the accumulator would
+                # mix excerpts and token totals from the retired file into its
+                # replacement under the same path.
+                cursor = 0
+                self._state.pop(key, None)
         else:
             cursor = 0
+            current_prefix = _prefix_fingerprint(
+                path, None, inode=inode)
 
-        records, new_cursor = _iter_records(path, start=cursor,
-                                            tail_bytes=tail_bytes)
+        if expected_prefix is not None:
+            bound_prefix = _prefix_fingerprint(
+                path, expected_prefix[1], inode=inode)
+            if bound_prefix != expected_prefix:
+                return None, False
+
         accumulator = self._state.get(key)
+        scanned_cwd = expected_cwd or (
+            accumulator.cwd if accumulator is not None else "")
+        scanned_session_id = expected_session_id or (
+            accumulator.session_id if accumulator is not None else "")
+
+        def identity_before_decode(line: bytes) -> bool:
+            nonlocal scanned_cwd, scanned_session_id
+            structural = _structural_prefix_fields(
+                line, _IDENTITY_PREFIX_FIELDS)
+            row_cwd = structural.get("cwd")
+            row_session_id = structural.get("sessionId")
+            if row_cwd is not None and not isinstance(row_cwd, str):
+                raise _TranscriptIdentityRefused(
+                    "transcript cwd was not a string")
+            if (row_cwd and scanned_cwd
+                    and not same_directory(row_cwd, scanned_cwd)):
+                raise _TranscriptIdentityRefused(
+                    "transcript rows disagreed on cwd")
+            if row_cwd:
+                scanned_cwd = scanned_cwd or row_cwd
+            if (row_session_id is not None
+                    and not isinstance(row_session_id, str)):
+                raise _TranscriptIdentityRefused(
+                    "transcript session id was not a string")
+            if (row_session_id and scanned_session_id
+                    and row_session_id != scanned_session_id):
+                raise _TranscriptIdentityRefused(
+                    "transcript rows disagreed on session id")
+            if row_session_id:
+                scanned_session_id = scanned_session_id or row_session_id
+            return True
+
+        try:
+            records, new_cursor = _iter_records(
+                path, start=cursor, tail_bytes=tail_bytes,
+                structural_gate=identity_before_decode)
+        except _TranscriptIdentityRefused:
+            self._pass_identity_refusals += 1
+            return None, False
+        # Bind the bytes just scanned to the same incarnation/prefix validated
+        # by the structural head gate. No accumulator or origin is mutated
+        # until this transaction has survived both sides of the read.
+        after_identity = stable_file_identity(path)
+        if after_identity != identity:
+            return None, False
+        if expected_prefix is not None:
+            after_prefix = _prefix_fingerprint(
+                path, expected_prefix[1], inode=after_identity.inode)
+            if after_prefix != expected_prefix:
+                return None, False
+        # Validate the whole increment before mutating the retained accumulator.
+        # A writer-repair cycle must never replay the valid prefix and double
+        # count it merely because a later row was malformed.
+        previous_message_id = accumulator.last_message_id \
+            if accumulator is not None else ""
+        previous_usage = accumulator.last_message_usage \
+            if accumulator is not None else None
+        previous_model = accumulator.last_message_model \
+            if accumulator is not None else ""
+        message_evidence = dict(accumulator.message_evidence) \
+            if accumulator is not None else {}
+        established_cwd = expected_cwd or (
+            accumulator.cwd if accumulator is not None else "")
+        established_session_id = expected_session_id or (
+            accumulator.session_id if accumulator is not None else "")
+        try:
+            for record in records:
+                row_cwd = str(record.get("cwd") or "")
+                row_session_id = str(record.get("sessionId") or "")
+                if row_cwd:
+                    if (established_cwd and not same_directory(
+                            row_cwd, established_cwd)):
+                        raise _TranscriptIdentityRefused(
+                            "transcript rows disagreed on cwd")
+                    established_cwd = established_cwd or row_cwd
+                if row_session_id:
+                    if (established_session_id
+                            and row_session_id != established_session_id):
+                        raise _TranscriptIdentityRefused(
+                            "transcript rows disagreed on session id")
+                    established_session_id = (established_session_id
+                                              or row_session_id)
+                if record.get("type") not in (_ROLE_ASSISTANT, _ROLE_USER):
+                    continue
+                message = record.get("message")
+                if isinstance(message, dict):
+                    if record.get("type") == _ROLE_USER:
+                        _text, _thinking, tools, _targets, _blocks_n, \
+                            _readable = _blocks(message)
+                        if not tools:
+                            # `absorb` returns here too: ordinary user/tool
+                            # result rows do not break a split assistant
+                            # response's identity across records or polls.
+                            continue
+                    _input, _output, _measured, usage = \
+                        _usage_evidence(message)
+                    message_id = str(message.get("id") or "")
+                    model = str(message.get("model") or "")
+                    repeat = bool(message_id) and \
+                        message_id == previous_message_id
+                    if (message_id and message_id in message_evidence
+                            and not repeat):
+                        raise _TranscriptUsageRefused(
+                            "nonconsecutive response id reuse was ambiguous")
+                    if (record.get("type") == _ROLE_ASSISTANT and repeat
+                            and (usage != previous_usage
+                                 or model != previous_model)):
+                        raise _TranscriptUsageRefused(
+                            "split records for one response disagreed on "
+                            "usage or model identity")
+                    if message_id and message_id not in message_evidence:
+                        message_evidence[message_id] = (usage, model)
+                    previous_message_id = message_id
+                    previous_usage = usage
+                    previous_model = model
+        except _TranscriptUsageRefused:
+            self._pass_usage_refusals += 1
+            return None, False
+        except _TranscriptIdentityRefused:
+            self._pass_identity_refusals += 1
+            return None, False
         if accumulator is None:
             accumulator = _Accumulator()
             self._state[key] = accumulator
         for record in records:
             accumulator.absorb(record)
-        self._cursors[key] = (stat.st_size, stat.st_mtime, new_cursor)
+        accumulator.message_evidence = message_evidence
+        self._cursors[key] = (
+            stat.st_size, stat.st_mtime_ns, change_time, inode, new_cursor)
+        if current_prefix is not None:
+            self._prefixes[key] = current_prefix
         return accumulator, bool(records)
 
     def forget(self) -> None:
@@ -1366,6 +2300,12 @@ class ActivityIndex:
         self._cursors.clear()
         self._state.clear()
         self._journals.clear()
+        self._prefixes.clear()
+        self._origins.clear()
+        self._pass_usage_refusals = 0
+        self._pass_identity_refusals = 0
+        self._pass_agent_scope_refusals = 0
+        self._scope_cache.clear()
 
 
 def read_activity(cwd: str | Path | None = None, *,
@@ -1383,10 +2323,12 @@ def read_activity(cwd: str | Path | None = None, *,
 __all__ = [
     "ACTIVITY_SCHEMA", "Activity", "ActivityIndex", "AgentRun", "EXCERPT_CHARS",
     "FLEET_DIRECT", "FLEET_WORKFLOW", "Fleet", "LIMITS", "MessageBlocks",
-    "QUIET", "RECENT_TURNS",
+    "PROVIDER_ANTHROPIC", "PROVIDER_OPENAI", "QUIET", "RECENT_TURNS",
     "RUNNING", "RUNNING_MINUTES", "SETTLED", "STATUSES", "STOPPED", "SessionRun",
-    "TAIL_BYTES", "Turn", "TurnScope", "message_blocks",
-    "read_activity", "redact", "repo_paths_of",
+    "SOURCE_CLAUDE_CODE", "SOURCE_CODEX", "TAIL_BYTES", "Turn", "TurnScope",
+    "StableFileIdentity", "stable_file_identity",
+    "message_blocks",
+    "provider_model_label", "read_activity", "redact", "repo_paths_of",
     "repo_relative",
     "repo_root_of",
 ]

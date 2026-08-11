@@ -31,7 +31,7 @@
     "program_class": "branch-sensitive",
     "program_hash": "449f56634b3d57bc699dc60aa67f2df9dca125619ce0d9365a300ae3c376a594",
     "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
-    "reason": "branch-sensitive ops — a dither-sized perturbation can flip a discrete branch, no sound bound exists: rsi",
+    "reason": "branch-sensitive ops \u2014 a dither-sized perturbation can flip a discrete branch, no sound bound exists: rsi",
     "refused": true,
     "scalar": null,
     "signature": "0dbe244465e401ee296f76aa1dd7528d80ede90193026cfbc40f076c4040cd0c9fb12db778b2d03048e1e80e68db253cc8ab7ab2a36e6dea3374b082ad5cf108",

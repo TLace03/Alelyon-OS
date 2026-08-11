@@ -1,0 +1,178 @@
+{
+  "category": "forgery",
+  "description": "The old-leaf value reuse (PLATFORM.md \u00a73 item 4) on the SERIES path. The signer overwrites one stored point by a raw, uncertified write and anchors the revised series to the leaf that covered it beforehand. Same attack as the bars case, through the encoding no vector reached.",
+  "envelope": {
+    "assumptions": [
+      "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms"
+    ],
+    "created": 1000.0,
+    "error_budget": {
+      "model": null,
+      "provider": {
+        "inputs": {},
+        "origins": {},
+        "reason": "no data layer supplied \u2014 nothing was asked about the sources; NOT a finding that they agree",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "status": "unmeasured",
+        "trust": "signer-attested"
+      },
+      "quantization": {
+        "exact": true,
+        "level": 0.953125,
+        "tier": "linear-exact",
+        "width": 1.1693648627186803e-07
+      },
+      "sampling": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 5.125999450683594e-07,
+          "n": 6,
+          "uncertified_idx": []
+        },
+        "digest": "05def195ccd7e47c8d0d1cc28276888f71e985f643ad1b6601a9f41e0e112b67",
+        "key": "DGS10",
+        "kind": "series",
+        "n": 6,
+        "transparency": {
+          "column": "value",
+          "leaves": [
+            {
+              "bits": 24,
+              "hi_ts": 1704758400.0,
+              "inclusion_proof": {
+                "index": 0,
+                "leaf_hash": "539cd1710631be3a8f059bfa190ffbfff577b4c19d3a9ee6218f883c0ddea010",
+                "proof": [
+                  "525ad86b2d43ca0ab89ba68d254ce83a23b63dce137583c4988256b9702392d2"
+                ],
+                "root": "43cd84b3dc0fd3363f1356fa07ce8e3cae78d67b9973478fc7f9334b3868b54f",
+                "tree_size": 2,
+                "value_digest": "2e8fbeff4515c1e0fbd9d9984bcceb5d2af8d56e07fa8fb84521b82ad849f643"
+              },
+              "lo_ts": 1704153600.0,
+              "n": 6,
+              "payload": "[{\"column\": \"value\", \"n\": 6, \"delta\": 5.125999450683594e-07, \"seed\": 20260729, \"error_var\": 2.189655864034042e-14}, {\"membership\": {\"encoding\": \"f64-epoch-seconds/v0\", \"rows\": [1704153600.0, 1704240000.0, 1704326400.0, 1704412800.0, 1704672000.0, 1704758400.0]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"value\": \"026d03ed21593eadccb6372109ba829cf5b6fd9f35050be6349accb02c0ea969\"}}}]",
+              "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "seq": 0,
+              "value_digest": "2e8fbeff4515c1e0fbd9d9984bcceb5d2af8d56e07fa8fb84521b82ad849f643"
+            }
+          ],
+          "scope": [
+            "fred",
+            "DGS10"
+          ],
+          "sth": {
+            "head_leaf": "864089b555bfc2d6786ddae2f6bafcdbe7d2a4fed345950c5832afff70dad5c3",
+            "key_id": "ed25519:ba2655652874c66c",
+            "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "root": "43cd84b3dc0fd3363f1356fa07ce8e3cae78d67b9973478fc7f9334b3868b54f",
+            "scope": [
+              "fred",
+              "DGS10"
+            ],
+            "signature": "1139fd969dc8e6b23494d64dff35b51180ef6bf2789b372ef207b1ad41d19ceab17804b0de397e2e0ed6b199ac3d25b17d164052fbc2f6415572628c0e00520e",
+            "table": "series",
+            "timestamp": 1000.0,
+            "tree_size": 2,
+            "type": "alelyon.sth/v0"
+          },
+          "table": "series"
+        },
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "strict": true
+    },
+    "program": "show mean(series(\"DGS10\"))",
+    "program_class": "linear-exact",
+    "program_hash": "b9a0d5bc9b1915892f70555cd5a38ae6f72f6bd4ea4f051ab347ec8857b3e2df",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": null,
+    "refused": false,
+    "scalar": 5.173333403389737,
+    "seed": 7,
+    "signature": "c4ac650f561847f746adf0e582c4fe6f0b26de10f2407ae0a7065646c94fa9e8b39da519e3a016674cab2193713b0d41254dbbd5c6c548d7a7ce47f56b190e0e",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "value-commitment-mismatch"
+    ],
+    "width_trust": "authenticated"
+  },
+  "expect_classes": [
+    "value-commitment-mismatch"
+  ],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": null,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "scalar-tolerance-window",
+      "substrate-mismatch",
+      "value-commitment-mismatch"
+    ],
+    "width_trust": "unverified"
+  },
+  "inputs": {
+    "series|DGS10": {
+      "index": [
+        1704153600.0,
+        1704240000.0,
+        1704326400.0,
+        1704412800.0,
+        1704672000.0,
+        1704758400.0
+      ],
+      "name": "DGS10",
+      "values": [
+        4.100000145266623,
+        4.250000230225271,
+        9.99,
+        4.300000139404603,
+        4.1799997998001155,
+        4.2200001056418115
+      ]
+    }
+  },
+  "must": "fail",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "forgery-series-old-leaf-after-raw-overwrite",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}

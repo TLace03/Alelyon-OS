@@ -414,12 +414,18 @@ class LandingIndex:
                                                    repo=str(self.repo_root))
         if not self._mainline_tree:
             return None
-        cost = LC.landing_cost(ref, mainline=self.mainline,
-                               repo=str(self.repo_root),
-                               mainline_tree=self._mainline_tree)
-        if not cost.readable:
+        # `verdict_only` rather than `landing_cost`: this route reads ONE
+        # boolean, and full pricing computes commits behind/ahead, the
+        # contested surface and the auto-merged split to get there — five git
+        # calls per branch whose results are discarded, on a path that visits
+        # every branch in the index. Both go through the same `_merge_verdict`,
+        # so they cannot disagree about a branch.
+        verdict = LC.verdict_only(ref, mainline=self.mainline,
+                                  repo=str(self.repo_root),
+                                  mainline_tree=self._mainline_tree)
+        if verdict == LC.UNREADABLE:
             return None
-        return cost.verdict == LC.NOTHING_TO_LAND
+        return verdict == LC.NOTHING_TO_LAND
 
     def _count_contained(self, name: str) -> int | None:
         ref = self._branch_ref(name)

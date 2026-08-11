@@ -65,6 +65,7 @@ import time
 
 from alelyon.runtime.common import fleet_hierarchy as H
 from alelyon.runtime.common import fleet_outcomes as O
+from alelyon.runtime.common import session_records as SR
 
 #: 2 added `branch`, `cwd` and `landed` to `runs`. Migrated in place rather than
 #: versioned into a new layer space: the columns are additive and `landed`
@@ -418,6 +419,41 @@ class Career:
         return tuple(ranked)
 
 
+def _run_from_row(row: sqlite3.Row) -> Run:
+    """Materialise one stored run without duplicating the schema mapping."""
+    return Run(
+        run_id=row["run_id"], at=int(row["at"]), layer=row["layer"],
+        work_kind=row["work_kind"], model=row["model"],
+        agent_id=row["agent_id"], fleet_id=row["fleet_id"],
+        session_id=row["session_id"], settled=bool(row["settled"]),
+        turns=int(row["turns"]), out_tokens=int(row["out_tokens"]),
+        seconds=None if row["seconds"] is None else int(row["seconds"]),
+        contested=bool(row["contested"]), branch=row["branch"] or "",
+        cwd=row["cwd"] or "", landed=row["landed"] or O.UNKNOWN)
+
+
+def _scorecard_from_runs(layer: str, work_kind: str, model: str,
+                         runs: tuple[Run, ...]) -> Scorecard | None:
+    """Aggregate an already-bounded run population at one coordinate."""
+    selected = tuple(run for run in runs
+                     if run.layer == layer and run.work_kind == work_kind
+                     and run.model == model)
+    if not selected:
+        return None
+    scores = tuple(score for score in (run.score for run in selected)
+                   if score is not None)
+    return Scorecard(
+        layer=layer, work_kind=work_kind, model=model,
+        runs=len(selected), settled=sum(run.settled for run in selected),
+        contested=sum(run.contested for run in selected),
+        mean_score=round(sum(scores) / len(scores), 6) if scores else 0.0,
+        mean_tokens=round(
+            sum(run.out_tokens for run in selected) / len(selected), 1),
+        last_at=max(run.at for run in selected),
+        landed=sum(run.landed == O.LANDED for run in selected),
+        abandoned=sum(run.landed == O.ABANDONED for run in selected))
+
+
 @dataclass(frozen=True)
 class Standing:
     """The model currently held to be best for one coordinate."""
@@ -510,7 +546,48 @@ class FleetLedger:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.database), timeout=10.0)
         conn.row_factory = sqlite3.Row
+        # Repository placement is evaluated inside SQLite so an unrelated
+        # machine-ledger row never crosses the query boundary and reaches
+        # ``_run_from_row``.  A Python function is used instead of spelling
+        # path rules in SQL: ``same_directory`` is the one canonical rule for
+        # drive-letter case, separators, extended Windows paths and resolution.
+        conn.create_function(
+            "alelyon_same_directory", 2,
+            lambda left, right: int(SR.same_directory(
+                str(left or ""), str(right or ""))),
+            deterministic=True)
         return conn
+
+    @staticmethod
+    def _scope_predicate(
+            cwds: tuple[str, ...],
+            cwd_inceptions: tuple[tuple[str, int], ...]
+            ) -> tuple[str, tuple[object, ...]]:
+        """A parameterised exact-root/incarnation predicate for ``runs``.
+
+        The predicate deliberately calls the canonical path comparator from
+        SQLite.  Fetching every row and applying the same comparator later
+        gets the final aggregate right but still materialises another local
+        repository's model, branch and session fields in this process.
+        """
+        predicates: list[str] = []
+        values: list[object] = []
+        for accepted in cwds:
+            root = str(accepted or "")
+            if not root:
+                continue
+            floors = tuple(
+                int(inception) for candidate, inception in cwd_inceptions
+                if SR.same_directory(root, candidate))
+            clause = "alelyon_same_directory(cwd, ?) = 1"
+            values.append(root)
+            if floors:
+                clause += " AND at >= ?"
+                values.append(max(floors))
+            predicates.append(f"({clause})")
+        if not predicates:
+            return "0", ()
+        return f"({' OR '.join(predicates)})", tuple(values)
 
     # ── recording ────────────────────────────────────────────────────────────
     def record(self, run: Run) -> bool:
@@ -626,20 +703,36 @@ class FleetLedger:
             last_at=int(row["last_at"] or 0),
             landed=landed, abandoned=abandoned)
 
-    def candidates(self, layer: str, work_kind: str, *,
-                   since: int = 0) -> tuple[Scorecard, ...]:
+    def candidates(self, layer: str, work_kind: str, *, since: int = 0,
+                   cwds: tuple[str, ...] | None = None,
+                   cwd_inceptions: tuple[tuple[str, int], ...] = ()
+                   ) -> tuple[Scorecard, ...]:
         """Every model with a run at this coordinate, best first."""
+        if cwds is not None:
+            scoped = tuple(run for run in self._scoped_runs(
+                               cwds, cwd_inceptions=cwd_inceptions)
+                           if run.layer == layer
+                           and run.work_kind == work_kind and run.at > since)
+            scoped_models = {run.model for run in scoped}
+            cards = [card for card in (
+                _scorecard_from_runs(layer, work_kind, model, scoped)
+                for model in scoped_models) if card is not None]
+            return tuple(sorted(cards,
+                                key=lambda card: (-card.mean_score, card.model)))
         with self._connect() as conn:
-            models = [r["model"] for r in conn.execute(
+            global_models = [r["model"] for r in conn.execute(
                 """SELECT DISTINCT model FROM runs
                     WHERE layer=? AND work_kind=? AND at>? AND space=?""",
                 (layer, work_kind, since, H.LAYER_SPACE_VERSION)).fetchall()]
         cards = [c for c in (self.scorecard(layer, work_kind, m, since=since)
-                             for m in models) if c is not None]
+                             for m in global_models) if c is not None]
         return tuple(sorted(cards, key=lambda c: (-c.mean_score, c.model)))
 
     def runs(self, *, layer: str | None = None, work_kind: str | None = None,
-             model: str | None = None, limit: int = 50) -> tuple[Run, ...]:
+             model: str | None = None, limit: int = 50,
+             cwds: tuple[str, ...] | None = None,
+             cwd_inceptions: tuple[tuple[str, int], ...] = ()
+             ) -> tuple[Run, ...]:
         """The individual runs behind the scores, newest first.
 
         Every other reader here aggregates, and an aggregate is where a wrong
@@ -659,22 +752,45 @@ class FleetLedger:
             if value:
                 clauses.append(f"{column}=?")
                 values.append(value)
-        values.append(max(0, int(limit)))
+        capped = max(0, int(limit))
+        if cwds is not None:
+            scope_clause, scope_values = self._scope_predicate(
+                cwds, cwd_inceptions)
+            clauses.append(scope_clause)
+            values.extend(scope_values)
+        values.append(capped)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""SELECT * FROM runs WHERE {' AND '.join(clauses)}
                      ORDER BY at DESC, run_id LIMIT ?""", values).fetchall()
-        return tuple(Run(
-            run_id=r["run_id"], at=int(r["at"]), layer=r["layer"],
-            work_kind=r["work_kind"], model=r["model"], agent_id=r["agent_id"],
-            fleet_id=r["fleet_id"], session_id=r["session_id"],
-            settled=bool(r["settled"]), turns=int(r["turns"]),
-            out_tokens=int(r["out_tokens"]),
-            seconds=None if r["seconds"] is None else int(r["seconds"]),
-            contested=bool(r["contested"]), branch=r["branch"] or "",
-            cwd=r["cwd"] or "", landed=r["landed"] or O.UNKNOWN) for r in rows)
+        return tuple(_run_from_row(row) for row in rows)
 
-    def all_runs(self) -> tuple[Run, ...]:
+    def _scoped_runs(
+            self, cwds: tuple[str, ...], *,
+            cwd_inceptions: tuple[tuple[str, int], ...] = ()) -> tuple[Run, ...]:
+        """All current-space runs placed at one of the exact checkout roots.
+
+        `None` is deliberately not accepted here: callers use it to mean the
+        historical machine-wide ledger. An empty tuple therefore means an
+        explicit project scope with no admissible checkout, and returns empty.
+        Prefix containment is never placement; `repo-private` is not `repo`.
+        Per-root inception floors distinguish unrelated repositories that used
+        the same path at different times; a retired occupant's rows stay retired.
+        """
+        if not cwds:
+            return ()
+        scope_clause, scope_values = self._scope_predicate(
+            cwds, cwd_inceptions)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM runs WHERE space=? AND {scope_clause} "
+                "ORDER BY at, run_id",
+                (H.LAYER_SPACE_VERSION, *scope_values)).fetchall()
+        return tuple(_run_from_row(row) for row in rows)
+
+    def all_runs(
+            self, *, cwds: tuple[str, ...] | None = None,
+            cwd_inceptions: tuple[tuple[str, int], ...] = ()) -> tuple[Run, ...]:
         """Every run in the current layer space, oldest first.
 
         Separate from `runs()` rather than `runs(limit=huge)`, because the two
@@ -685,20 +801,19 @@ class FleetLedger:
 
         Ordered by `at` ascending with `run_id` breaking ties, so a caller that
         buckets these produces the same buckets on every reading.
+
+        ``cwds=None`` preserves the historical machine-global aggregation API.
+        An explicit tuple is an exact repository-placement query and is
+        bounded in SQLite before a ``Run`` is constructed.
         """
+        if cwds is not None:
+            return self._scoped_runs(
+                cwds, cwd_inceptions=cwd_inceptions)
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM runs WHERE space=? ORDER BY at, run_id",
                 (H.LAYER_SPACE_VERSION,)).fetchall()
-        return tuple(Run(
-            run_id=r["run_id"], at=int(r["at"]), layer=r["layer"],
-            work_kind=r["work_kind"], model=r["model"], agent_id=r["agent_id"],
-            fleet_id=r["fleet_id"], session_id=r["session_id"],
-            settled=bool(r["settled"]), turns=int(r["turns"]),
-            out_tokens=int(r["out_tokens"]),
-            seconds=None if r["seconds"] is None else int(r["seconds"]),
-            contested=bool(r["contested"]), branch=r["branch"] or "",
-            cwd=r["cwd"] or "", landed=r["landed"] or O.UNKNOWN) for r in rows)
+        return tuple(_run_from_row(row) for row in rows)
 
     def run_counts_by_space(self) -> tuple[tuple[int, int], ...]:
         """`(space, runs)` for every layer space in the table, ascending.
@@ -720,7 +835,9 @@ class FleetLedger:
                 "GROUP BY space ORDER BY space").fetchall()
         return tuple((int(r["space"]), int(r["runs"])) for r in rows)
 
-    def careers(self) -> tuple[Career, ...]:
+    def careers(self, *, cwds: tuple[str, ...] | None = None,
+                cwd_inceptions: tuple[tuple[str, int], ...] = ()
+                ) -> tuple[Career, ...]:
         """What every model has done across the space, most-run first.
 
         The ledger is keyed on coordinates, so the model is the one axis it
@@ -734,6 +851,10 @@ class FleetLedger:
         runs behind it are of different kinds — whereas how much a model has
         actually done here is a fact about the record itself.
         """
+        if cwds is not None:
+            return self._scoped_careers(
+                cwds, cwd_inceptions=cwd_inceptions)
+
         by_model: dict[str, list[Scorecard]] = {}
         current: dict[str, list[tuple[str, str]]] = {}
         for layer_key, kind in self.coordinates():
@@ -771,6 +892,54 @@ class FleetLedger:
                 declared_class=declared,
                 measured_class=self.measured_class(model)))
         return tuple(sorted(out, key=lambda c: (-c.runs, c.model)))
+
+    def _scoped_careers(
+            self, cwds: tuple[str, ...], *,
+            cwd_inceptions: tuple[tuple[str, int], ...] = ()
+            ) -> tuple[Career, ...]:
+        """Careers from exact checkout runs, with global standings withheld."""
+        scoped = self._scoped_runs(
+            cwds, cwd_inceptions=cwd_inceptions)
+        by_coordinate: dict[tuple[str, str, str], list[Run]] = {}
+        for run in scoped:
+            by_coordinate.setdefault(
+                (run.model, run.layer, run.work_kind), []).append(run)
+
+        by_model: dict[str, list[Scorecard]] = {}
+        for (model, layer, work_kind), coordinate_runs in by_coordinate.items():
+            card = _scorecard_from_runs(
+                layer, work_kind, model, tuple(coordinate_runs))
+            if card is not None:
+                by_model.setdefault(model, []).append(card)
+
+        out: list[Career] = []
+        for model, model_cards in by_model.items():
+            cards = tuple(sorted(
+                model_cards, key=lambda card: (
+                    -card.mean_score, card.layer, card.work_kind)))
+            runs = sum(card.runs for card in cards)
+            declared, _evidence = H.entry_class(model)
+            out.append(Career(
+                model=model, runs=runs,
+                settled=sum(card.settled for card in cards),
+                contested=sum(card.contested for card in cards),
+                mean_score=round(sum(
+                    card.mean_score * card.runs for card in cards) / runs, 6)
+                if runs else 0.0,
+                mean_tokens=round(sum(
+                    card.mean_tokens * card.runs for card in cards) / runs, 1)
+                if runs else 0.0,
+                last_at=max(card.last_at for card in cards),
+                landed=sum(card.landed for card in cards),
+                abandoned=sum(card.abandoned for card in cards),
+                cards=cards,
+                # Standings have no checkout key. Attaching a machine-global
+                # standing to a project-scoped career would claim evidence the
+                # schema cannot provide, so scoped readers receive no holders
+                # or measured class rather than a relabelled global answer.
+                holds=(), declared_class=declared, measured_class=None))
+        return tuple(sorted(out, key=lambda career: (
+            -career.runs, career.model)))
 
     def standing(self, layer: str, work_kind: str) -> Standing | None:
         """The current standing, or None where nothing has been promoted."""

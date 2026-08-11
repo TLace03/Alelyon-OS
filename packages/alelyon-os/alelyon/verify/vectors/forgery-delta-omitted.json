@@ -1,10 +1,10 @@
 {
   "category": "forgery",
-  "description": "The same attack in its original form: the `delta` member is simply ABSENT from the capture payload. The signer relinks the chain and re-signs the tree head, so the leaf is PROVABLY INCLUDED and internally consistent — and then claims a bound from it anyway. A Δ that was never written is UNKNOWN, and unknown must never read as exact.",
+  "description": "The same attack in its original form: the `delta` member is simply ABSENT from the capture payload. The signer relinks the chain and re-signs the tree head, so the leaf is PROVABLY INCLUDED and internally consistent \u2014 and then claims a bound from it anyway. A \u0394 that was never written is UNKNOWN, and unknown must never read as exact.",
   "envelope": {
     "assumptions": [
       "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
-      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms"
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms"
     ],
     "created": 1000.0,
     "error_budget": {
@@ -12,8 +12,8 @@
       "provider": {
         "inputs": {},
         "origins": {},
-        "reason": "no data layer supplied — nothing was asked about the sources; NOT a finding that they agree",
-        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "reason": "no data layer supplied \u2014 nothing was asked about the sources; NOT a finding that they agree",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
         "status": "unmeasured",
         "trust": "signer-attested"
       },

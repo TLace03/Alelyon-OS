@@ -25,9 +25,9 @@ learned or how it behaves. The facts carry that sentence rather than implying
 it, because a parameter census invites the other reading.
 
 `UNMEASURED` is never rounded to zero. A mixture-of-experts model whose runtime
-declares no routing reports its active parameter count as unavailable rather
-than as its total — a total there would describe an idle expert bank as fully
-active, which is wrong by a factor of the expert count.
+declares no routing, or routing that contradicts its tensor inventory, reports
+its active parameter count as unavailable rather than as its total — a total
+there would describe an idle expert bank as fully active.
 """
 from __future__ import annotations
 
@@ -212,6 +212,7 @@ def _routing_facts(morph) -> List[Fact]:
     used to be readable off the first. A routed model whose runtime declares no
     routing therefore reports the active figure as unavailable rather than as
     its total — a total there describes an idle expert bank as fully active.
+    Contradictory routing declarations carry the engine's more specific reason.
     """
     if not morph.is_mixture_of_experts:
         return []
@@ -228,11 +229,15 @@ def _routing_facts(morph) -> List[Fact]:
                           "what one token reaches, not what is stored",
                           error_kind="exact"))
     else:
+        reason = str(morph.active_path_gap or "").strip()
+        if not reason:
+            reason = (
+                "UNMEASURED — this model routes, but its runtime does not "
+                "declare how many experts a token uses. Reporting the total "
+                "here would describe an idle expert bank as fully active."
+            )
         facts.append(Fact(
-            "active parameters per token", None, "", "",
-            "UNMEASURED — this model routes, but its runtime does not declare "
-            "how many experts a token uses. Reporting the total here would "
-            "describe an idle expert bank as fully active."))
+            "active parameters per token", None, "", "", reason))
     return facts
 
 

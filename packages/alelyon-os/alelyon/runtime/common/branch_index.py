@@ -43,7 +43,9 @@ import re
 import subprocess
 
 from alelyon.runtime.common import toolpath
-from alelyon.runtime.common.worktree_areas import UNMAPPED, all_pillars, area_of
+from alelyon.runtime.common.worktree_areas import (
+    UNMAPPED, AreaSpace, all_pillars, area_of,
+)
 
 #: Where "already landed" is measured from.
 MAINLINE_DEFAULT = "origin/main"
@@ -97,17 +99,20 @@ class BranchRecord:
     last_merged: str = ""               # ISO date, or "" when never merged
     #: For ABSORBED only: the branch that carried this one into the mainline.
     absorbed_into: str = ""
+    #: The selected repository's coordinate vocabulary. ``None`` preserves the
+    #: process-local CLI behavior for callers that are already inside the repo.
+    space: AreaSpace | None = field(default=None, repr=False, compare=False)
 
     @property
     def pillars(self) -> tuple[str, ...]:
         """Every pillar this branch touched, canonically ordered."""
-        return tuple(sorted({area_of(f).pillar for f in self.files}))
+        return tuple(sorted({area_of(f, self.space).pillar for f in self.files}))
 
     @property
     def pillar_counts(self) -> dict[str, int]:
         counts: collections.Counter = collections.Counter()
         for path in self.files:
-            counts[area_of(path).pillar] += 1
+            counts[area_of(path, self.space).pillar] += 1
         return dict(counts.most_common())
 
     @property
@@ -232,7 +237,8 @@ def _own_footprint(ref: str, *, repo: str) -> tuple[str, ...]:
 
 
 def observe(repo_root: str = ".", *,
-            mainline: str = MAINLINE_DEFAULT) -> BranchIndex:
+            mainline: str = MAINLINE_DEFAULT,
+            space: AreaSpace | None = None) -> BranchIndex:
     """Derive the whole index. Read-only: every git call is a query."""
     repo = str(repo_root)
     # Branches live in the same namespace as the mainline they are measured
@@ -340,6 +346,7 @@ def observe(repo_root: str = ".", *,
             prs=tuple(sorted(pull_requests.get(name, ()), key=int)),
             last_merged=max(dates) if dates else "",
             absorbed_into=absorbed_into.get(name, ""),
+            space=space,
         ))
 
     return BranchIndex(mainline=mainline, records=tuple(records),

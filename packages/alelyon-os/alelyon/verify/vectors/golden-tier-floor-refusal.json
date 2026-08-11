@@ -1,6 +1,6 @@
 {
   "category": "golden",
-  "description": "A SIGNED REFUSAL produced by an issuer's tier floor. The program is smooth (a ratio), which the engine would happily certify one tier down with an approximate level — correct in general, and wrong for a product whose claim is that the level is a theorem. Under `params.require_tier: linear-exact` it is refused instead, and the refusal verifies: the floor is in the SIGNED params, so replay reproduces it rather than reporting a replay mismatch.",
+  "description": "A SIGNED REFUSAL produced by an issuer's tier floor. The program is smooth (a ratio), which the engine would happily certify one tier down with an approximate level \u2014 correct in general, and wrong for a product whose claim is that the level is a theorem. Under `params.require_tier: linear-exact` it is refused instead, and the refusal verifies: the floor is in the SIGNED params, so replay reproduces it rather than reporting a replay mismatch.",
   "envelope": {
     "created": 1000.0,
     "error_budget": {

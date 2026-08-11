@@ -85,6 +85,18 @@
       "slug": "forgery-shrunk-delta-resigned"
     },
     {
+      "category": "golden",
+      "file": "golden-series-anchored.json",
+      "must": "pass",
+      "slug": "golden-series-anchored"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-series-old-leaf-after-raw-overwrite.json",
+      "must": "fail",
+      "slug": "forgery-series-old-leaf-after-raw-overwrite"
+    },
+    {
       "category": "forgery",
       "file": "forgery-old-leaf-after-raw-overwrite.json",
       "must": "fail",
@@ -302,10 +314,10 @@
     }
   ],
   "counts": {
-    "forgery": 38,
-    "golden": 9,
+    "forgery": 39,
+    "golden": 10,
     "partial": 3,
-    "total": 50
+    "total": 52
   },
   "generated_by": "tools/gen_cne_vectors.py",
   "not_envelope_expressible": [
