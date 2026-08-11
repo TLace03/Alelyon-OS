@@ -480,6 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
+    # Before anything is printed: a message body is whatever somebody typed.
+    CLI.survive_the_console()
     mesh = _LazyMesh(args.repo, args.mainline)
     # Resolved from the checkout the caller points at, not from the mesh, so a
     # read never observes. `A.load` costs ~0.01s; `W.observe` costs a minute.

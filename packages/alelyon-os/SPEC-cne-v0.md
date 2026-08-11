@@ -454,6 +454,47 @@ frozen leaf hash (§5.2); no hash-layout change is required. A legacy leaf witho
 this object has **no exact row membership** and covers no time-series row. Its
 `lo_ts`/`hi_ts` remain historical diagnostics, never a coverage fallback.
 
+#### 5.3.1 The capture-outcome object (uncertified capture)
+
+A producer whose capture path is fail-open MAY append a leaf recording that a
+batch was written with **no certificate**. Such a leaf carries one additional
+single-key object, which likewise has no `column` member and is therefore ignored
+by every Δ parser:
+
+```json
+{"capture_outcome":{"schema":"alelyon.capture-outcome/v0",
+                    "reason":"certification-declined","columns":["close"]}}
+```
+
+`reason` MUST be one of `certification-disabled`, `certification-declined`,
+`certification-not-supplied`, `certificate-rejected`, `certificate-write-failed`.
+A reason outside that set, a `schema` other than the one above, a non-string
+column, a duplicate column, or **more than one** capture-outcome object in a
+payload makes the object unusable, and an unusable marker MUST NOT be read as its
+absence — see the refusal below.
+
+Such a leaf commits its `value_digest` and its row membership exactly as any
+other leaf does, so the batch's bytes and row set stay tamper-evident. It carries
+a `{"column": …, "delta": null}` entry per captured column, so §5.4 marks every
+one of them **unusable by name** rather than merely absent.
+
+**A verifier MUST refuse to anchor against it (`capture-uncertified-leaf`).** The
+refusal is checked *before* the Δ is parsed, and it is a distinct class from
+`anchor-delta-unusable` on purpose. That class means a commitment is malformed;
+this one means a correct commitment to the fact that no certificate exists. An
+implementation that collapsed the two would report an issuer's honest record of
+its own fail-open capture in the same words as a forgery, and would lose the
+distinction entirely if a marker ever also carried a usable-looking Δ.
+
+*Why the leaf exists.* Without it an uncertified batch appends nothing, and the
+log cannot distinguish "no capture happened" from "a capture happened and was
+never certified" — absence-hiding of the kind §9.6's attempt records exist to
+prevent, in the producer's own capture path
+(PLATFORM.md (internal) §3 items 1–2). What the leaf does **not** do is make
+those rows covered: a producer MUST NOT attribute current rows to a
+capture-outcome leaf, and this specification defines no coverage that such a leaf
+can confer.
+
 ### 5.4 Parsing Δ out of a payload (MUST — the fake-zero rule)
 
 Reference: `attest.py::payload_deltas`. This returns two things: a map of usable
@@ -1214,6 +1255,126 @@ unusable, failing the anchor closed one step earlier with `anchor-delta-unusable
 > into the signed leaf, naming `exact-cents/v0` over ordinary fractional data would
 > have reinstated the zero-width anchored bound this guard was written to kill.
 
+### 7.7 Per-row value commitments (MUST)
+
+Exact timestamp membership (§7.6) answers *was this instant inside that capture*.
+It does not answer *is this still the value that capture stored*, and a raw
+(uncertified) overwrite changes the second while leaving the first intact. The
+leaf's `value_digest` covers the batch's **all-column** bytes, which a party
+holding one column cannot re-derive, so before this section a key-holding signer
+could revise a stored value and anchor the revised series to the leaf that
+described it beforehand.
+
+A capture payload therefore carries one entry per batch, with **no `column`
+member** so that a Δ parser (§5.4) ignores it:
+
+```json
+{"value_commitments": {
+  "encoding": "blake2b-256-row/merkle-v0",
+  "columns": {"close": "<64 hex>", "volume": "<64 hex>"}
+}}
+```
+
+**The row leaf.** For each row, BLAKE2b-256 over, in order: the ASCII domain
+separator `alelyon.cne/value-row/v0`; then `table`, `scope1`, `scope2` and
+`lower(column)`, each as `<Q` its UTF-8 byte length followed by those bytes; then
+the timestamp in the table's frozen membership encoding (`<q` for `bars`, `<d` for
+`series`); then either the single byte `0x00` when the row has **no** value for
+that column, or the byte `0x01` followed by `<d` the value.
+
+The length prefixes are not tidiness. Without them the encoding is not injective
+and two different scopes commit identical bytes, so a commitment to one would be a
+commitment to the other. `0x00` is a distinct tag rather than a `0.0` for the
+reason §5.4 gives about an absent Δ: absent and zero are different facts.
+
+**The column root** is the §6.2 Merkle root over those row leaves, rows **ascending
+by timestamp** — the same total order membership imposes, so a row's leaf index is
+its membership index. A root rather than a list of row hashes because the payload
+travels verbatim inside every envelope; a list is `O(rows × columns)` on the wire
+and would put a million-row capture past the payload byte limit.
+
+**What a verifier MUST do.** A leaf may vouch for a row only if it still commits
+that row's current value. Value consistency is a **coverage** test — the same shape
+as digest identity for the keyed-table branch — and not a separate verdict. For each
+leaf, for the anchored column:
+
+| Situation | Class | Effect |
+|---|---|---|
+| no `value_commitments` entry, or no root for this column | `value-commitment-absent` | the leaf covers nothing |
+| the verifier does not hold every row of that leaf's membership | `value-commitment-unopenable` | the leaf covers nothing |
+| the recomputed root differs from the committed one | `value-commitment-mismatch` | the leaf covers nothing |
+| the recomputed root equals the committed one | — | the leaf covers its membership |
+
+A row left with no covering leaf fails closed, reported as the most specific cause
+that applies to it, falling back to `anchor-row-uncovered`.
+
+**Issuance MUST apply the same rule (MUST).** A producer attributes a row's Δ only
+from a leaf that passes the test above, against its own current values. Without
+this the two sides disagree by construction: the producer anchors a leaf the
+verifier then rejects, and a receipt issued over the issuer's own honest data
+refuses. With it, a scope that can no longer be anchored simply carries no
+transparency block and an honest `authenticated` width.
+
+**Three consequences, stated rather than discovered.** They are the measured cost
+of a batch-level root, and each is pinned by a test in
+`tests/oracle/test_value_commitments.py`:
+
+1. A leaf written before this section makes no statement about its values and
+   therefore anchors nothing — the same fail-closed treatment §7.6 already gives a
+   leaf that predates exact membership.
+2. A consumer holding a narrower window than the capture cannot open the root, and
+   refuses by name rather than passing quietly.
+3. **Revising one row costs its whole batch its anchor, including the rows that did
+   not change.** The root is batch-level, so it no longer reproduces for any row of
+   that batch; a certified revision therefore degrades the scope from
+   `transparency-anchored` to `authenticated` rather than re-anchoring it. This is a
+   false *refusal*, never a false accept, and it is the largest thing this encoding
+   gets wrong.
+
+Per-row inclusion openings carried in the transparency block would fix 2 and 3 by
+making each row checkable independently. They are the v1 candidate (§10.4) and they
+need capture-time row commitments to be retained where a later revision cannot
+overwrite them, which the current store does not do.
+
+**What this does not bind.** It commits the values the signer **stored**, so it
+detects their later revision. It says nothing about whether they were true at
+capture. Per CLAIMS.md (internal) §1 this is revision detection, not invention
+detection, and no wording may imply otherwise.
+
+**A commitment MUST be computed at capture, and MUST NOT be backfilled.**
+
+This is the one rule most likely to be broken by someone acting in good faith. A
+leaf written before this section anchors nothing (consequence 1 above), which on a
+real store is a large number of leaves and looks exactly like a migration waiting
+to be written: the values are still there, so compute the roots and fill them in.
+
+That migration does not restore the property. It destroys it. A backfill computes
+the root from the values the store holds **now** and writes it into a leaf that was
+signed when the values were whatever they were **then**, so it defines the two to be
+equal by construction — which is the only thing the commitment was ever asked to
+decide. Every backfilled leaf would then vouch for whatever a raw overwrite most
+recently left behind.
+
+Measured, not reasoned: with a legacy leaf and one raw overwrite, replay refuses
+with `value-commitment-absent`. After a backfill computed from current store state,
+the same forged envelope over the same overwritten value verifies
+`transparency-anchored`, `ok=true`, **with no reason classes at all**. The
+demonstration is
+`tests/oracle/test_value_commitments.py::test_a_commitment_backfilled_from_current_state_reinstates_the_attack`.
+This is CLAIMS.md (internal) §2.3 — validating against the shape of what the
+writer emitted — in the costume of a data migration.
+
+The only sound way to restore anchoring for a legacy scope is to **recapture** it,
+which writes a new leaf committing values that were current when it was signed.
+
+Note what does and does not catch a backfill. Re-linking a leaf re-derives its
+`leaf_hash`, so the chain and every inclusion proof stay valid and nothing inside
+the log is disturbed. It is detectable only against a tree head witnessed
+**earlier** — the root moves, and a consistency proof against that earlier head
+fails. That is a property of a witness a third party holds, and per
+CLAIMS.md (internal) §1 the shipped witness is co-located with the signer, so it
+is not one today.
+
 ---
 
 ## 8. Deterministic kernel — numeric semantics
@@ -1625,6 +1786,12 @@ anchor-length-mismatch
 anchor-row-uncovered
 anchor-delta-mismatch
 anchor-delta-zero-implausible
+# uncertified capture (§5.3.1)
+capture-uncertified-leaf
+# per-row value commitments (§7.7)
+value-commitment-absent
+value-commitment-unopenable
+value-commitment-mismatch
 # witness
 witness-unpinned
 witness-cosignature-invalid

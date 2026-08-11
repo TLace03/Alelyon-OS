@@ -1,6 +1,6 @@
 {
   "category": "forgery",
-  "description": "The cycle-5e position-binding bug: an inclusion proof is replayed at the wrong index. The sibling SIDE at each level comes from the index bit, so a path only recomputes the root at its true position.",
+  "description": "A leaf that HONESTLY records a capture which produced no certificate (SPEC §5.3.1), used to anchor a width anyway. The signer relinks and re-signs, so the leaf is provably included and internally consistent — and it is not even malformed: it says, correctly, that no Δ exists. The refusal is its own class rather than `anchor-delta-unusable`, because a producer's honest record of its own fail-open capture must not be reported in the same words as a forged commitment.",
   "envelope": {
     "assumptions": [
       "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
@@ -10,95 +10,27 @@
     "error_budget": {
       "model": null,
       "provider": {
-        "anchors": {
-          "price|SYN": {
-            "attempts": {
-              "0": [
-                [
-                  "alpha",
-                  "primary",
-                  "answered",
-                  100.0
-                ],
-                [
-                  "beta",
-                  "secondary",
-                  "unavailable",
-                  null
-                ]
-              ]
-            },
-            "leaves": [
-              {
-                "bits": 0,
-                "hi_ts": 900.0,
-                "inclusion_proof": {
-                  "index": 0,
-                  "leaf_hash": "c82e5437edd17ccb7c7cb0477ab43f79dbdcd80c7b929deabdf360e3c74fbb74",
-                  "proof": [],
-                  "root": "9aea59208290aa2120203459a3a4a167425b7275bec660cc46500b557d8d8c33",
-                  "tree_size": 1,
-                  "value_digest": "0e15b88aade417e4d7fe618965a66827b7fb9f02d49d5a06dc7089da2258d8ab"
-                },
-                "lo_ts": 900.0,
-                "n": 2,
-                "payload": "[{\"origin\": \"primary\", \"outcome\": \"answered\", \"provider\": \"alpha\", \"value\": 100.0}, {\"origin\": \"secondary\", \"outcome\": \"unavailable\", \"provider\": \"beta\", \"value\": null}]",
-                "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-                "seq": 0,
-                "value_digest": "0e15b88aade417e4d7fe618965a66827b7fb9f02d49d5a06dc7089da2258d8ab"
-              }
-            ],
-            "scope": [
-              "SYN",
-              "1d"
-            ],
-            "sth": {
-              "head_leaf": "c82e5437edd17ccb7c7cb0477ab43f79dbdcd80c7b929deabdf360e3c74fbb74",
-              "key_id": "ed25519:ba2655652874c66c",
-              "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
-              "root": "9aea59208290aa2120203459a3a4a167425b7275bec660cc46500b557d8d8c33",
-              "scope": [
-                "SYN",
-                "1d"
-              ],
-              "signature": "a583b1afb885494f5d2ba5bb10f68c2b92464f63bd3f3dc176e657410a205076d46cb069b049d0e3c0f6670e0619a113ad75b450e061eb2db7a1fbc0ef802e06",
-              "table": "corroboration",
-              "timestamp": 1000.0,
-              "tree_size": 1,
-              "type": "alelyon.sth/v0"
-            },
-            "table": "corroboration"
-          }
-        },
         "inputs": {},
         "origins": {},
-        "reason": "this data layer publishes no origin catalogue, so the number of upstreams behind these inputs is unknown",
+        "reason": "no data layer supplied — nothing was asked about the sources; NOT a finding that they agree",
         "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
         "status": "unmeasured",
-        "trust": "transparency-anchored"
+        "trust": "signer-attested"
       },
       "quantization": {
         "exact": true,
         "level": 0.953125,
         "tier": "linear-exact",
-        "width": 6.443961666491305e-07
+        "width": 5.143300839449694e-06
       },
       "sampling": null
     },
     "inputs": [
       {
         "deltas": {
+          "const": 0.0001,
           "n": 120,
-          "runs": [
-            [
-              1.2733658761645206e-05,
-              60
-            ],
-            [
-              1.2259477374798773e-05,
-              60
-            ]
-          ]
+          "uncertified_idx": []
         },
         "digest": "cc3f3ae6464f9e6fa86246303f0bfe8ae57ed8941b8216d420d3acf082b50b77",
         "key": "SYN",
@@ -111,18 +43,18 @@
               "bits": 24,
               "hi_ts": 1711324800.0,
               "inclusion_proof": {
-                "index": 1,
-                "leaf_hash": "d6adc87d79188ce2df1ddf50c8666061f99ab4083ba169466cfe68b333d2f735",
+                "index": 0,
+                "leaf_hash": "3b76110e611cf1221069aec4810e581e1707d4e8e60f45957a2e55830ddc5b07",
                 "proof": [
-                  "6275f423a35fdac8ce3bef83b81d2bf4ff8bc98b80be9f1af242210db33697c7"
+                  "319772a3690da39bf6355caa92cd245ce8d634308c1b0c329e45aa60be4c2cc3"
                 ],
-                "root": "4e2f471bfe914892c65953bc83966eec70191760f3b4aadf3684e82342e0a674",
+                "root": "72e093a485ee9eedcd8a4f18db54d43b360fca1fe613920a5f717283d7eeb61c",
                 "tree_size": 2,
                 "value_digest": "d99cf163d3256571946ecf7801c98dd7b1264a91d54a61e41449a5a30359e845"
               },
               "lo_ts": 1704153600.0,
               "n": 60,
-              "payload": "[{\"column\": \"open\", \"n\": 60, \"delta\": 1.2733658761645206e-05, \"seed\": 20260729, \"error_var\": 1.3512172121501976e-11}, {\"column\": \"high\", \"n\": 60, \"delta\": 1.2733658761645206e-05, \"seed\": 20260730, \"error_var\": 1.3512172121501976e-11}, {\"column\": \"low\", \"n\": 60, \"delta\": 1.2733658761645206e-05, \"seed\": 20260731, \"error_var\": 1.3512172121501976e-11}, {\"column\": \"close\", \"n\": 60, \"delta\": 1.2733658761645206e-05, \"seed\": 20260732, \"error_var\": 1.3512172121501976e-11}, {\"column\": \"volume\", \"n\": 60, \"delta\": 0.11920928955078125, \"seed\": 20260733, \"error_var\": 0.0011842378929335002}, {\"membership\": {\"encoding\": \"i64-epoch-seconds/v0\", \"rows\": [1704153600, 1704240000, 1704326400, 1704412800, 1704672000, 1704758400, 1704844800, 1704931200, 1705017600, 1705276800, 1705363200, 1705449600, 1705536000, 1705622400, 1705881600, 1705968000, 1706054400, 1706140800, 1706227200, 1706486400, 1706572800, 1706659200, 1706745600, 1706832000, 1707091200, 1707177600, 1707264000, 1707350400, 1707436800, 1707696000, 1707782400, 1707868800, 1707955200, 1708041600, 1708300800, 1708387200, 1708473600, 1708560000, 1708646400, 1708905600, 1708992000, 1709078400, 1709164800, 1709251200, 1709510400, 1709596800, 1709683200, 1709769600, 1709856000, 1710115200, 1710201600, 1710288000, 1710374400, 1710460800, 1710720000, 1710806400, 1710892800, 1710979200, 1711065600, 1711324800]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"close\": \"dfe49d2f578de89045c8332ceb7e7b5bb543770adadf2d920c2b8ae600078aed\", \"high\": \"ca4a1edb77ca313fe73fa7530be3e6071cb65749ee9e5b0e597fdc201bd3a077\", \"low\": \"3c4e4a1bb03c95ec36ff760773da8ee8dba6e416a5225e0156c1de0ecd3e9729\", \"open\": \"08932c6b567a8540a407b16d1aaf55bfbc858dd4b9507d7d209acfe7a7bc3174\", \"volume\": \"62ed31e79e48c767b95c83146063304a68b05f1cdbcc1d0515aeaed1cad035ed\"}}}]",
+              "payload": "[{\"column\": \"open\", \"delta\": null}, {\"column\": \"high\", \"delta\": null}, {\"column\": \"low\", \"delta\": null}, {\"column\": \"close\", \"delta\": null}, {\"column\": \"volume\", \"delta\": null}, {\"capture_outcome\": {\"schema\": \"alelyon.capture-outcome/v0\", \"reason\": \"certificate-write-failed\", \"columns\": [\"open\", \"high\", \"low\", \"close\", \"volume\"]}}, {\"membership\": {\"encoding\": \"i64-epoch-seconds/v0\", \"rows\": [1704153600, 1704240000, 1704326400, 1704412800, 1704672000, 1704758400, 1704844800, 1704931200, 1705017600, 1705276800, 1705363200, 1705449600, 1705536000, 1705622400, 1705881600, 1705968000, 1706054400, 1706140800, 1706227200, 1706486400, 1706572800, 1706659200, 1706745600, 1706832000, 1707091200, 1707177600, 1707264000, 1707350400, 1707436800, 1707696000, 1707782400, 1707868800, 1707955200, 1708041600, 1708300800, 1708387200, 1708473600, 1708560000, 1708646400, 1708905600, 1708992000, 1709078400, 1709164800, 1709251200, 1709510400, 1709596800, 1709683200, 1709769600, 1709856000, 1710115200, 1710201600, 1710288000, 1710374400, 1710460800, 1710720000, 1710806400, 1710892800, 1710979200, 1711065600, 1711324800]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"close\": \"dfe49d2f578de89045c8332ceb7e7b5bb543770adadf2d920c2b8ae600078aed\", \"high\": \"ca4a1edb77ca313fe73fa7530be3e6071cb65749ee9e5b0e597fdc201bd3a077\", \"low\": \"3c4e4a1bb03c95ec36ff760773da8ee8dba6e416a5225e0156c1de0ecd3e9729\", \"open\": \"08932c6b567a8540a407b16d1aaf55bfbc858dd4b9507d7d209acfe7a7bc3174\", \"volume\": \"62ed31e79e48c767b95c83146063304a68b05f1cdbcc1d0515aeaed1cad035ed\"}}}]",
               "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
               "seq": 0,
               "value_digest": "d99cf163d3256571946ecf7801c98dd7b1264a91d54a61e41449a5a30359e845"
@@ -132,18 +64,18 @@
               "hi_ts": 1718928000.0,
               "inclusion_proof": {
                 "index": 1,
-                "leaf_hash": "6fb58766eb0edaf6d9b7b0cf2cd25e09e46048980bee09a2c6b3f245ad2021a0",
+                "leaf_hash": "2c210b32de4f6bc37ec4fa198a6fb8eaeef302d79fb80f2f060739b0cbd67265",
                 "proof": [
-                  "05b1982e687433cc4b59f3cd2f6370db9984aaf250a92b4f28f88880d6715aed"
+                  "c57f01279cecff9eb9be8354ffadf84d1268766b7d075b9efa71943dbf8b4bc9"
                 ],
-                "root": "4e2f471bfe914892c65953bc83966eec70191760f3b4aadf3684e82342e0a674",
+                "root": "72e093a485ee9eedcd8a4f18db54d43b360fca1fe613920a5f717283d7eeb61c",
                 "tree_size": 2,
                 "value_digest": "5b3ee94a6ea8ed7124a757d9ec0e35ed6dfd5726e735817432891f03a4ec5711"
               },
               "lo_ts": 1711929600.0,
               "n": 60,
-              "payload": "[{\"column\": \"open\", \"n\": 60, \"delta\": 1.2259477374798773e-05, \"seed\": 20261729, \"error_var\": 1.2524565458600251e-11}, {\"column\": \"high\", \"n\": 60, \"delta\": 1.2259477374798773e-05, \"seed\": 20261730, \"error_var\": 1.2524565458600251e-11}, {\"column\": \"low\", \"n\": 60, \"delta\": 1.2259477374798773e-05, \"seed\": 20261731, \"error_var\": 1.2524565458600251e-11}, {\"column\": \"close\", \"n\": 60, \"delta\": 1.2259477374798773e-05, \"seed\": 20261732, \"error_var\": 1.2524565458600251e-11}, {\"column\": \"volume\", \"n\": 60, \"delta\": 0.11920928955078125, \"seed\": 20261733, \"error_var\": 0.0011842378929335002}, {\"membership\": {\"encoding\": \"i64-epoch-seconds/v0\", \"rows\": [1711929600, 1712016000, 1712102400, 1712188800, 1712275200, 1712534400, 1712620800, 1712707200, 1712793600, 1712880000, 1713139200, 1713225600, 1713312000, 1713398400, 1713484800, 1713744000, 1713830400, 1713916800, 1714003200, 1714089600, 1714348800, 1714435200, 1714521600, 1714608000, 1714694400, 1714953600, 1715040000, 1715126400, 1715212800, 1715299200, 1715558400, 1715644800, 1715731200, 1715817600, 1715904000, 1716163200, 1716249600, 1716336000, 1716422400, 1716508800, 1716768000, 1716854400, 1716940800, 1717027200, 1717113600, 1717372800, 1717459200, 1717545600, 1717632000, 1717718400, 1717977600, 1718064000, 1718150400, 1718236800, 1718323200, 1718582400, 1718668800, 1718755200, 1718841600, 1718928000]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"close\": \"beda1a18f1ee7b32c7057df1c4eddd97260588089000d16a394c72ed4ffe9eeb\", \"high\": \"2cf727f3411933a0571a950ae29de2efd8b3546d23510b6cafa052cd3395229d\", \"low\": \"0a367a2e8fe7fb760004e2fd53df9770ca39e0f0300cd1d498d957936b556258\", \"open\": \"dd76910d80b45df591c4dada6bf5d429f58b148f360b2581a476dc6a21afd7c4\", \"volume\": \"bcd8ea66d4a5acd66e1a687ad69ea775b5e91d0371f099fad8ae3237e6d8bd6b\"}}}]",
-              "prev_hash": "d6adc87d79188ce2df1ddf50c8666061f99ab4083ba169466cfe68b333d2f735",
+              "payload": "[{\"column\": \"open\", \"delta\": null}, {\"column\": \"high\", \"delta\": null}, {\"column\": \"low\", \"delta\": null}, {\"column\": \"close\", \"delta\": null}, {\"column\": \"volume\", \"delta\": null}, {\"capture_outcome\": {\"schema\": \"alelyon.capture-outcome/v0\", \"reason\": \"certificate-write-failed\", \"columns\": [\"open\", \"high\", \"low\", \"close\", \"volume\"]}}, {\"membership\": {\"encoding\": \"i64-epoch-seconds/v0\", \"rows\": [1711929600, 1712016000, 1712102400, 1712188800, 1712275200, 1712534400, 1712620800, 1712707200, 1712793600, 1712880000, 1713139200, 1713225600, 1713312000, 1713398400, 1713484800, 1713744000, 1713830400, 1713916800, 1714003200, 1714089600, 1714348800, 1714435200, 1714521600, 1714608000, 1714694400, 1714953600, 1715040000, 1715126400, 1715212800, 1715299200, 1715558400, 1715644800, 1715731200, 1715817600, 1715904000, 1716163200, 1716249600, 1716336000, 1716422400, 1716508800, 1716768000, 1716854400, 1716940800, 1717027200, 1717113600, 1717372800, 1717459200, 1717545600, 1717632000, 1717718400, 1717977600, 1718064000, 1718150400, 1718236800, 1718323200, 1718582400, 1718668800, 1718755200, 1718841600, 1718928000]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"close\": \"beda1a18f1ee7b32c7057df1c4eddd97260588089000d16a394c72ed4ffe9eeb\", \"high\": \"2cf727f3411933a0571a950ae29de2efd8b3546d23510b6cafa052cd3395229d\", \"low\": \"0a367a2e8fe7fb760004e2fd53df9770ca39e0f0300cd1d498d957936b556258\", \"open\": \"dd76910d80b45df591c4dada6bf5d429f58b148f360b2581a476dc6a21afd7c4\", \"volume\": \"bcd8ea66d4a5acd66e1a687ad69ea775b5e91d0371f099fad8ae3237e6d8bd6b\"}}}]",
+              "prev_hash": "3b76110e611cf1221069aec4810e581e1707d4e8e60f45957a2e55830ddc5b07",
               "seq": 1,
               "value_digest": "5b3ee94a6ea8ed7124a757d9ec0e35ed6dfd5726e735817432891f03a4ec5711"
             }
@@ -153,15 +85,15 @@
             "1d"
           ],
           "sth": {
-            "head_leaf": "6fb58766eb0edaf6d9b7b0cf2cd25e09e46048980bee09a2c6b3f245ad2021a0",
+            "head_leaf": "2c210b32de4f6bc37ec4fa198a6fb8eaeef302d79fb80f2f060739b0cbd67265",
             "key_id": "ed25519:ba2655652874c66c",
             "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
-            "root": "4e2f471bfe914892c65953bc83966eec70191760f3b4aadf3684e82342e0a674",
+            "root": "72e093a485ee9eedcd8a4f18db54d43b360fca1fe613920a5f717283d7eeb61c",
             "scope": [
               "SYN",
               "1d"
             ],
-            "signature": "fe378e00e569cda0441a884a0f81fc43ab2e8cb18041f81c0716ab749c40c3631319b7f7e6dc31489ea88fbb3ef51847b7a7bd3b50349a98ac68962e8a8a4009",
+            "signature": "a9a8d8041e9b31b7144b217405af4c9a0b1ee6576a0681e9c03b966e2fc93eb379b133e1a80b2d60ecdd0e067fd9effbadb65719d68038b2468815d0f33f9902",
             "table": "bars",
             "timestamp": 1000.0,
             "tree_size": 2,
@@ -187,7 +119,7 @@
     "refused": false,
     "scalar": 99.60969744767053,
     "seed": 7,
-    "signature": "4cc54a8237c8f2b9ec2fa7be82cd7f2442a5efeeb65b04c7f4a9da4116990af41cf45195c11781fbc82a239c1e07da51cbac0e0076a3b517390184abdde18b00",
+    "signature": "ca5725fd21d38bfb1b4d7dff6e27000dfe6f950115633f8c990d433bdbd652615652c12592637534c2194accdd3fdf993b1cd99574eb49fb85cf8005b417e80d",
     "type": "alelyon.cne/v0"
   },
   "expect": {
@@ -197,7 +129,7 @@
       "inputs": true,
       "key_status": null,
       "program": true,
-      "provider": true,
+      "provider": null,
       "scalar": true,
       "tier": true,
       "transparency": false,
@@ -206,12 +138,12 @@
     },
     "ok": false,
     "reason_classes": [
-      "anchor-inclusion-failed"
+      "capture-uncertified-leaf"
     ],
     "width_trust": "authenticated"
   },
   "expect_classes": [
-    "anchor-inclusion-failed"
+    "capture-uncertified-leaf"
   ],
   "expect_off_substrate": {
     "checks": {
@@ -220,7 +152,7 @@
       "inputs": true,
       "key_status": null,
       "program": true,
-      "provider": true,
+      "provider": null,
       "scalar": true,
       "tier": true,
       "transparency": false,
@@ -229,7 +161,7 @@
     },
     "ok": false,
     "reason_classes": [
-      "anchor-inclusion-failed",
+      "capture-uncertified-leaf",
       "scalar-tolerance-window",
       "substrate-mismatch"
     ],
@@ -489,6 +421,6 @@
     "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
     "witness_key_hex": null
   },
-  "slug": "forgery-wrong-index-inclusion-proof",
+  "slug": "forgery-uncertified-capture-leaf",
   "spec_version": "alelyon.cne-spec/0.3.0"
 }

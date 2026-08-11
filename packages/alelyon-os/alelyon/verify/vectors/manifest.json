@@ -74,9 +74,21 @@
     },
     {
       "category": "forgery",
+      "file": "forgery-uncertified-capture-leaf.json",
+      "must": "fail",
+      "slug": "forgery-uncertified-capture-leaf"
+    },
+    {
+      "category": "forgery",
       "file": "forgery-shrunk-delta-resigned.json",
       "must": "fail",
       "slug": "forgery-shrunk-delta-resigned"
+    },
+    {
+      "category": "forgery",
+      "file": "forgery-old-leaf-after-raw-overwrite.json",
+      "must": "fail",
+      "slug": "forgery-old-leaf-after-raw-overwrite"
     },
     {
       "category": "forgery",
@@ -290,10 +302,10 @@
     }
   ],
   "counts": {
-    "forgery": 36,
+    "forgery": 38,
     "golden": 9,
     "partial": 3,
-    "total": 48
+    "total": 50
   },
   "generated_by": "tools/gen_cne_vectors.py",
   "not_envelope_expressible": [

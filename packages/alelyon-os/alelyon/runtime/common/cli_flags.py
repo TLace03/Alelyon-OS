@@ -50,6 +50,7 @@ What this does not do
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Any, Iterable, Sequence
 
 
@@ -107,3 +108,47 @@ def subcommands(parser: argparse.ArgumentParser,
                 trailing: argparse.ArgumentParser, **kwargs) -> _Subcommands:
     """`parser.add_subparsers(**kwargs)`, with `trailing` on every subparser."""
     return _Subcommands(parser.add_subparsers(**kwargs), trailing)
+
+
+def survive_the_console(stream=None) -> None:
+    """Stop a console codepage from killing a command part-way through output.
+
+    Call this once at the top of a CLI's `main`, before anything is printed.
+
+    **The defect it closes, reproduced rather than imagined.** On 2026-08-10
+    `alelyon-fleet inbox` died with `UnicodeEncodeError: 'charmap' codec can't
+    encode character '\u0301'` while printing a finding whose body contained a
+    combining acute — and the finding was *about* Unicode normalisation, which
+    is how the character got there. Windows resolves `sys.stdout` to cp1252 by
+    default and cp437 on an older console, and this repository's own findings,
+    chat messages and claim notes are written by models: em dashes, arrows,
+    accented names and box drawing all appear routinely. Any one of them ends
+    the command.
+
+    **Why that is worse than an ugly glyph.** The failure lands *mid-stream*, so
+    the reader gets a partial listing and a traceback rather than nothing — a
+    truncated inbox looks like a short inbox. `AGENTS.md` §18 requires reading
+    `inbox` before debugging anything, so the one command a session is obliged
+    to run is the one a single accented character can silence. Worse, whoever
+    published the finding is told it reached them: routing is recorded on
+    publication, and nothing downstream knows the reader never saw the body.
+
+    **Degraded, and visibly so.** `backslashreplace` renders an unencodable
+    character as an escape the reader can see, rather than dropping it or
+    substituting a plausible neighbour. A lost glyph must look lost — silently
+    swapping one for `?` would let a name print as a different name, which is
+    the failure `worktree_areas` already had once with path spellings.
+
+    The stream's *encoding* is deliberately left alone. A console that was set
+    up as UTF-8 keeps it; this only withdraws the stream's licence to raise.
+    """
+    for target in ((stream,) if stream is not None else (sys.stdout, sys.stderr)):
+        reconfigure = getattr(target, "reconfigure", None)
+        if reconfigure is None:      # a capture object, a pipe wrapper, a mock
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):
+            # Detached, or a stream that will not be told. Raising here would
+            # replace a crash late in the output with one before any of it.
+            continue

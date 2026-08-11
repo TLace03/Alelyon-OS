@@ -1,0 +1,286 @@
+{
+  "category": "forgery",
+  "description": "ALE-COR-001's last residual (PLATFORM.md §3 item 4). The signer captures a batch, then OVERWRITES one stored value by a raw, uncertified write, and anchors the revised series to the leaf that covered it beforehand. Every earlier guard passes: the timestamp is still inside that capture, the Δ is still the one the log vouches for, and the batch's all-column value_digest is not something a holder of `close` could ever re-derive. The per-row value commitment is what refuses it — the leaf no longer commits the value now at that row, so it stops covering the row it used to vouch for.",
+  "envelope": {
+    "assumptions": [
+      "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
+      "covers STORAGE QUANTIZATION only — sampling/provider/model error are separate terms"
+    ],
+    "created": 1000.0,
+    "error_budget": {
+      "model": null,
+      "provider": {
+        "inputs": {},
+        "origins": {},
+        "reason": "no data layer supplied — nothing was asked about the sources; NOT a finding that they agree",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it — sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "status": "unmeasured",
+        "trust": "signer-attested"
+      },
+      "quantization": {
+        "exact": true,
+        "level": 0.953125,
+        "tier": "linear-exact",
+        "width": 8.178273560588423e-07
+      },
+      "sampling": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 1.1956689282166268e-05,
+          "n": 60,
+          "uncertified_idx": []
+        },
+        "digest": "5fe58e3f5ad3155a43ee58e3957ed7656e9d357f318b1e42b388f203ae04860b",
+        "key": "REU",
+        "kind": "price",
+        "n": 60,
+        "transparency": {
+          "column": "close",
+          "leaves": [
+            {
+              "bits": 24,
+              "hi_ts": 1711324800.0,
+              "inclusion_proof": {
+                "index": 0,
+                "leaf_hash": "33d0d405a002fc307dcd7cf1573b8c8c421a9d6a95b107c9c39933ad846b19af",
+                "proof": [
+                  "becbf6ef03f80f2b8d9b3f4baa354f8cb0403f25a9632acd62be4ad27b2ad0e9"
+                ],
+                "root": "1d93a9987493e7b8979677252fcb3e654f9144de311e203fe2ef1c105683c786",
+                "tree_size": 2,
+                "value_digest": "c0fc18946d5b6c6167bdd4059fe8de959e6147100513a8aa21d844bce3bed983"
+              },
+              "lo_ts": 1704153600.0,
+              "n": 60,
+              "payload": "[{\"column\": \"open\", \"n\": 60, \"delta\": 1.1956689282166268e-05, \"seed\": 20260729, \"error_var\": 1.1913534882522476e-11}, {\"column\": \"high\", \"n\": 60, \"delta\": 1.1956689282166268e-05, \"seed\": 20260730, \"error_var\": 1.1913534882522476e-11}, {\"column\": \"low\", \"n\": 60, \"delta\": 1.1956689282166268e-05, \"seed\": 20260731, \"error_var\": 1.1913534882522476e-11}, {\"column\": \"close\", \"n\": 60, \"delta\": 1.1956689282166268e-05, \"seed\": 20260732, \"error_var\": 1.1913534882522476e-11}, {\"column\": \"volume\", \"n\": 60, \"delta\": 0.11920928955078125, \"seed\": 20260733, \"error_var\": 0.0011842378929335002}, {\"membership\": {\"encoding\": \"i64-epoch-seconds/v0\", \"rows\": [1704153600, 1704240000, 1704326400, 1704412800, 1704672000, 1704758400, 1704844800, 1704931200, 1705017600, 1705276800, 1705363200, 1705449600, 1705536000, 1705622400, 1705881600, 1705968000, 1706054400, 1706140800, 1706227200, 1706486400, 1706572800, 1706659200, 1706745600, 1706832000, 1707091200, 1707177600, 1707264000, 1707350400, 1707436800, 1707696000, 1707782400, 1707868800, 1707955200, 1708041600, 1708300800, 1708387200, 1708473600, 1708560000, 1708646400, 1708905600, 1708992000, 1709078400, 1709164800, 1709251200, 1709510400, 1709596800, 1709683200, 1709769600, 1709856000, 1710115200, 1710201600, 1710288000, 1710374400, 1710460800, 1710720000, 1710806400, 1710892800, 1710979200, 1711065600, 1711324800]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"close\": \"62a84e274b7bc3c533f7bbffd3e39d445c83aa760e41979fd25c45c44bfe0cc8\", \"high\": \"7c05b733b94f2555e301b2b5859af6e8cf4277fca404b07d326a383012330b7e\", \"low\": \"638df40a19f86dd1799de239dee72a64e89947b4b8d31d415206a40028f66326\", \"open\": \"01af5d5d02f3f1eb1408aa9ceaea30f07dbb8bdf8bdce781df975762174ea427\", \"volume\": \"9a2ff7d253ec90cfec78dd2dc840125f3f20080994930c6b07547386dfb85287\"}}}]",
+              "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "seq": 0,
+              "value_digest": "c0fc18946d5b6c6167bdd4059fe8de959e6147100513a8aa21d844bce3bed983"
+            }
+          ],
+          "scope": [
+            "REU",
+            "1d"
+          ],
+          "sth": {
+            "head_leaf": "9fb1bb6fd8d0f31e9c286b1a085c2dcec7873c0a6ee4f4fc2dc07e0a709ff6b1",
+            "key_id": "ed25519:ba2655652874c66c",
+            "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "root": "1d93a9987493e7b8979677252fcb3e654f9144de311e203fe2ef1c105683c786",
+            "scope": [
+              "REU",
+              "1d"
+            ],
+            "signature": "53ea0e04d881ea5c0a31a131e363524cf47a19294e84a91d3822eac0b492dcd178e64112374460aba7ebd83d0d91e1ced77cacc53ea0e7d7919829161e4cf20e",
+            "table": "bars",
+            "timestamp": 1000.0,
+            "tree_size": 2,
+            "type": "alelyon.sth/v0"
+          },
+          "table": "bars"
+        },
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "strict": true
+    },
+    "program": "show mean(price(\"REU\"))",
+    "program_class": "linear-exact",
+    "program_hash": "3d3daf04d233b74511f09bece6bd8c95ebc185f3345586574940d9273f070964",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": null,
+    "refused": false,
+    "scalar": 105.84228702898336,
+    "seed": 7,
+    "signature": "0b06baa1ece1844618ded91d8c5998cb96062fb7c147e018b373dbcd1c7654ab9b1be324c493186c2984accffbb89837e548b29309fbb36f41da2d0efdafc708",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": true,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "value-commitment-mismatch"
+    ],
+    "width_trust": "authenticated"
+  },
+  "expect_classes": [
+    "value-commitment-mismatch"
+  ],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": false,
+      "width": null,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "scalar-tolerance-window",
+      "substrate-mismatch",
+      "value-commitment-mismatch"
+    ],
+    "width_trust": "unverified"
+  },
+  "inputs": {
+    "price|REU": {
+      "index": [
+        1704153600.0,
+        1704240000.0,
+        1704326400.0,
+        1704412800.0,
+        1704672000.0,
+        1704758400.0,
+        1704844800.0,
+        1704931200.0,
+        1705017600.0,
+        1705276800.0,
+        1705363200.0,
+        1705449600.0,
+        1705536000.0,
+        1705622400.0,
+        1705881600.0,
+        1705968000.0,
+        1706054400.0,
+        1706140800.0,
+        1706227200.0,
+        1706486400.0,
+        1706572800.0,
+        1706659200.0,
+        1706745600.0,
+        1706832000.0,
+        1707091200.0,
+        1707177600.0,
+        1707264000.0,
+        1707350400.0,
+        1707436800.0,
+        1707696000.0,
+        1707782400.0,
+        1707868800.0,
+        1707955200.0,
+        1708041600.0,
+        1708300800.0,
+        1708387200.0,
+        1708473600.0,
+        1708560000.0,
+        1708646400.0,
+        1708905600.0,
+        1708992000.0,
+        1709078400.0,
+        1709164800.0,
+        1709251200.0,
+        1709510400.0,
+        1709596800.0,
+        1709683200.0,
+        1709769600.0,
+        1709856000.0,
+        1710115200.0,
+        1710201600.0,
+        1710288000.0,
+        1710374400.0,
+        1710460800.0,
+        1710720000.0,
+        1710806400.0,
+        1710892800.0,
+        1710979200.0,
+        1711065600.0,
+        1711324800.0
+      ],
+      "name": "REU",
+      "values": [
+        100.00122575228926,
+        100.29998327315468,
+        100.02501634072712,
+        99.13420096757596,
+        98.68346594892054,
+        97.70488133025877,
+        97.76364744978265,
+        99.07389136049858,
+        98.58623161664245,
+        97.97453291365434,
+        98.45445016988987,
+        98.80582416420152,
+        98.90998627757916,
+        97.98964988209818,
+        97.96099704596486,
+        98.64211604462191,
+        97.31615428944556,
+        96.87082464493174,
+        95.02909183792033,
+        93.80366097406917,
+        92.0760401172768,
+        91.85958172388456,
+        90.69531311410702,
+        90.94132625308337,
+        91.08388201576285,
+        90.91361770897281,
+        88.62554543109397,
+        88.14812641100447,
+        88.10536490204579,
+        88.20519600847146,
+        999.0,
+        86.44058597747559,
+        85.59474996121313,
+        84.90243107848411,
+        85.80315301635846,
+        85.11026925988055,
+        85.08258229296622,
+        85.83504443207183,
+        85.33411668856098,
+        85.23879614325931,
+        85.33295358135814,
+        85.38737781464337,
+        84.34133509822612,
+        84.40554960482338,
+        85.55247385665967,
+        84.2288577206782,
+        84.95270480722806,
+        85.05409338137736,
+        84.50850371604473,
+        86.19902279254316,
+        86.85608640424148,
+        85.81442598901438,
+        85.8783705661463,
+        86.37362860276284,
+        86.21056803109792,
+        86.79931467583934,
+        86.74157219693085,
+        87.3203570333336,
+        88.57647424225412,
+        87.977996803599
+      ]
+    }
+  },
+  "must": "fail",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "forgery-old-leaf-after-raw-overwrite",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}

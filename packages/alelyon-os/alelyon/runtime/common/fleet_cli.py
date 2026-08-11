@@ -490,29 +490,90 @@ def _cmd_supply(args, mesh, bus, session, evidence, space) -> int:
             print(f"  (the orchestration chain could not be read: "
                   f"{type(exc).__name__}: {exc})", file=sys.stderr)
 
+    # The observation series and the receipt store are read here rather than
+    # inside `build` so the engine stays injectable and offline-testable: a
+    # missing database narrows the answer and never breaks the command.
+    cycle = None
+    try:
+        from alelyon.runtime.common import job_cycle as JC
+        database = JC.default_database(mesh.repo_root)
+        if Path(database).exists():
+            cycle = JC.CycleLog(database)
+    except Exception as exc:  # noqa: BLE001 - no series yet is the normal case
+        print(f"  (the cycle log could not be read: {type(exc).__name__}: "
+              f"{exc})", file=sys.stderr)
+
+    # The subjects a run declared, classified against the corpus. Counted over
+    # SUBJECTS rather than receipts on purpose: "N of M receipts carry a
+    # subject" measures how many runs used the flag, where a reader of a supply
+    # chain is asking how many ITEMS have a verification naming them. The
+    # receipt count also wanted a denominator `ReceiptStore` cannot produce -
+    # only `receipts(limit=N)`, whose total would be a page size - and printing
+    # a page size as a total is the defect this desk exists to remove.
+    #
+    # `subjects(limit=N)` is one query and its truncation is DETECTABLE: a row
+    # count equal to the limit means the read was cut off, and the figure is
+    # withheld rather than published short.
+    subjects = None
+    if not args.no_corpus:
+        try:
+            from alelyon.runtime.common import pr_relay as PRR
+            from alelyon.runtime.common import verification_receipt as VR
+            limit = 5000
+            rows = VR.ReceiptStore(PRR.default_database(mesh.repo_root)).subjects(
+                limit=limit)
+            if len(rows) < limit:
+                subjects = SS.classify_subjects({s for s, _ in rows}, corpus)
+        except Exception:  # noqa: BLE001 - an absent relay database is normal
+            subjects = None
+
     chain = SS.build(mesh=mesh, activity=activity, blueprint=blueprint,
-                     plans=plans, claims=bus.active_claims())
+                     plans=plans, claims=bus.active_claims(), cycle=cycle,
+                     subjects=subjects)
 
     print(f"Work supply chain over {mesh.repo_root}")
     print(f"  {chain.headline}")
     print()
 
     print("  THE LINE")
-    print("  STATION               IN PROCESS   PASSED   UNMEASURED")
+    print("  STATION               IN PROCESS   PASSED   UNMEASURED   "
+          "MEDIAN d   PASSAGES")
     neck = chain.bottleneck
+    slowest = chain.constraint
     for station in chain.stations:
-        mark = "  << CONSTRAINT" if neck is not None and station.key == neck.key \
-            else ""
+        marks = []
+        if neck is not None and station.key == neck.key:
+            marks.append("<< MOST WIP")
+        if slowest is not None and station.key == slowest.key:
+            marks.append("<< SLOWEST")
+        # A median that fell inside one sampling interval is an upper bound, so
+        # it is printed with a `<` rather than as a duration.
+        if station.cycle_days is None:
+            median = "-"
+        elif station.below_resolution:
+            median = f"<{station.cycle_days:.2f}"
+        else:
+            median = f"{station.cycle_days:.2f}"
+        mark = ("  " + " ".join(marks)) if marks else ""
         print(f"  {station.title:<20} {station.wip:>10}   {station.passed:>6}   "
-              f"{station.unmeasured:>10}{mark}")
+              f"{station.unmeasured:>10}   {median:>8}   "
+              f"{station.passages:>8}{mark}")
     print()
     if neck is not None:
-        print(f"  The constraint is where work has ACCUMULATED, which is a "
-              f"weaker statement")
-        print(f"  than 'this station is slowest'. Nothing records a job "
-              f"completing, so")
-        print(f"  throughput and cycle time are UNMEASURED and only queue depth "
-              f"is observed.")
+        print(f"  MOST WIP is where work has ACCUMULATED, which is a weaker "
+              f"statement than")
+        print(f"  'this station is slowest'. They are separate columns because "
+              f"they are")
+        print(f"  separate questions, and a queue depth read as a duration is "
+              f"the easiest")
+        print(f"  wrong conclusion to draw here.")
+    if chain.cycle_coverage:
+        print(f"  Cycle: {chain.cycle_coverage}")
+        if slowest is None:
+            print(f"  SLOWEST is UNMEASURED -- no station has a passage above "
+                  f"the sampling")
+            print(f"  interval, so none can be ranked above another.")
+    if neck is not None or chain.cycle_coverage:
         print()
 
     risky = [c for c in chain.chokepoints if c.risk != "ORDINARY"]
@@ -1122,6 +1183,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
+    # Before anything is printed: every body below is another session's prose.
+    CLI.survive_the_console()
 
     mesh = W.observe(args.repo, mainline=args.mainline)
     # The space belongs to the repository under observation, resolved from

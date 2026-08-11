@@ -112,6 +112,18 @@ REASON_CLASSES = frozenset({
     "anchor-delta-unusable", "anchor-no-data", "anchor-length-mismatch",
     "anchor-row-uncovered", "anchor-delta-mismatch",
     "anchor-delta-zero-implausible",
+    # A leaf the ISSUER wrote to record that a capture produced no certificate
+    # (PLATFORM.md §3 items 1–2, SPEC §5.3.1). Distinct from
+    # `anchor-delta-unusable`, which it would otherwise fall out as: that class
+    # says the Δ is malformed, and this one is not malformed — it is honestly
+    # absent, recorded on purpose, and can never vouch for a Δ.
+    "capture-uncertified-leaf",
+    # per-row/per-column value commitments (PLATFORM.md §3 item 4). A leaf whose
+    # timestamps cover a row says nothing about the VALUE at that row unless it
+    # commits one; these three separate "the leaf makes no statement", "it makes
+    # one this verifier cannot open", and "it makes one that disagrees".
+    "value-commitment-absent", "value-commitment-unopenable",
+    "value-commitment-mismatch",
     # witness
     "witness-unpinned", "witness-cosignature-invalid", "witness-partial",
     "witness-malformed",
@@ -1029,6 +1041,8 @@ def _verify_one_anchor(c: dict, input_data: Dict, public_key_hex: str):
     from alelyon.runtime.atlas.data.attest import (verify_tree_head,
                                                    verify_merkle_path, cert_leaf_hash,
                                                    payload_deltas, payload_laws,
+                                                   payload_capture_outcome,
+                                                   leaf_value_coverage,
                                                    validated_payload_membership)
     blk = c.get("transparency") or {}
     sth = blk.get("sth")
@@ -1086,6 +1100,20 @@ def _verify_one_anchor(c: dict, input_data: Dict, public_key_hex: str):
                                   int(proof["tree_size"]), list(proof["proof"]), root):
             return False, "anchor-inclusion-failed", (
                 "leaf inclusion proof does not recompute the STH root")
+        # A leaf that RECORDS an uncertified capture can never vouch for a Δ, and
+        # it is refused before the Δ is even looked at. Checked here rather than
+        # left to fall out of the unusable-Δ test below because the two say
+        # different things to a reader: that one reports a malformed commitment,
+        # this one reports a correct commitment to the fact that no certificate
+        # exists. Collapsing them would make an issuer's honest record of its own
+        # fail-open capture indistinguishable from a forgery — and would let the
+        # distinction quietly disappear if the marker ever grew a usable-looking Δ.
+        marker = payload_capture_outcome(lf["payload"])
+        if marker is not None:
+            return False, "capture-uncertified-leaf", (
+                f"proven capture leaf {lf.get('seq')} records an UNCERTIFIED "
+                f"capture ({marker['reason']}); it commits no Δ for any column "
+                f"and cannot anchor a width")
         # A Δ the signer never wrote is UNKNOWN, not zero. Reading an absent field
         # as 0.0 let a key-holding signer omit it at capture and have the same
         # fabricated zero appear on BOTH sides of this comparison — an exactly
@@ -1110,7 +1138,8 @@ def _verify_one_anchor(c: dict, input_data: Dict, public_key_hex: str):
             membership = frozenset(membership)
         leaf_claims.append((membership, cols.get(str(col).lower()),
                             laws.get(str(col).lower()),
-                            str(lf.get("value_digest"))))
+                            str(lf.get("value_digest")),
+                            lf["payload"]))
     # re-derive per-row Δ from the PROVEN leaves; must equal the committed Δ
     series = input_data.get((c.get("kind"), c.get("key")), input_data.get(c.get("key")))
     if series is None:
@@ -1126,7 +1155,7 @@ def _verify_one_anchor(c: dict, input_data: Dict, public_key_hex: str):
         # `_anchor_table_input`). `lo_ts`/`hi_ts` carry no meaning for a table scope
         # and MUST NOT be interval-tested.
         digest = table_digest(s)
-        matched = [(d, law) for _membership, d, law, vd in leaf_claims
+        matched = [(d, law) for _membership, d, law, vd, _pl in leaf_claims
                    if d is not None and vd == digest]
         if not matched:
             return False, "anchor-row-uncovered", (
@@ -1149,13 +1178,61 @@ def _verify_one_anchor(c: dict, input_data: Dict, public_key_hex: str):
     if len(committed) != len(ts):
         return False, "anchor-length-mismatch", (
             "committed Δ length differs from the supplied data")
+
+    # A leaf may only vouch for a row whose CURRENT value it still commits.
+    #
+    # Exact timestamp membership answers "was this instant in that capture", which
+    # a raw overwrite of the value leaves entirely intact — the row is still in the
+    # batch, and the batch's all-column `value_digest` is not something a holder of
+    # one column can re-derive. So membership was load-bearing for coverage and
+    # silent about identity, and a key-holding signer could anchor a revised series
+    # to the leaf that described the values BEFORE the revision.
+    #
+    # Value consistency is therefore a coverage test, exactly as digest identity is
+    # for the keyed-table branch above, and not a separate verdict: a leaf that no
+    # longer describes the current values stops covering, and a row that is left
+    # with no covering leaf fails as uncovered. That ordering is what keeps a
+    # LEGITIMATE revision working — recertifying a row writes a fresh leaf whose
+    # commitment matches, and it takes over the coverage the stale leaf loses.
+    verifier_rows = dict(zip(ts, vals))
+    covering_claims = []
+    excluded: Dict[str, set] = {"absent": set(), "unopenable": set(),
+                                "mismatch": set()}
+    for membership, d, law, _vd, payload in leaf_claims:
+        if d is None or membership is None:
+            continue
+        why = leaf_value_coverage(str(table), str(s1), str(s2), str(col),
+                                  payload, membership, verifier_rows)
+        if why is not None:
+            excluded[why].update(membership)
+            continue
+        covering_claims.append((membership, d, law))
+
     for i, t in enumerate(ts):
         best, best_law = None, None
-        for membership, d, law, _vd in leaf_claims:
-            if d is not None and membership is not None and t in membership:
+        for membership, d, law in covering_claims:
+            if t in membership:
                 if best is None or d > best:
                     best, best_law = d, law
         if best is None:
+            # Name the cause the reader can act on: a row that WAS covered by a
+            # timestamp and lost it to a value commitment is a different fact from
+            # a row no capture leaf ever touched.
+            if t in excluded["mismatch"]:
+                return False, "value-commitment-mismatch", (
+                    "a proven capture leaf covers this row's timestamp but no "
+                    "longer commits its current value — the row was revised after "
+                    "that capture, so that leaf's Δ does not vouch for this value")
+            if t in excluded["unopenable"]:
+                return False, "value-commitment-unopenable", (
+                    "the covering capture leaf commits its values as one root over "
+                    "the whole batch, and the data supplied here does not contain "
+                    "every row of that batch, so the commitment cannot be opened")
+            if t in excluded["absent"]:
+                return False, "value-commitment-absent", (
+                    "the covering capture leaf commits no per-row value for column "
+                    f"'{col}' — it predates value commitments, so its timestamps "
+                    "cover the row without vouching for the value at it")
             return False, "anchor-row-uncovered", (
                 "a consumed row is not covered by any proven capture leaf")
         if float(best) != float(committed[i]):

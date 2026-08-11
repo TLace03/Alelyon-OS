@@ -75,6 +75,7 @@ import os
 from pathlib import Path
 import re
 import time
+from typing import NamedTuple
 
 from alelyon.runtime.common.session_records import (
     DEFAULT_RECORDS_ROOT, MAX_LINE_BYTES, UNATTRIBUTED, same_directory,
@@ -90,6 +91,8 @@ EXCERPT_CHARS = 900
 
 #: How many recent turns are retained per agent and per session. A fleet view
 #: shows what is happening now; the transcript is the archive and stays on disk.
+#: Counted in RESPONSES, so the window reaches further back than the record
+#: count suggests — a response that made three tool calls occupies one slot.
 RECENT_TURNS = 24
 
 #: Bytes of a session transcript's tail to read for current activity.
@@ -146,6 +149,11 @@ LIMITS: tuple[str, ...] = (
     "Token counts are the harness's own usage figures for turns this pass "
     "read. A session whose transcript was truncated or rotated reports less "
     "than it spent.",
+    "A turn here is one model RESPONSE, not one transcript record. The harness "
+    "writes a response's blocks as several records and repeats that response's "
+    "usage on each, so counting records would bill one response several times. "
+    "Tool CALL counts are not deduplicated, because a response that called "
+    "three tools really did call three.",
 )
 
 
@@ -158,7 +166,17 @@ def redact(text: str, limit: int = 220) -> str:
 
 @dataclass(frozen=True)
 class Turn:
-    """One turn, as the harness recorded it.
+    """One model RESPONSE, assembled from the records the harness wrote for it.
+
+    Not one record. The harness writes a response's content blocks as separate
+    records — the thinking on one, each tool call on the next — and stamps the
+    response's whole `usage` on every one of them. A Turn per record would
+    therefore repeat a response's tokens once per block, so the records of one
+    response are merged into one Turn here, carrying its tokens once and all of
+    its tool calls in order.
+
+    `at` is the first of those records; `input_tokens` and `output_tokens` are
+    the response's, not a share of them.
 
     Everything but `text` and `thinking` is structure the model did not write.
     """
@@ -176,10 +194,74 @@ class Turn:
     targets: tuple[str, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    #: How many thinking blocks this turn carried, redacted ones included.
+    #: DERIVED, not QUOTED: it counts blocks the harness wrote rather than
+    #: quoting what they said, and it is the only way to tell a turn that
+    #: reasoned behind a redaction from a turn that did not reason.
+    thinking_blocks: int = 0
+    #: How many of those carried text after redaction. Never larger than
+    #: `thinking_blocks`; the difference is what was withheld.
+    thinking_readable: int = 0
 
     @property
     def has_content(self) -> bool:
         return bool(self.text or self.thinking)
+
+
+@dataclass(frozen=True)
+class TurnScope:
+    """What the turns that named one exact set of files spent.
+
+    The harness writes a turn's `usage` and its `tool_use` inputs on the same
+    record, so the tokens a turn spent and the files it named are available
+    together. Everything else in this module sums the two apart — a total bill
+    and a union of files — which throws the pairing away. This keeps it, and it
+    is the only thing standing between "the fleet spent 4M tokens and touched
+    these 300 files" and "this area cost at least *this* much".
+
+    Turns are grouped by the exact set of files they named, never divided
+    between them. A turn that read two files spent its tokens on both and no
+    record says how much on each, so a reader wanting a per-area figure gets a
+    lower and an upper bound out of these groups rather than an invented split.
+    """
+
+    #: Repository-relative, sorted, deduplicated. Empty when these turns named
+    #: no placeable file.
+    files: tuple[str, ...] = ()
+    #: Repository paths these turns named inside a shell COMMAND, verified
+    #: against the index. A weaker class of evidence than `files` and kept
+    #: apart for that reason: `files` comes from a field the harness recorded,
+    #: while this is a parse of text the model wrote. Both say "named", neither
+    #: says "changed" — but only one of them was structured when it arrived.
+    commanded: tuple[str, ...] = ()
+    #: How many of the paths these turns named fell outside the repository. Non-
+    #: zero with an empty `files` means the turns worked entirely outside the
+    #: tree, which is NOT the same fact as naming no file at all.
+    outside: int = 0
+    turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def named_nothing(self) -> bool:
+        """True when these turns named nothing this repository contains.
+
+        Thinking, a search, a plain answer, a shell command that mentioned no
+        tracked file — real spend with nothing to hang it on. Reported as its
+        own quantity and never spread across the files a neighbouring turn
+        happened to name.
+        """
+        return not self.files and not self.commanded and not self.outside
+
+    @property
+    def placeable(self) -> tuple[str, ...]:
+        """`files` widened by `commanded`, for a caller that wants both.
+
+        Offered as a property rather than folded into `files` so that a reader
+        choosing the wider set does so deliberately and can still see which
+        half it came from.
+        """
+        return tuple(sorted({*self.files, *self.commanded}))
 
 
 @dataclass(frozen=True)
@@ -203,11 +285,20 @@ class AgentRun:
     turns: int = 0
     tool_counts: tuple[tuple[str, int], ...] = ()
     files: tuple[str, ...] = ()
+    #: Tokens against the files the same turn named. Covers every turn read,
+    #: not only the `recent` window.
+    scopes: tuple[TurnScope, ...] = ()
     #: The instruction it was given, truncated. Written by whatever spawned it.
     brief: str = ""
     recent: tuple[Turn, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Thinking blocks over the whole run, redacted ones included, and how many
+    #: carried text. DERIVED. Complete rather than windowed: `recent` is capped
+    #: at `RECENT_TURNS`, so summing these from it would under-report every run
+    #: longer than that.
+    thinking_blocks: int = 0
+    thinking_readable: int = 0
     status: str = QUIET
     status_evidence: str = ""
     #: Where this agent actually ran, as the harness stamped it on the
@@ -324,8 +415,28 @@ class SessionRun:
     tool_counts: tuple[tuple[str, int], ...] = ()
     recent: tuple[Turn, ...] = ()
     fleets: tuple[Fleet, ...] = ()
+    #: Tokens against the files the same turn named — the session's own turns
+    #: only. Its fleets' scopes hang off their own `AgentRun`s, for the reason
+    #: the module header gives for never summing the two.
+    scopes: tuple[TurnScope, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Thinking blocks the harness recorded for this session, redacted ones
+    #: included, and how many carried text. DERIVED.
+    #:
+    #: **Complete over what was READ, and a session is read from its TAIL.**
+    #: `AgentRun` carries the same pair and there the total really is the whole
+    #: run, because an agent transcript is absorbed entire. Here it is not: on
+    #: its first pass `_session` absorbs at most the last `TAIL_BYTES` of the
+    #: file, so a long session's earlier blocks were never seen and cannot be
+    #: counted. A reading that needs the whole session — the reasoning corpus
+    #: does — has to make its own pass rather than sum these.
+    #:
+    #: What they ARE complete over is that window: they are accumulated per
+    #: record as it is absorbed, not summed from `recent`, which is capped at
+    #: `RECENT_TURNS` and would under-report every run longer than that.
+    thinking_blocks: int = 0
+    thinking_readable: int = 0
     #: True when the transcript's tail was reached, i.e. `recent` really is the
     #: most recent activity rather than an arbitrary window.
     tail_read: bool = True
@@ -414,8 +525,21 @@ def _stamp(value) -> int | None:
         return None
 
 
-def _blocks(message: dict) -> tuple[str, str, list[str], list[str]]:
-    """(text, thinking, tools, targets) out of one message's content.
+def _blocks(message: dict) -> tuple[str, str, list[str], list[str], int, int]:
+    """(text, thinking, tools, targets, blocks, readable) out of one message.
+
+    `blocks` and `readable` are the reason this returns six things instead of
+    four. The joined `thinking` string cannot distinguish a turn that carried
+    three REDACTED thinking blocks from a turn that did no thinking at all: a
+    redacted block contributes the empty string and disappears into the join.
+    Those two are opposite facts about a model, and on this machine the first
+    is the common case — measured 2026-08-10, 3,971 of 4,988 thinking blocks in
+    three days carried a signature and an empty body.
+
+    So the count is taken here, where the blocks are still separate, and it is
+    DERIVED in this module's sense: the harness wrote the block, and a model
+    cannot delete one after the fact. No additional content is read to produce
+    it.
 
     Tool *results* are skipped by name rather than by omission: they are the
     field this module must not read, and a reader of this function should see
@@ -426,10 +550,11 @@ def _blocks(message: dict) -> tuple[str, str, list[str], list[str]]:
     tools: list[str] = []
     targets: list[str] = []
     content = message.get("content")
+    blocks = readable = 0
     if isinstance(content, str):
-        return redact(content, EXCERPT_CHARS), "", [], []
+        return redact(content, EXCERPT_CHARS), "", [], [], 0, 0
     if not isinstance(content, list):
-        return "", "", [], []
+        return "", "", [], [], 0, 0
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -437,8 +562,11 @@ def _blocks(message: dict) -> tuple[str, str, list[str], list[str]]:
         if kind == "text":
             text_parts.append(str(block.get("text") or ""))
         elif kind == "thinking":
-            thinking_parts.append(str(block.get("thinking")
-                                      or block.get("text") or ""))
+            body = str(block.get("thinking") or block.get("text") or "")
+            blocks += 1
+            if body.strip():
+                readable += 1
+            thinking_parts.append(body)
         elif kind == "tool_use":
             name = str(block.get("name") or "")
             tools.append(name)
@@ -449,7 +577,45 @@ def _blocks(message: dict) -> tuple[str, str, list[str], list[str]]:
             continue  # deliberately unread — see the module docstring
     return (redact("\n".join(text_parts), EXCERPT_CHARS),
             redact("\n".join(thinking_parts), EXCERPT_CHARS),
-            tools, targets)
+            tools, targets, blocks, readable)
+
+
+class MessageBlocks(NamedTuple):
+    """What one harness message contained, named rather than positional."""
+
+    #: Assistant prose, joined, redacted and capped at `EXCERPT_CHARS`.
+    text: str
+    #: Reasoning, joined, redacted and capped the same way. **Redacted blocks
+    #: contribute the empty string and vanish into the join**, which is why the
+    #: two counts below exist and why this string alone must never be read as
+    #: evidence that a model did or did not reason.
+    thinking: str
+    tools: tuple[str, ...]
+    #: What each tool call named — a path, a pattern or a command. Not what any
+    #: of them returned: tool results are never read.
+    targets: tuple[str, ...]
+    #: Thinking blocks in this message, redacted ones included. DERIVED.
+    blocks: int
+    #: How many of those carried text. Never larger than `blocks`.
+    readable: int
+
+
+def message_blocks(message: dict) -> MessageBlocks:
+    """`_blocks` under a public name, for readers outside this module.
+
+    There is one transcript-block parser in this repository and this is it. A
+    second module that needs reasoning out of a harness message — the reasoning
+    corpus does — calls this rather than walking `content` itself, because a
+    second walk is how the weaker one survives: it would be the copy that
+    forgets `tool_result` is deliberately unread, or that a redacted block is a
+    block.
+
+    It delegates rather than reimplements, so the two can never disagree.
+    """
+    text, thinking, tools, targets, blocks, readable = _blocks(message)
+    return MessageBlocks(text=text, thinking=thinking, tools=tuple(tools),
+                         targets=tuple(targets), blocks=blocks,
+                         readable=readable)
 
 
 def _target_of(tool: str, payload) -> str:
@@ -468,6 +634,51 @@ def _target_of(tool: str, payload) -> str:
         if isinstance(value, str) and value.strip():
             return redact(value, 160)
     return ""
+
+
+#: A path-shaped run of characters inside a shell command. Deliberately loose:
+#: it produces CANDIDATES, and the index decides which of them are real.
+_COMMAND_TOKEN = re.compile(r"[A-Za-z0-9_./\\-]{4,}")
+
+
+def _command_candidates(payload) -> list[str]:
+    """Path-shaped tokens in a tool call's command string.
+
+    Candidates only. `Bash` carries the largest block of spend that names no
+    file in a structured field — measured at 10.4% of unscoped output on this
+    repository — and the paths are usually right there in the command
+    (`pytest tests/x.py`, `python tools/y.py`). Nothing here decides they are
+    paths; `_commanded_files` asks the repository's index, and a token the
+    index does not know is dropped.
+
+    A token must contain a separator. A bare `main.py` is a word as often as a
+    path, and matching one against the index by name alone would place spend on
+    a file the turn never mentioned.
+    """
+    if not isinstance(payload, dict):
+        return []
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return []
+    out: list[str] = []
+    for token in _COMMAND_TOKEN.findall(command):
+        candidate = _posix(token).lstrip("./")
+        if "/" in candidate:
+            out.append(candidate)
+    return out
+
+
+def _commanded_files(candidates: Iterable[str],
+                     tracked: frozenset) -> tuple[str, ...]:
+    """The candidates this repository actually tracks, sorted and deduplicated.
+
+    An empty `tracked` returns nothing at all. That is the absence of a
+    membership test, not a licence to accept every candidate — see
+    `worktree_areas.tracked_files`.
+    """
+    if not tracked:
+        return ()
+    return tuple(sorted({c for c in (candidates or ()) if c in tracked}))
 
 
 def _files_in(payload) -> list[str]:
@@ -579,6 +790,48 @@ def repo_paths_of(paths: Iterable[str], *,
                          if rel}))
 
 
+def _roots_for(accumulator, extra: Iterable[str] = ()) -> tuple[str, ...]:
+    """The checkouts a transcript's paths may be relative to.
+
+    Its own `cwd` first, then whatever the caller knows about. Order does not
+    decide the match — `repo_relative` takes the LONGEST root that fits, so a
+    worktree nested under the main checkout still wins over the checkout.
+    """
+    own = (repo_root_of(accumulator.cwd), accumulator.cwd)
+    return tuple(r for r in (*own, *(extra or ())) if r)
+
+
+def _turn_scopes(raw: dict, *, roots: Iterable[str] = (),
+                 tracked: Iterable[str] = ()) -> tuple[TurnScope, ...]:
+    """`_Accumulator.scopes` with its paths placed in the repository.
+
+    Groups are not merged after placement even when two of them land on the
+    same repository-relative set, because merging would make `outside` — a
+    count of paths, not of turns — stop meaning anything. The folds downstream
+    sum across groups anyway.
+    """
+    roots = tuple(roots)
+    tracked = frozenset(tracked or ())
+    out: list[TurnScope] = []
+    for (paths, spoken), (turns, input_tokens, output_tokens) in raw.items():
+        placed = repo_paths_of(paths, roots=roots)
+        # Counted per input path rather than as `len(paths) - len(placed)`:
+        # two paths can place onto one repository-relative file (a worktree
+        # copy and the main checkout), and that subtraction would report a
+        # file that WAS placed as one that fell outside.
+        outside = sum(1 for p in paths if not repo_relative(p, roots=roots))
+        # A path already named in a structured field is not also reported as
+        # commanded: the stronger evidence stands, and listing it twice would
+        # make the weaker class look bigger than it is.
+        commanded = tuple(c for c in _commanded_files(spoken, tracked)
+                          if c not in placed)
+        out.append(TurnScope(
+            files=placed, commanded=commanded, outside=outside, turns=turns,
+            input_tokens=input_tokens, output_tokens=output_tokens))
+    out.sort(key=lambda s: (-s.output_tokens, s.files))
+    return tuple(out)
+
+
 @dataclass
 class _Accumulator:
     """Mutable running totals for one transcript, kept across incremental reads."""
@@ -586,17 +839,38 @@ class _Accumulator:
     models: dict[str, int] = field(default_factory=dict)
     tools: dict[str, int] = field(default_factory=dict)
     files: set = field(default_factory=set)
+    #: The set of files a turn named -> [turns, input, output] for every turn
+    #: that named exactly that set. Raw paths, because placing them needs `cwd`
+    #: and `cwd` may arrive on a later record than the first turn does.
+    scopes: dict = field(default_factory=dict)
     turns: int = 0
     started_at: int | None = None
     last_at: int | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Thinking blocks over the WHOLE run, not only the `recent` window. The
+    #: window is capped at `RECENT_TURNS`, so a total taken from it would
+    #: under-report every run longer than that; these are accumulated per
+    #: record as it is read and are complete.
+    thinking_blocks: int = 0
+    thinking_readable: int = 0
     recent: list = field(default_factory=list)
     brief: str = ""
     cwd: str = ""
     session_id: str = ""
     branch: str = ""
     agent_type: str = ""
+    #: The response id the last record belonged to. One model response that
+    #: made several tool calls is written as several records, each carrying
+    #: that ONE response's `usage` in full — see `_priced`.
+    last_message_id: str = ""
+    #: The response the newest entry in `recent` belongs to. A later record of
+    #: that same response merges into it instead of appending a second Turn.
+    turn_of_message: str = ""
+    #: The response being assembled: [turns, input, output, {files}]. Held open
+    #: until a different response arrives, so every file the response named is
+    #: charged to its tokens together instead of to whichever record came first.
+    pending: list = field(default_factory=list)
 
     def absorb(self, record: dict) -> None:
         kind = record.get("type")
@@ -623,7 +897,7 @@ class _Accumulator:
             return
 
         model = str(message.get("model") or "")
-        text, thinking, tools, targets = _blocks(message)
+        text, thinking, tools, targets, blocks, readable = _blocks(message)
         if kind == _ROLE_USER:
             # The first user record of an agent transcript is its brief: the
             # instruction whatever spawned it wrote. Later user records are tool
@@ -640,28 +914,121 @@ class _Accumulator:
                 usage.get("cache_read_input_tokens") or 0) + int(
                 usage.get("cache_creation_input_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or 0)
-        self.input_tokens += input_tokens
-        self.output_tokens += output_tokens
 
-        if model:
-            self.models[model] = self.models.get(model, 0) + 1
+        # One model response that called three tools is written as three
+        # records, and the harness stamps that response's whole `usage` on each
+        # of them. Charging every record would bill the response three times,
+        # so tokens, turns and models are counted once per response id and only
+        # the tool calls — which really did happen three times — are not.
+        # An id-less record is charged on its own: it cannot be shown to be a
+        # repeat, and treating unknown as duplicate would silently drop spend.
+        message_id = str(message.get("id") or "")
+        repeat = bool(message_id) and message_id == self.last_message_id
+        self.last_message_id = message_id
+        if not repeat:
+            self.input_tokens += input_tokens
+            self.output_tokens += output_tokens
+            if model:
+                self.models[model] = self.models.get(model, 0) + 1
+        # Counted per RECORD rather than per response, and deliberately not
+        # gated on `repeat`: the blocks of one response are split across its
+        # records, each block appearing on exactly one of them, so a per-record
+        # sum is the response's true total while a `not repeat` guard would keep
+        # only whichever record happened to come first.
+        self.thinking_blocks += blocks
+        self.thinking_readable += readable
         for name in tools:
             self.tools[name] = self.tools.get(name, 0) + 1
+        named: list[str] = []
+        spoken: list[str] = []
         for block in (message.get("content") or []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 for path in _files_in(block.get("input")):
                     self.files.add(path)
+                    named.append(path)
+                spoken.extend(_command_candidates(block.get("input")))
 
-        if kind == _ROLE_ASSISTANT:
+        # The pairing, kept where it exists: a response's tokens against the
+        # files that same response named. A response is held open until the
+        # next one begins, because its files arrive across several records and
+        # charging the first record's file alone would credit one file with
+        # work done on three.
+        if repeat:
+            if self.pending:
+                self.pending[3].update(named)
+                self.pending[4].update(spoken)
+        else:
+            self._flush_pending()
+            self.pending = [1, input_tokens, output_tokens, set(named),
+                            set(spoken)]
+
+        if kind == _ROLE_ASSISTANT and not repeat:
             self.turns += 1
         if text or thinking or tools:
-            self.recent.append(Turn(
-                at=at or 0, role=str(kind), model=model or UNATTRIBUTED,
-                text=text, thinking=thinking, tools=tuple(tools),
-                targets=tuple(targets), input_tokens=input_tokens,
-                output_tokens=output_tokens))
+            # One response is ONE Turn. Its blocks arrive on several records —
+            # the thinking on one, each tool call on the next — and appending a
+            # Turn per record would repeat the response's usage once per block.
+            # `session_spend` sums `Turn.output_tokens` over this window for its
+            # per-model split and its burn series, so a Turn per record inflates
+            # both by exactly the parallel-tool-call rate. Merging also makes
+            # the window agree with `turns`, which counts responses.
+            if repeat and self.recent and self.turn_of_message == message_id:
+                previous = self.recent[-1]
+                self.recent[-1] = replace(
+                    previous,
+                    text=previous.text or text,
+                    thinking=previous.thinking or thinking,
+                    tools=previous.tools + tuple(tools),
+                    targets=previous.targets + tuple(targets),
+                    # Summed rather than kept-first: `thinking` above keeps the
+                    # first non-empty body, but the COUNTS are of blocks spread
+                    # across this response's records and every one of them is
+                    # real.
+                    thinking_blocks=previous.thinking_blocks + blocks,
+                    thinking_readable=previous.thinking_readable + readable)
+            else:
+                self.recent.append(Turn(
+                    at=at or 0, role=str(kind), model=model or UNATTRIBUTED,
+                    text=text, thinking=thinking, tools=tuple(tools),
+                    targets=tuple(targets), input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    thinking_blocks=blocks, thinking_readable=readable))
+                self.turn_of_message = message_id
+            # Trimming drops from the FRONT, so the Turn a later record of this
+            # response would merge into is never the one removed.
             if len(self.recent) > RECENT_TURNS:
                 del self.recent[:-RECENT_TURNS]
+
+    def _flush_pending(self) -> None:
+        """Settle the response being assembled into the scope groups."""
+        if not self.pending:
+            return
+        turns, input_tokens, output_tokens, files, spoken = self.pending
+        key = (tuple(sorted(files)), tuple(sorted(spoken)))
+        scope = self.scopes.setdefault(key, [0, 0, 0])
+        scope[0] += turns
+        scope[1] += input_tokens
+        scope[2] += output_tokens
+        self.pending = []
+
+    def settled_scopes(self) -> dict:
+        """`scopes` with the open response folded in.
+
+        Called by the readers rather than left to `absorb`, because the last
+        response of an incremental pass is not finished — its next record may
+        arrive in the next poll, and closing it early would split one response
+        across two groups.
+        """
+        if not self.pending:
+            return self.scopes
+        turns, input_tokens, output_tokens, files, spoken = self.pending
+        merged = {k: list(v) for k, v in self.scopes.items()}
+        key = (tuple(sorted(files)), tuple(sorted(spoken)))
+        scope = merged.setdefault(key, [0, 0, 0])
+        scope[0] += turns
+        scope[1] += input_tokens
+        scope[2] += output_tokens
+        return merged
 
     def ranked_models(self) -> tuple[str, ...]:
         return tuple(name for name, _count in sorted(
@@ -757,8 +1124,21 @@ class ActivityIndex:
 
     # ── one pass ─────────────────────────────────────────────────────────────
     def read(self, *, cwd: str | Path | None = None,
-             max_sessions: int = 12, now: float | None = None) -> Activity:
-        """Read every session for `cwd`, most recently written first."""
+             max_sessions: int = 12, now: float | None = None,
+             roots: Iterable[str] = (),
+             tracked: Iterable[str] = ()) -> Activity:
+        """Read every session for `cwd`, most recently written first.
+
+        `roots` are additional checkouts of this repository, for placing the
+        paths tool calls named. A session's own `cwd` is always a root, which
+        covers a session working inside the worktree it was started in; it does
+        NOT cover the common case of a session started in the main checkout
+        that does its editing in a worktree elsewhere on disk. Only the mesh
+        knows where this repository's worktrees actually are, so it passes them
+        in rather than this module guessing at path conventions — measured on
+        this repository, 20.1% of read output named paths that no root here
+        could place, against 20.1% that landed on an area.
+        """
         moment = now if now is not None else time.time()
         notes: list[str] = []
         try:
@@ -789,7 +1169,8 @@ class ActivityIndex:
                     f"read: the newest {max_sessions} are shown")
                 break
             examined += 1
-            session = self._session(transcript, moment)
+            session = self._session(transcript, moment, roots=roots,
+                                    tracked=tracked)
             if session is None:
                 continue
             if cwd is not None and not same_directory(session.cwd, str(cwd)):
@@ -801,12 +1182,15 @@ class ActivityIndex:
                         sessions=tuple(sessions), notes=tuple(notes))
 
     # ── one session ──────────────────────────────────────────────────────────
-    def _session(self, transcript: Path, now: float) -> SessionRun | None:
+    def _session(self, transcript: Path, now: float, *,
+                 roots: Iterable[str] = (),
+                 tracked: Iterable[str] = ()) -> SessionRun | None:
         session_id = transcript.stem
         accumulator, changed = self._absorb(transcript, tail_bytes=TAIL_BYTES)
         if accumulator is None:
             return None
-        fleets = self._fleets(transcript.with_suffix("") , session_id, now)
+        fleets = self._fleets(transcript.with_suffix("") , session_id, now,
+                              roots=roots, tracked=tracked)
         return SessionRun(
             session_id=accumulator.session_id or session_id,
             cwd=accumulator.cwd,
@@ -819,13 +1203,19 @@ class ActivityIndex:
             tool_counts=accumulator.ranked_tools(),
             recent=tuple(accumulator.recent),
             fleets=fleets,
+            scopes=_turn_scopes(accumulator.settled_scopes(),
+                                roots=_roots_for(accumulator, roots),
+                                tracked=tracked),
             input_tokens=accumulator.input_tokens,
             output_tokens=accumulator.output_tokens,
+            thinking_blocks=accumulator.thinking_blocks,
+            thinking_readable=accumulator.thinking_readable,
             notes=() if changed else (),
         )
 
     def _fleets(self, session_dir: Path, session_id: str,
-                now: float) -> tuple[Fleet, ...]:
+                now: float, *, roots: Iterable[str] = (),
+                tracked: Iterable[str] = ()) -> tuple[Fleet, ...]:
         subagents = session_dir / "subagents"
         if not subagents.is_dir():
             return ()
@@ -833,7 +1223,8 @@ class ActivityIndex:
 
         direct = sorted(subagents.glob("agent-*.jsonl"))
         if direct:
-            agents = tuple(self._agent(p, FLEET_DIRECT, session_id, {}, now)
+            agents = tuple(self._agent(p, FLEET_DIRECT, session_id, {}, now,
+                                       roots=roots, tracked=tracked)
                            for p in direct)
             agents = tuple(a for a in agents if a is not None)
             if agents:
@@ -847,7 +1238,8 @@ class ActivityIndex:
                     continue
                 journal = self._journal(run / "journal.jsonl")
                 agents = tuple(a for a in (
-                    self._agent(p, run.name, session_id, journal, now)
+                    self._agent(p, run.name, session_id, journal, now,
+                                roots=roots, tracked=tracked)
                     for p in sorted(run.glob("agent-*.jsonl"))) if a is not None)
                 if agents:
                     fleets.append(self._fleet(run.name, FLEET_WORKFLOW,
@@ -870,7 +1262,8 @@ class ActivityIndex:
             last_at=max(stamps) if stamps else None)
 
     def _agent(self, path: Path, fleet_id: str, session_id: str, journal: dict,
-               now: float) -> AgentRun | None:
+               now: float, *, roots: Iterable[str] = (),
+               tracked: Iterable[str] = ()) -> AgentRun | None:
         accumulator, _changed = self._absorb(path)
         if accumulator is None:
             return None
@@ -891,10 +1284,15 @@ class ActivityIndex:
             turns=accumulator.turns,
             tool_counts=accumulator.ranked_tools(),
             files=tuple(sorted(accumulator.files)),
+            scopes=_turn_scopes(accumulator.settled_scopes(),
+                                roots=_roots_for(accumulator, roots),
+                                tracked=tracked),
             brief=accumulator.brief,
             recent=tuple(accumulator.recent),
             input_tokens=accumulator.input_tokens,
             output_tokens=accumulator.output_tokens,
+            thinking_blocks=accumulator.thinking_blocks,
+            thinking_readable=accumulator.thinking_readable,
             cwd=accumulator.cwd,
             branch=accumulator.branch,
             status=status, status_evidence=evidence)
@@ -973,16 +1371,22 @@ class ActivityIndex:
 def read_activity(cwd: str | Path | None = None, *,
                   records_root: str | Path | None = None,
                   max_sessions: int = 12,
-                  now: float | None = None) -> Activity:
+                  now: float | None = None,
+                  roots: Iterable[str] = (),
+                  tracked: Iterable[str] = ()) -> Activity:
     """One-shot read. `ActivityIndex` is the one to hold for polling."""
     return ActivityIndex(records_root).read(cwd=cwd, max_sessions=max_sessions,
-                                            now=now)
+                                            now=now, roots=roots,
+                                            tracked=tracked)
 
 
 __all__ = [
     "ACTIVITY_SCHEMA", "Activity", "ActivityIndex", "AgentRun", "EXCERPT_CHARS",
-    "FLEET_DIRECT", "FLEET_WORKFLOW", "Fleet", "LIMITS", "QUIET", "RECENT_TURNS",
+    "FLEET_DIRECT", "FLEET_WORKFLOW", "Fleet", "LIMITS", "MessageBlocks",
+    "QUIET", "RECENT_TURNS",
     "RUNNING", "RUNNING_MINUTES", "SETTLED", "STATUSES", "STOPPED", "SessionRun",
-    "Turn", "read_activity", "redact", "repo_paths_of", "repo_relative",
+    "TAIL_BYTES", "Turn", "TurnScope", "message_blocks",
+    "read_activity", "redact", "repo_paths_of",
+    "repo_relative",
     "repo_root_of",
 ]

@@ -509,6 +509,29 @@ def payload_laws(payload) -> Dict[str, Optional[str]]:
 #: forgery exploited, one level up. `None` is the relative-dither law.
 KNOWN_CAPTURE_LAWS = frozenset({None, "dither-relative/v0", "exact-cents/v0"})
 
+#: The CLOSED vocabulary of reasons a captured batch carries NO certificate, in the
+#: PURE layer for the same reason the corroboration outcomes are: a store-free
+#: verifier has to classify a carried leaf the way the store wrote it. Closed for
+#: the same reason too — the reason IS the claim. A free-text status would let a
+#: certification FAILURE be filed under something that reads like a policy choice,
+#: which is the one direction an issuer has an incentive to blur.
+CAPTURE_OUTCOMES = frozenset({
+    "certification-disabled",       # the capture policy has certification off
+    "certification-declined",       # the quantizer returned no certificate
+    "certification-not-supplied",   # the caller pre-attempted and supplied none
+    "certificate-rejected",         # a supplied certificate did not describe this batch
+    "certificate-write-failed",     # the certificate/log transaction did not commit
+})
+
+#: The subset that is a FAILURE rather than a configured absence. Derived here so a
+#: reader cannot invent its own split; `certification-disabled` is an operator
+#: decision, everything else is something that went wrong while trying.
+CAPTURE_OUTCOME_FAILURES = frozenset(CAPTURE_OUTCOMES - {"certification-disabled"})
+
+#: Versioned so a later shape change is a new schema string rather than a silent
+#: reinterpretation of bytes already inside a hash-bound payload.
+CAPTURE_OUTCOME_SCHEMA = "alelyon.capture-outcome/v0"
+
 # Exact capture-row membership lives inside the already hash-bound payload rather
 # than changing cert_leaf_hash's frozen field layout. The entry intentionally has
 # no ``column`` member, so old delta parsers ignore it instead of mistaking it for
@@ -639,28 +662,40 @@ def _strict_payload_json(payload):
     return parsed
 
 
+def _row_ts(table_name: str, raw):
+    """One row timestamp in the table's frozen encoding, or raise.
+
+    Extracted so exact membership and the per-row value commitments below cannot
+    disagree about what a row's timestamp IS. Two definitions of a row key is two
+    row sets, and a commitment keyed on one of them would silently fail to cover
+    the rows the other admitted.
+    """
+    table = str(table_name)
+    if table not in _MEMBERSHIP_ENCODINGS:
+        raise ValueError(f"row membership is undefined for table {table!r}")
+    if isinstance(raw, bool):
+        raise ValueError("a row timestamp must be numeric, not boolean")
+    if table == "bars":
+        if not isinstance(raw, int):
+            raise ValueError("a bars row timestamp must be an integer")
+        value = int(raw)
+        if not -(2 ** 63) <= value < 2 ** 63:
+            raise ValueError("a bars row timestamp is outside int64")
+        return value
+    if not isinstance(raw, (int, float)):
+        raise ValueError("a series row timestamp must be numeric")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("a series row timestamp must be finite")
+    return value
+
+
 def _canonical_membership_rows(table_name: str, row_ts) -> tuple:
     """Return sorted, unique timestamps in the table's frozen digest encoding."""
     table = str(table_name)
     if table not in _MEMBERSHIP_ENCODINGS:
         raise ValueError(f"row membership is undefined for table {table!r}")
-    values = []
-    for raw in row_ts:
-        if isinstance(raw, bool):
-            raise ValueError("a row timestamp must be numeric, not boolean")
-        if table == "bars":
-            if not isinstance(raw, int):
-                raise ValueError("a bars row timestamp must be an integer")
-            value = int(raw)
-            if not -(2 ** 63) <= value < 2 ** 63:
-                raise ValueError("a bars row timestamp is outside int64")
-        else:
-            if not isinstance(raw, (int, float)):
-                raise ValueError("a series row timestamp must be numeric")
-            value = float(raw)
-            if not math.isfinite(value):
-                raise ValueError("a series row timestamp must be finite")
-        values.append(value)
+    values = [_row_ts(table, raw) for raw in row_ts]
     if len(values) > _MAX_MEMBERSHIP_ROWS:
         raise ValueError("capture row membership exceeds the resource limit")
     ordered = sorted(values)
@@ -735,6 +770,297 @@ def validated_payload_membership(payload, table_name: str, n: int,
     if float(rows[0]) != float(lo_ts) or float(rows[-1]) != float(hi_ts):
         return None
     return rows
+
+
+# ── per-row, per-column public value commitments (PLATFORM.md §3 item 4) ─────
+#
+# WHAT THIS BINDS, AND WHY THE LEAF ALONE DID NOT.
+#
+# A leaf commits `value_digest`, a single hash over the batch's ALL-column bytes.
+# A verifier holds one column (`close` for a price input) and therefore cannot
+# re-derive it, so the anchor could only ever check exact timestamp membership and
+# the committed Δ. That leaves a key-holding signer one move: overwrite a stored
+# value by a RAW (uncertified) write, then anchor the current series to the OLD
+# leaf, whose timestamps still cover every consumed row and whose Δ still matches.
+# Nothing in the anchor spoke about the VALUE at that timestamp. The preserved
+# falsifier is `test_old_leaf_cannot_be_reused_after_raw_value_overwrite`.
+#
+# The commitment is per ROW and per COLUMN precisely so that a party holding one
+# column can open the rows it holds, which is the property `value_digest` lacks.
+# It is a Merkle ROOT rather than a list of row hashes because the payload travels
+# verbatim inside every envelope: a list is O(rows × columns) on the wire and would
+# put a 1M-row capture past `_MAX_CAPTURE_PAYLOAD_BYTES`, which would make the
+# vectorized bulk capture of §3 item 3 uncertifiable. A root is 32 bytes per column
+# whatever the batch size.
+#
+# WHAT IT DOES NOT BIND. It commits the values the signer STORED, so it detects a
+# later revision of them. It says nothing about whether those values were true when
+# captured — CLAIMS.md §1: we detect revision, not invention.
+VALUE_COMMITMENT_ENCODING = "blake2b-256-row/merkle-v0"
+
+#: Domain separators. The row leaf is prefixed and every variable-length field is
+#: length-prefixed for the reason `table_rows_digest` documents: without it the
+#: encoding is not injective, and ("AA","PL") and ("A","APL") would commit the same
+#: bytes — a commitment to one scope would be a commitment to another.
+_VALUE_ROW_DOMAIN = b"alelyon.cne/value-row/v0"
+_VALUE_ABSENT = b"\x00"
+_VALUE_F64 = b"\x01"
+
+
+def _length_prefixed(h, text: str) -> None:
+    raw = str(text).encode("utf-8")
+    h.update(struct.pack("<Q", len(raw)))
+    h.update(raw)
+
+
+def value_row_leaf(table_name: str, scope1: str, scope2: str, column: str,
+                   ts, value) -> str:
+    """The per-row, per-column commitment: BLAKE2b-256 over the row's identity and
+    its stored value.
+
+    A row that has NO value for this column (SQL NULL — a bar with no volume) is
+    committed under a distinct one-byte tag rather than as a number, because
+    "absent" and "0.0" are different facts and this program has already been bitten
+    once by an absent field reading as a fabricated zero (`payload_deltas`).
+    ±inf and NaN pack to their f64 bits and are never compared as numbers.
+    """
+    h = hashlib.blake2b(digest_size=32)
+    h.update(_VALUE_ROW_DOMAIN)
+    for part in (table_name, scope1, scope2, str(column).lower()):
+        _length_prefixed(h, part)
+    ts_value = _row_ts(table_name, ts)
+    # The timestamp is committed in the table's own frozen encoding, so a bars row
+    # cannot be re-presented as a series row at the same instant.
+    if isinstance(ts_value, int):
+        h.update(struct.pack("<q", ts_value))
+    else:
+        h.update(struct.pack("<d", ts_value))
+    if value is None:
+        h.update(_VALUE_ABSENT)
+    else:
+        h.update(_VALUE_F64)
+        h.update(struct.pack("<d", float(value)))
+    return h.hexdigest()
+
+
+def value_column_root(table_name: str, scope1: str, scope2: str, column: str,
+                      rows) -> Optional[str]:
+    """The Merkle root over one column's per-row commitments, rows ASCENDING by
+    timestamp — the same total order `_canonical_membership_rows` imposes, so the
+    leaf index of a row is its membership index and a future opening needs no
+    second ordering rule.
+
+    `rows` is an iterable of `(ts, value)`. Duplicate timestamps raise: the caller
+    has already resolved keep-LAST (the store's INSERT OR REPLACE), and a duplicate
+    surviving to here would mean two committed values for one row.
+    """
+    ordered = []
+    seen = set()
+    for ts, value in rows:
+        key = _row_ts(table_name, ts)
+        if key in seen:
+            raise ValueError("value commitment rows contain a duplicate timestamp")
+        seen.add(key)
+        ordered.append((key, value))
+    if len(ordered) > _MAX_MEMBERSHIP_ROWS:
+        raise ValueError("value commitment rows exceed the resource limit")
+    ordered.sort(key=lambda kv: kv[0])
+    return merkle_root([value_row_leaf(table_name, scope1, scope2, column, t, v)
+                        for t, v in ordered])
+
+
+def payload_with_value_commitments(payload, table_name: str, scope1: str,
+                                   scope2: str, columns, row_ts) -> str:
+    """Append per-column value commitment roots to a capture-certificate payload.
+
+    `columns` is `{column: [value, ...]}`, each list positionally aligned with
+    `row_ts`. Like membership, the entry carries no ``column`` member so that
+    `_parse_payload` — which reads Δ — ignores it rather than mistaking it for
+    another numerical certificate, and a pre-populated entry is refused so an
+    injected certificate cannot choose a second, ambiguous commitment.
+    """
+    entries = _strict_payload_json(payload)
+    if not isinstance(entries, list):
+        raise ValueError("capture certificate payload must be a JSON array")
+    if any(isinstance(e, dict) and "value_commitments" in e for e in entries):
+        raise ValueError(
+            "capture certificate payload already carries value commitments")
+    ts_list = list(row_ts)
+    roots: Dict[str, str] = {}
+    for column, values in columns.items():
+        seq = list(values)
+        if len(seq) != len(ts_list):
+            raise ValueError(
+                f"column {column!r} has {len(seq)} values for {len(ts_list)} rows")
+        root = value_column_root(table_name, scope1, scope2, column,
+                                 zip(ts_list, seq))
+        if root is None:                       # only reachable with zero rows
+            raise ValueError("a value commitment needs at least one row")
+        roots[str(column).lower()] = root
+    if not roots:
+        raise ValueError("a value commitment needs at least one column")
+    out = list(entries)
+    out.append({"value_commitments": {
+        "encoding": VALUE_COMMITMENT_ENCODING,
+        "columns": dict(sorted(roots.items())),
+    }})
+    return json.dumps(out)
+
+
+def payload_value_commitments(payload) -> Optional[Dict[str, str]]:
+    """`{column: root}` from a capture payload, or None fail-closed.
+
+    None means the leaf makes NO statement about its values — every leaf written
+    before this commitment existed. It must not be read as "the values are fine":
+    the caller decides what an unbound leaf may still anchor, and says so by name.
+    """
+    try:
+        entries = _strict_payload_json(payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    found = [e.get("value_commitments") for e in entries
+             if isinstance(e, dict) and "value_commitments" in e]
+    if len(found) != 1 or not isinstance(found[0], dict):
+        return None
+    block = found[0]
+    if block.get("encoding") != VALUE_COMMITMENT_ENCODING:
+        return None                            # an encoding we cannot check
+    cols = block.get("columns")
+    if not isinstance(cols, dict) or not cols:
+        return None
+    out: Dict[str, str] = {}
+    for name, root in cols.items():
+        if not isinstance(name, str) or not _is_hex_bytes(root, 32):
+            return None
+        lowered = name.lower()
+        if lowered in out:
+            return None                        # two roots for one column
+        out[lowered] = root
+    return out
+
+
+#: Why a leaf's value commitment did not vouch for its rows. These strings are the
+#: suffixes of the SPEC §9.4 reason classes `value-commitment-<...>`; the verifier
+#: maps them and the producer uses them to decide what it may anchor at all.
+VALUE_COVERAGE_ABSENT = "absent"
+VALUE_COVERAGE_UNOPENABLE = "unopenable"
+VALUE_COVERAGE_MISMATCH = "mismatch"
+
+
+def leaf_value_coverage(table_name: str, scope1: str, scope2: str, column: str,
+                        payload, membership, values_by_ts) -> Optional[str]:
+    """None when this leaf still commits the current value of every row it covers,
+    otherwise WHY it does not.
+
+    One definition, called from both sides on purpose. The producer decides here
+    whether a leaf may attribute a row's Δ at all, and the verifier decides here
+    whether to accept that attribution; if the two ever disagreed, a receipt would
+    be issued as anchored and then refuse for the issuer's own honest data. The
+    same rule read twice is what makes the degrade honest instead of a surprise.
+    """
+    roots = payload_value_commitments(payload)
+    root = None if roots is None else roots.get(str(column).lower())
+    if root is None:
+        return VALUE_COVERAGE_ABSENT
+    held = []
+    for ts in sorted(membership):
+        if ts not in values_by_ts:
+            # The root commits the whole batch, so opening it needs every row of
+            # that batch. A holder of a narrower window cannot, and must say so.
+            return VALUE_COVERAGE_UNOPENABLE
+        held.append((ts, values_by_ts[ts]))
+    if not held:
+        return VALUE_COVERAGE_UNOPENABLE
+    try:
+        recomputed = value_column_root(
+            table_name, scope1, scope2, column,
+            [(int(t) if str(table_name) == "bars" else float(t), v)
+             for t, v in held])
+    except (TypeError, ValueError):
+        return VALUE_COVERAGE_UNOPENABLE
+    return None if recomputed == root else VALUE_COVERAGE_MISMATCH
+
+
+def capture_outcome_payload(reason: str, columns, *, table_name: str,
+                            row_ts) -> str:
+    """The cert_log payload for a capture that produced NO certificate.
+
+    Three kinds of entry, and the shape of each is load-bearing:
+
+    - one ``{"column": …, "delta": None}`` per numeric column the batch wrote, so
+      `payload_deltas` returns every one of them in its UNUSABLE list BY NAME. An
+      empty payload would also yield no usable Δ, but it would yield it by saying
+      nothing, and silence is what this leaf exists to end: a reader could not
+      distinguish "this capture certified nothing" from "this leaf is some other
+      kind of record". Unusable-and-named is a statement; absent is not.
+    - one single-key ``{"capture_outcome": …}`` marker carrying the reason. It has
+      no ``column`` member on purpose, exactly like ``{"membership"}``, so every
+      existing delta reader skips it and the entry is additive against a leaf-hash
+      layout that is frozen (SPEC-cne-v0.md §5.2).
+    - exact row membership, appended by the same function every certified leaf
+      uses. An uncertified leaf therefore commits WHICH rows it wrote under the
+      identical encoding, which is what makes `verify_capture_outcomes` able to
+      notice the leaf's absence rather than only its corruption.
+
+    Raises on an unknown reason or a malformed row set: a leaf recording that
+    certification failed is worthless if it can itself be written wrong quietly.
+    """
+    if reason not in CAPTURE_OUTCOMES:
+        raise ValueError(f"unknown capture outcome: {reason!r}")
+    names = []
+    for raw in columns:
+        name = str(raw).lower()
+        if name in names:
+            raise ValueError(f"duplicate capture-outcome column: {name!r}")
+        names.append(name)
+    entries: List[dict] = [{"column": name, "delta": None} for name in names]
+    entries.append({"capture_outcome": {
+        "schema": CAPTURE_OUTCOME_SCHEMA,
+        "reason": reason,
+        "columns": list(names),
+    }})
+    return payload_with_membership(json.dumps(entries), table_name, row_ts)
+
+
+def payload_capture_outcome(payload) -> Optional[dict]:
+    """``{"reason", "columns"}`` for an uncertified-capture leaf, else None.
+
+    Fail-closed on every ambiguity, and the two that matter are worth naming.
+    A payload carrying TWO markers returns None rather than picking one, for the
+    same reason `payload_membership` refuses two membership blocks: a leaf that
+    proposes two answers has not committed either. And a reason outside the closed
+    vocabulary is malformed, never a new outcome — otherwise a signer could file a
+    certificate WRITE FAILURE under a spelling that reads like a policy choice, and
+    the closed set would be decoration.
+
+    None also means "this is an ordinary leaf". Callers must not read that as
+    "this capture was certified": that question is answered by the leaf's usable Δ,
+    not by the absence of a marker.
+    """
+    try:
+        entries = _strict_payload_json(payload)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    found = [e.get("capture_outcome") for e in entries
+             if isinstance(e, dict) and "capture_outcome" in e]
+    if len(found) != 1 or not isinstance(found[0], dict):
+        return None
+    block = found[0]
+    if block.get("schema") != CAPTURE_OUTCOME_SCHEMA:
+        return None
+    reason = block.get("reason")
+    if not isinstance(reason, str) or reason not in CAPTURE_OUTCOMES:
+        return None
+    cols = block.get("columns")
+    if not isinstance(cols, list) or any(not isinstance(c, str) for c in cols):
+        return None
+    if len(set(cols)) != len(cols):
+        return None
+    return {"reason": reason, "columns": list(cols)}
 
 
 def _parse_payload(payload) -> Tuple[Dict[str, Tuple[float, Optional[str]]],

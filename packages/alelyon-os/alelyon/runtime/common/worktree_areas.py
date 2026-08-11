@@ -630,6 +630,27 @@ def surfaces_of(paths: Iterable[str],
                      for area in resolved.areas_of(paths) if area.mapped)
 
 
+def tracked_files(repo_root: Optional[str] = None) -> frozenset:
+    """Every path the repository tracks, repository-relative and POSIX.
+
+    The index as a MEMBERSHIP TEST, which is a different use from `discover`'s:
+    a caller holding a string that might be a path can ask whether this
+    repository actually contains such a file. That is what separates reading a
+    path out of a shell command from guessing one — a token that names a
+    tracked file is a verified reference, and a token that does not is dropped
+    rather than placed somewhere plausible.
+
+    Empty when git cannot be run or the directory is not a checkout. Empty
+    means "no membership test is available", NOT "the repository is empty", and
+    a caller must treat it as a reason to place nothing rather than to place
+    everything.
+    """
+    root = repo_root or repo_root_of() or ""
+    if not root:
+        return frozenset()
+    return frozenset(_normalise(path) for path in _tracked_paths(root) if path)
+
+
 #: `observed_surfaces` per repository root. Cached because the answer costs a
 #: `git ls-files` and does not change within one command.
 _SURFACES: dict = {}

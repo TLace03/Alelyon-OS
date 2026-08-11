@@ -674,6 +674,52 @@ class FleetLedger:
             contested=bool(r["contested"]), branch=r["branch"] or "",
             cwd=r["cwd"] or "", landed=r["landed"] or O.UNKNOWN) for r in rows)
 
+    def all_runs(self) -> tuple[Run, ...]:
+        """Every run in the current layer space, oldest first.
+
+        Separate from `runs()` rather than `runs(limit=huge)`, because the two
+        are different jobs. `runs()` is an EVIDENCE reader: newest first, capped,
+        so a panel can show the rows a figure was computed from. This is an
+        AGGREGATION reader, and an aggregate computed over a capped query is
+        wrong in the way that is hardest to see — it looks like a total.
+
+        Ordered by `at` ascending with `run_id` breaking ties, so a caller that
+        buckets these produces the same buckets on every reading.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM runs WHERE space=? ORDER BY at, run_id",
+                (H.LAYER_SPACE_VERSION,)).fetchall()
+        return tuple(Run(
+            run_id=r["run_id"], at=int(r["at"]), layer=r["layer"],
+            work_kind=r["work_kind"], model=r["model"], agent_id=r["agent_id"],
+            fleet_id=r["fleet_id"], session_id=r["session_id"],
+            settled=bool(r["settled"]), turns=int(r["turns"]),
+            out_tokens=int(r["out_tokens"]),
+            seconds=None if r["seconds"] is None else int(r["seconds"]),
+            contested=bool(r["contested"]), branch=r["branch"] or "",
+            cwd=r["cwd"] or "", landed=r["landed"] or O.UNKNOWN) for r in rows)
+
+    def run_counts_by_space(self) -> tuple[tuple[int, int], ...]:
+        """`(space, runs)` for every layer space in the table, ascending.
+
+        The one reader here that deliberately does NOT filter on
+        `H.LAYER_SPACE_VERSION`. Every other query does, which is correct — a
+        standing earned under one coordinate space says nothing under another —
+        but it means an aggregate built on those queries shrinks silently the
+        first time the space is versioned, and still presents itself as
+        complete. This is how a caller states that remainder instead of
+        inheriting it.
+
+        Today it excludes nothing: all 1,439 rows are in space 1, measured
+        2026-08-09. That is the argument for having it now rather than against.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT space, COUNT(*) AS runs FROM runs "
+                "GROUP BY space ORDER BY space").fetchall()
+        return tuple((int(r["space"]), int(r["runs"])) for r in rows)
+
     def careers(self) -> tuple[Career, ...]:
         """What every model has done across the space, most-run first.
 

@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from alelyon.runtime.common import cli_flags as CLI
 from alelyon.runtime.common import fleet_hierarchy as H
 from alelyon.runtime.common import fleet_ledger as L
 from alelyon.runtime.common import fleet_outcomes as O
@@ -568,6 +569,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
+    # Model names reach this from transcripts and are not guaranteed ASCII.
+    CLI.survive_the_console()
     return _COMMANDS[args.command](args)
 
 

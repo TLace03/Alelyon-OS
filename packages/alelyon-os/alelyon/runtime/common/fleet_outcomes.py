@@ -46,6 +46,29 @@ branches had been merged by a pull request and still read `OPEN`.** Taking
 a false penalty in the one direction that matters. So a merge commit naming the
 branch is checked first, and the ref state only decides the cases it cannot.
 
+Why content is read before the window
+--------------------------------------
+Both routes above ask about *commit identity*: an ancestor, or a merge subject
+naming the branch. A squash merge preserves neither — it rewrites the work into
+one new commit under the mainline's own authorship — and this module's own
+limits said so before anything measured it.
+
+**Measured against this repository on 2026-08-10, at `origin/main` 7e95bbbc:**
+of seven branches whose merge into the mainline would change nothing at all,
+three read `ABANDONED` — `common/subagent-reasoning`, whose four files are
+byte-identical on the mainline after PR #449 squashed them;
+`oracle/devenv-test-run-no-console-window`; and
+`coord/packaging+common-toolpath-discovery`. `ABANDONED` is the only label the
+ledger scores, and it scores downward, so each was a penalty applied to work
+that had arrived.
+
+So a third positive-evidence route runs before the settling window: if every
+file the branch changed since it diverged is byte-identical on the mainline
+today, the content is in, whatever happened to the commits carrying it. The
+error direction is deliberate — a branch this route cannot show landed still
+falls through to the window unchanged, so the route can only ever WITHHOLD a
+penalty, never invent one.
+
 Nothing here writes to the repository. Every git call is a query.
 """
 from __future__ import annotations
@@ -81,6 +104,13 @@ SETTLING_DAYS = 14
 SETTLING_SECONDS = SETTLING_DAYS * 24 * 60 * 60
 
 _GIT_TIMEOUT = 60
+
+#: How many paths are handed to one `git diff` pathspec. A branch here can
+#: touch several hundred files and Windows caps a command line at 32k
+#: characters, so the comparison is batched rather than risking a spawn that
+#: fails for its length — which `_count_contained` would have to read as
+#: "cannot tell", losing the answer for the largest branches.
+_PATHSPEC_BATCH = 80
 
 #: Local-ref states, for branches no remote namespace knows about.
 _NO_REF = "no-ref"
@@ -127,6 +157,24 @@ LANDING_LIMITS: tuple[str, ...] = (
     "mainline and reads LANDED, even though nothing landed. It costs nothing "
     "because LANDED moves no score - which is the asymmetry earning its keep - "
     "but it is not evidence that any work arrived.",
+    "Content containment shows that the mainline HOLDS what the branch wrote. "
+    "It does not show that the branch is where it came from: two sessions "
+    "writing the same file independently, or one re-implementing the other's "
+    "work, are indistinguishable from a squash of this branch. The label is "
+    "read as landed in all three, and only the first is authorship.",
+    "Content is compared against the files the branch changed since it "
+    "diverged. A branch that changed nothing since its merge base is "
+    "vacuously contained and reads LANDED - correctly, in that it has nothing "
+    "left to land, and uninformatively, in that no work of its own arrived.",
+    "Uncommitted work is invisible to every route here. A worktree holding "
+    "finished-but-untracked files reads exactly like an empty one, and its "
+    "branch can read LANDED while the work that matters has never been in git "
+    "at all.",
+    "Tree equality shows that MERGING would add nothing, which is weaker than "
+    "containment and is not the same question. A branch that changed nothing "
+    "since it diverged merges to the mainline's tree and reads LANDED while "
+    "having delivered nothing; so does one whose every change the mainline "
+    "made independently. Both cost nothing, because LANDED moves no score.",
 )
 
 
@@ -195,6 +243,9 @@ class LandingIndex:
         self._repo_key = _git_common_dir(self.repo_root)
         self._cwd_cache: dict[str, bool | None] = {}
         self._local_cache: dict[str, str] = {}
+        self._content_cache: dict[str, int | None] = {}
+        self._tree_cache: dict[str, bool | None] = {}
+        self._mainline_tree: str | None = None
 
     # ── the question ─────────────────────────────────────────────────────────
     def of(self, branch: str, *, settled_at: int, now: int | None = None,
@@ -243,6 +294,9 @@ class LandingIndex:
                 f"{name} shares no merge-base with {self.mainline}; it is a "
                 f"separate history and landing does not apply to it"))
 
+        carried = self._by_content(name) or self._by_tree(name)
+        if carried is not None:
+            return carried
         return self._by_window(name, settled_at=settled_at, now=moment,
                                how=f"{name} has not reached {self.mainline}")
 
@@ -268,6 +322,9 @@ class LandingIndex:
             return Landing(LANDED, name, (
                 f"the local branch {name} is an ancestor of {self.mainline}; "
                 f"it landed without a remote ref being kept for it"))
+        carried = self._by_content(name) or self._by_tree(name)
+        if carried is not None:
+            return carried
         return self._by_window(
             name, settled_at=settled_at, now=now,
             how=(f"the local branch {name} has not reached {self.mainline} and "
@@ -281,6 +338,125 @@ class LandingIndex:
         rc, _ = _git("merge-base", "--is-ancestor", f"refs/heads/{name}",
                      self.mainline, repo=self.repo_root)
         return _ANCESTOR if rc == 0 else _NOT_ANCESTOR
+
+    # ── did the content arrive, whatever happened to the commits ─────────────
+    def _by_content(self, name: str) -> Landing | None:
+        """LANDED if the mainline already holds every file this branch wrote.
+
+        The route that survives a squash merge, which rewrites the work under a
+        new commit identity and so defeats both ancestry and the merge subject.
+
+        Returns `None` for "cannot show it landed", never "did not land": the
+        caller falls through to the window unchanged. Every failure here — an
+        unresolvable ref, a git error, a path this cannot compare — takes that
+        branch, so the route can only withhold a penalty and never invent one.
+        """
+        if name not in self._content_cache:
+            self._content_cache[name] = self._count_contained(name)
+        count = self._content_cache[name]
+        if count is None:
+            return None
+        if count == 0:
+            return Landing(LANDED, name, (
+                f"{name} changed no file since it diverged from "
+                f"{self.mainline}, so it has nothing left to land — which is "
+                f"not evidence that work of its own arrived"))
+        return Landing(LANDED, name, (
+            f"every one of the {count} file(s) {name} changed since it "
+            f"diverged is byte-identical on {self.mainline} today, so its "
+            f"content arrived under some other commit — a squash or a "
+            f"cherry-pick leaves no ancestry and no merge subject to read"))
+
+    def _by_tree(self, name: str) -> Landing | None:
+        """LANDED if merging this branch would produce the mainline's tree.
+
+        The WIDER NET, and it is deliberately asked after content rather than
+        instead of it. Content equality is the stronger claim: measured over
+        this repository on 2026-08-10 across 106 non-ancestor branches, every
+        branch that was contained was also tree-equal and **thirteen were
+        tree-equal without being contained** — none the other way round. Those
+        thirteen are the case a byte comparison structurally cannot reach: the
+        work arrived and the mainline then moved further on the same files, so
+        the merge re-applies nothing while the bytes still differ. Two of them
+        were reading ABANDONED when this was written.
+
+        The merge is `landing_cost`'s, not a second one. That is the landing
+        desk's ruling and it is also the safer engineering: `merge-tree` has one
+        caller-visible contract in this repository, and a second copy would
+        drift from it exactly once, silently.
+        """
+        if name not in self._tree_cache:
+            self._tree_cache[name] = self._merges_to_mainline(name)
+        if not self._tree_cache[name]:
+            return None
+        return Landing(LANDED, name, (
+            f"merging {name} into {self.mainline} would produce the mainline's "
+            f"tree exactly, so nothing of it is outstanding — its content "
+            f"arrived and {self.mainline} has moved on since, which is why a "
+            f"file-by-file comparison does not show it"))
+
+    def _merges_to_mainline(self, name: str) -> bool | None:
+        # Imported HERE, like `branch_index` above and for the same reason: the
+        # vocabulary at the top of this module must stay importable wherever the
+        # ledger is read, and a missing pricing module has to degrade to "cannot
+        # say" rather than to an exception. ImportError is therefore an answer,
+        # not a failure — and it is the withholding answer, which is the only
+        # direction this module is allowed to be wrong in.
+        try:
+            from alelyon.runtime.common import landing_cost as LC
+        except ImportError:
+            return None
+        ref = self._branch_ref(name)
+        if ref is None:
+            return None
+        if self._mainline_tree is None:
+            self._mainline_tree = LC.mainline_tree(self.mainline,
+                                                   repo=str(self.repo_root))
+        if not self._mainline_tree:
+            return None
+        cost = LC.landing_cost(ref, mainline=self.mainline,
+                               repo=str(self.repo_root),
+                               mainline_tree=self._mainline_tree)
+        if not cost.readable:
+            return None
+        return cost.verdict == LC.NOTHING_TO_LAND
+
+    def _count_contained(self, name: str) -> int | None:
+        ref = self._branch_ref(name)
+        if ref is None:
+            return None
+        rc, out = _git("diff", "--name-only", "-z", f"{self.mainline}...{ref}",
+                       repo=self.repo_root)
+        if rc != 0:
+            return None
+        # -z rather than the default: git quotes non-ASCII paths on the way
+        # out, and a quoted path handed back as a pathspec matches nothing —
+        # which would read as "no difference" and report LANDED on a branch
+        # that had not landed. NUL-separated output is never quoted.
+        changed = [p for p in out.split("\0") if p]
+        if not changed:
+            return 0
+        for batch in (changed[i:i + _PATHSPEC_BATCH]
+                      for i in range(0, len(changed), _PATHSPEC_BATCH)):
+            rc, out = _git("diff", "--name-only", "-z", self.mainline, ref,
+                           "--", *batch, repo=self.repo_root)
+            if rc != 0 or [p for p in out.split("\0") if p]:
+                return None
+        return len(changed)
+
+    def _branch_ref(self, name: str) -> str | None:
+        """A ref that resolves to this branch, local or remote, or None."""
+        remote = self.mainline.rsplit("/", 1)[0] if "/" in self.mainline else ""
+        for candidate in (f"refs/heads/{name}",
+                          f"refs/remotes/{remote}/{name}" if remote else "",
+                          f"refs/remotes/{name}"):
+            if not candidate:
+                continue
+            rc, _ = _git("rev-parse", "--verify", "--quiet", candidate,
+                         repo=self.repo_root)
+            if rc == 0:
+                return candidate
+        return None
 
     def _by_window(self, name: str, *, settled_at: int, now: int,
                    how: str) -> Landing:

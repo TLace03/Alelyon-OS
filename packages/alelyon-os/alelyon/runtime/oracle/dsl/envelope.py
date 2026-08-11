@@ -429,8 +429,29 @@ def _anchor_input(store, keystore, ref: Tuple[str, str], series: pd.Series,
     deltas = np.full(len(ts), np.nan)
     covering: set = set()
     attributed = {}
+    # The verifier will only accept a leaf that still commits the current value of
+    # every row it covers (SPEC §7.7), so ISSUANCE must apply the same rule. A leaf
+    # that fails it here is not attributed, which means a scope whose values were
+    # revised after capture produces NO transparency block and an honestly
+    # `authenticated` width — rather than an anchored-looking receipt that refuses
+    # on the issuer's own data. `leaf_value_coverage` is the one definition both
+    # sides read; two copies of this rule is how that surprise gets built.
+    from alelyon.runtime.atlas.data.attest import (leaf_value_coverage,
+                                                   validated_payload_membership)
+    own_values = dict(zip((float(t) for t in ts),
+                          s.to_numpy(dtype=float, copy=False)))
+    records = {int(r["seq"]): r
+               for r in store.cert_log_records(table, s1, s2)}
     for lf in leaves:
         if col not in lf["columns"]:
+            continue
+        record = records.get(int(lf["seq"]))
+        membership = None if record is None else validated_payload_membership(
+            record["payload"], table, int(record["n"]),
+            float(record["lo_ts"]), float(record["hi_ts"]))
+        if membership is None or leaf_value_coverage(
+                table, s1, s2, col, record["payload"], membership,
+                own_values) is not None:
             continue
         delta = lf["columns"][col]
         for member_ts in lf.get("rows", ()):

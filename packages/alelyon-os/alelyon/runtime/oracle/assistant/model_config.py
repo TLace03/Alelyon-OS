@@ -36,14 +36,10 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
-
-from alelyon.runtime.common.paths import GLOBALS_DIR
-
-#: Where the registry persists. State, not source — it travels with the user.
-CONFIG_PATH: Path = GLOBALS_DIR / "model_endpoints.json"
 
 KIND_OLLAMA = "ollama"
 KIND_OPENAI = "openai-compatible"
@@ -53,6 +49,51 @@ KINDS = (KIND_OLLAMA, KIND_OPENAI, KIND_ANTHROPIC)
 #: An api_key_name must look like an environment variable, because that is what
 #: it becomes. Refusing anything else keeps a crafted name out of the env file.
 _KEY_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+CONFIG_SCHEMA_VERSION = 1
+MAX_CONFIG_BYTES = 1_048_576
+MAX_ENDPOINT_ROWS = 10_000
+MAX_ENDPOINT_FIELD_CHARS = 4_096
+_NATIVE_PATH_TYPE = type(Path())
+
+
+def config_path(*, state_root: Path | None = None) -> Path:
+    """Resolve the registry path without freezing Runtime paths at import.
+
+    Entry points may supply the pure deployment ``state_root`` to inspect the
+    registry before bootstrapping or creating state. Existing callers that omit
+    it retain the Runtime-path default, resolved lazily. The explicit model
+    configuration override remains highest precedence.
+    """
+    override = (os.environ.get("ALELYON_MODEL_CONFIG") or "").strip()
+    if override:
+        return Path(override)
+    if state_root is not None:
+        if type(state_root) is not _NATIVE_PATH_TYPE:
+            raise TypeError("state_root must be a platform Path")
+        return state_root / "globals" / "model_endpoints.json"
+    from alelyon.runtime.common.paths import GLOBALS_DIR
+
+    return Path(GLOBALS_DIR) / "model_endpoints.json"
+
+
+def __getattr__(name: str):
+    """Keep the legacy ``CONFIG_PATH`` module attribute lazy."""
+    if name == "CONFIG_PATH":
+        return config_path()
+    raise AttributeError(name)
+
+
+def _bounded_text(value: object, *, nonempty: bool = False) -> bool:
+    if type(value) is not str:
+        return False
+    if (nonempty and not value) or len(value) > MAX_ENDPOINT_FIELD_CHARS:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def is_local_url(url: str) -> bool:
@@ -98,12 +139,19 @@ class ModelEndpoint:
     note: str = ""
 
     def __post_init__(self) -> None:
-        if self.kind not in KINDS:
-            raise ValueError(f"endpoint {self.id!r} has unknown kind {self.kind!r}")
-        if self.api_key_name and not _KEY_NAME_RE.match(self.api_key_name):
-            raise ValueError(
-                f"endpoint {self.id!r} has an api_key_name that is not a valid "
-                f"environment-variable name: {self.api_key_name!r}")
+        if not _bounded_text(self.id, nonempty=True):
+            raise ValueError("endpoint id must be a bounded non-empty string")
+        if not _bounded_text(self.label, nonempty=True):
+            raise ValueError("endpoint label must be a bounded non-empty string")
+        for value in (self.base_url, self.model, self.api_key_name, self.note):
+            if not _bounded_text(value):
+                raise ValueError("endpoint text fields must be bounded strings")
+        if type(self.kind) is not str or self.kind not in KINDS:
+            raise ValueError("endpoint kind is invalid")
+        if type(self.enabled) is not bool or type(self.builtin) is not bool:
+            raise TypeError("endpoint flags must be exact bool values")
+        if self.api_key_name and not _KEY_NAME_RE.fullmatch(self.api_key_name):
+            raise ValueError("endpoint key name is invalid")
 
     @property
     def local(self) -> bool:
@@ -143,6 +191,50 @@ class ModelEndpoint:
         if self.needs_key and not self.has_key():
             return f"needs {self.api_key_name}"
         return "ready"
+
+
+class LoadIssue(str, Enum):
+    """Closed, content-free reasons a registry observation is incomplete."""
+
+    UNREADABLE = "unreadable"
+    CORRUPT = "corrupt"
+    UNSUPPORTED_ROOT = "unsupported-root"
+    UNSUPPORTED_SCHEMA = "unsupported-schema"
+    INVALID_ROW = "invalid-row"
+    DUPLICATE_ENDPOINT_ID = "duplicate-endpoint-id"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelConfigLoadReport:
+    """A bounded registry observation without readiness or provider effects.
+
+    Endpoint values remain available to the owning Oracle adapter, but are
+    deliberately excluded from the report representation.  Reasons describe
+    only structural failure classes and never reproduce source content or an
+    exception raised while reading it.
+    """
+
+    endpoints: tuple[ModelEndpoint, ...] = field(repr=False)
+    complete: bool
+    reason_classes: tuple[LoadIssue, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.endpoints) is not tuple or any(
+            type(endpoint) is not ModelEndpoint for endpoint in self.endpoints
+        ):
+            raise TypeError("endpoints must be a tuple of exact ModelEndpoint values")
+        if len(self.endpoints) > MAX_ENDPOINT_ROWS + len(_builtins()):
+            raise ValueError("endpoint report exceeds its size bound")
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be an exact bool")
+        if type(self.reason_classes) is not tuple or any(
+            type(reason) is not LoadIssue for reason in self.reason_classes
+        ):
+            raise TypeError("reason_classes must contain exact LoadIssue values")
+        if len(set(self.reason_classes)) != len(self.reason_classes):
+            raise ValueError("reason_classes must be unique")
+        if self.complete is not (not self.reason_classes):
+            raise ValueError("complete must agree with reason_classes")
 
 
 # ── the built-in catalogue ───────────────────────────────────────────────────
@@ -226,44 +318,142 @@ def builtin_endpoints() -> List[ModelEndpoint]:
 # ── persistence ──────────────────────────────────────────────────────────────
 
 def _config_path() -> Path:
-    override = (os.environ.get("ALELYON_MODEL_CONFIG") or "").strip()
-    return Path(override) if override else CONFIG_PATH
+    return config_path()
 
 
-def load() -> List[ModelEndpoint]:
-    """Every endpoint: built-ins merged with the user's saved edits.
+def _add_issue(issues: list[LoadIssue], issue: LoadIssue) -> None:
+    if issue not in issues:
+        issues.append(issue)
+
+
+def _report(
+    entries: Dict[str, ModelEndpoint],
+    issues: list[LoadIssue],
+) -> ModelConfigLoadReport:
+    reasons = tuple(issues)
+    return ModelConfigLoadReport(
+        endpoints=tuple(entries.values()),
+        complete=not reasons,
+        reason_classes=reasons,
+    )
+
+
+def load_with_report(path: Path | None = None) -> ModelConfigLoadReport:
+    """Load endpoints plus content-free completeness evidence.
 
     Merged rather than replaced so a new built-in (a lab that did not exist when
     the user last saved) appears without them having to reset anything, while
     their edits to an existing entry survive.
 
-    A corrupt or unreadable file yields the built-ins. Losing customisation is
-    bad; refusing to start the assistant because a JSON file has a stray comma
-    is worse.
+    Missing configuration is the valid built-in-only state.  Any present input
+    that cannot be observed completely keeps every compatible endpoint that can
+    be recovered, but marks the report incomplete.  This function performs no
+    key lookup, readiness check, provider construction, or network operation.
+    An injected path must be the exact native ``pathlib`` type; subclasses are
+    refused so they cannot override the bounded read operation.
     """
-    entries: Dict[str, ModelEndpoint] = {e.id: e for e in _builtins()}
+    builtins = _builtins()
+    entries: Dict[str, ModelEndpoint] = {
+        endpoint.id: endpoint for endpoint in builtins
+    }
+    builtin_ids = frozenset(entries)
+    issues: list[LoadIssue] = []
+    selected = _config_path() if path is None else path
+    if type(selected) is not _NATIVE_PATH_TYPE:
+        _add_issue(issues, LoadIssue.UNREADABLE)
+        return _report(entries, issues)
+
     try:
-        raw = json.loads(_config_path().read_text(encoding="utf-8"))
-        rows = raw.get("endpoints") if isinstance(raw, dict) else raw
-        for row in rows or []:
-            if not isinstance(row, dict) or not row.get("id"):
-                continue
-            merged = {**asdict(entries[row["id"]]), **row} if row["id"] in entries else row
-            merged.pop("builtin", None)
-            try:
-                entry = ModelEndpoint(**{
-                    k: v for k, v in merged.items()
-                    if k in ModelEndpoint.__dataclass_fields__ and k != "builtin"
-                })
-            except (TypeError, ValueError):
-                continue          # one bad row never discards the rest
-            entry.builtin = row["id"] in {e.id for e in _builtins()}
-            entries[entry.id] = entry
+        with selected.open("rb") as source:
+            encoded = source.read(MAX_CONFIG_BYTES + 1)
     except FileNotFoundError:
-        pass
+        return _report(entries, issues)
     except Exception:  # noqa: BLE001
-        pass
-    return list(entries.values())
+        _add_issue(issues, LoadIssue.UNREADABLE)
+        return _report(entries, issues)
+
+    if len(encoded) > MAX_CONFIG_BYTES:
+        _add_issue(issues, LoadIssue.CORRUPT)
+        return _report(entries, issues)
+    try:
+        raw = json.loads(encoded)
+    except Exception:  # noqa: BLE001 -- this is the config containment boundary
+        _add_issue(issues, LoadIssue.CORRUPT)
+        return _report(entries, issues)
+
+    if type(raw) is dict:
+        if (
+            any(type(key) is not str for key in raw)
+            or set(raw) != {"version", "endpoints"}
+            or type(raw.get("version")) is not int
+            or raw.get("version") != CONFIG_SCHEMA_VERSION
+        ):
+            _add_issue(issues, LoadIssue.UNSUPPORTED_SCHEMA)
+        candidate_rows = raw.get("endpoints")
+        if type(candidate_rows) is not list:
+            _add_issue(issues, LoadIssue.UNSUPPORTED_SCHEMA)
+            rows: list[object] = []
+        else:
+            rows = candidate_rows
+    elif type(raw) is list:
+        # Legacy bare-list registries keep their historical load() behavior,
+        # but cannot be called a complete observation of the versioned schema.
+        _add_issue(issues, LoadIssue.UNSUPPORTED_ROOT)
+        rows = raw
+    else:
+        _add_issue(issues, LoadIssue.UNSUPPORTED_ROOT)
+        rows = []
+
+    if len(rows) > MAX_ENDPOINT_ROWS:
+        _add_issue(issues, LoadIssue.INVALID_ROW)
+        rows = rows[:MAX_ENDPOINT_ROWS]
+
+    fields = frozenset(ModelEndpoint.__dataclass_fields__)
+    seen_ids: set[str] = set()
+    for row in rows:
+        if type(row) is not dict or any(type(key) is not str for key in row):
+            _add_issue(issues, LoadIssue.INVALID_ROW)
+            continue
+        row_id = row.get("id")
+        if not _bounded_text(row_id, nonempty=True):
+            _add_issue(issues, LoadIssue.INVALID_ROW)
+            continue
+        if row_id in seen_ids:
+            _add_issue(issues, LoadIssue.DUPLICATE_ENDPOINT_ID)
+        seen_ids.add(row_id)
+        if not set(row).issubset(fields):
+            _add_issue(issues, LoadIssue.INVALID_ROW)
+        if "builtin" in row and type(row["builtin"]) is not bool:
+            _add_issue(issues, LoadIssue.INVALID_ROW)
+
+        supplied = {
+            key: value for key, value in row.items()
+            if key in fields and key != "builtin"
+        }
+        merged = (
+            {**asdict(entries[row_id]), **supplied}
+            if row_id in entries
+            else supplied
+        )
+        merged["builtin"] = row_id in builtin_ids
+        try:
+            entry = ModelEndpoint(**merged)
+        except (TypeError, ValueError, UnicodeError):
+            _add_issue(issues, LoadIssue.INVALID_ROW)
+            continue
+        entries[entry.id] = entry
+
+    return _report(entries, issues)
+
+
+def load() -> List[ModelEndpoint]:
+    """Compatibility list view over :func:`load_with_report`.
+
+    The assistant retains its historical fail-soft behavior: usable endpoint
+    rows and built-ins remain available even when the diagnostic report is
+    incomplete.  Persistence-sensitive observers must use the report directly.
+    """
+    return list(load_with_report().endpoints)
 
 
 def save(endpoints: List[ModelEndpoint]) -> Path:
@@ -281,7 +471,10 @@ def save(endpoints: List[ModelEndpoint]) -> Path:
         for banned in ("api_key", "key", "secret", "token", "password"):
             row.pop(banned, None)
         rows.append(row)
-    payload = json.dumps({"version": 1, "endpoints": rows}, indent=2) + "\n"
+    payload = json.dumps(
+        {"version": CONFIG_SCHEMA_VERSION, "endpoints": rows},
+        indent=2,
+    ) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(payload, encoding="utf-8")
