@@ -58,7 +58,8 @@ models is reuse rather than a second invented lifecycle.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 import sqlite3
 import time
@@ -77,7 +78,12 @@ _CONNECT_TIMEOUT = 10.0
 #: versioned into a new layer space: the columns are additive and `landed`
 #: defaults to the one value that scores exactly as v1 did, so a v1 ledger reads
 #: back at v2 with every historical score unchanged. A test pins that.
-LEDGER_SCHEMA_VERSION = 2
+#:
+#: 3 adds the producer-owned, append-only ``run_changes`` feed.  The owner
+#: writer backfills one ``recorded`` change for every older row before exposing
+#: the version.  A read-only observer refuses pre-v3 databases and never runs
+#: this migration itself.
+LEDGER_SCHEMA_VERSION = 3
 
 #: What an ABANDONED landing does to a run's score.
 #:
@@ -229,6 +235,62 @@ _DDL = (
            ON standings(layer, work_kind, seq)""",
 )
 
+RECORDED = "recorded"
+RECONCILED = "reconciled"
+CHANGE_KINDS = (RECORDED, RECONCILED)
+CHANGE_FEED_SCHEMA = "alelyon.fleet-run-changes/v1"
+MAX_CHANGE_PAGE = 1_000
+MAX_CHANGE_TEXT_BYTES = 4_096
+
+_CHANGE_COLUMNS = (
+    "run_id, at, layer, work_kind, model, agent_id, fleet_id, session_id, "
+    "settled, turns, out_tokens, seconds, contested, space, branch, cwd, landed"
+)
+
+_CHANGE_DDL = (
+    f"""CREATE TABLE IF NOT EXISTS run_changes (
+           seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+           change_kind TEXT NOT NULL CHECK(change_kind IN ('{RECORDED}','{RECONCILED}')),
+           run_id      TEXT NOT NULL,
+           at          INTEGER NOT NULL,
+           layer       TEXT NOT NULL,
+           work_kind   TEXT NOT NULL,
+           model       TEXT NOT NULL,
+           agent_id    TEXT NOT NULL,
+           fleet_id    TEXT NOT NULL,
+           session_id  TEXT NOT NULL,
+           settled     INTEGER NOT NULL,
+           turns       INTEGER NOT NULL,
+           out_tokens  INTEGER NOT NULL,
+           seconds     INTEGER,
+           contested   INTEGER NOT NULL,
+           space       INTEGER NOT NULL,
+           branch      TEXT NOT NULL,
+           cwd         TEXT NOT NULL,
+           landed      TEXT NOT NULL)""",
+    f"""CREATE UNIQUE INDEX IF NOT EXISTS run_changes_recorded_once
+           ON run_changes(run_id) WHERE change_kind='{RECORDED}'""",
+    f"""CREATE TRIGGER IF NOT EXISTS runs_change_after_insert
+           AFTER INSERT ON runs
+           BEGIN
+             INSERT INTO run_changes(change_kind, {_CHANGE_COLUMNS})
+             VALUES('{RECORDED}', NEW.run_id, NEW.at, NEW.layer, NEW.work_kind,
+                    NEW.model, NEW.agent_id, NEW.fleet_id, NEW.session_id,
+                    NEW.settled, NEW.turns, NEW.out_tokens, NEW.seconds,
+                    NEW.contested, NEW.space, NEW.branch, NEW.cwd, NEW.landed);
+           END""",
+    f"""CREATE TRIGGER IF NOT EXISTS runs_change_after_landing
+           AFTER UPDATE OF landed ON runs
+           WHEN OLD.landed IS NOT NEW.landed
+           BEGIN
+             INSERT INTO run_changes(change_kind, {_CHANGE_COLUMNS})
+             VALUES('{RECONCILED}', NEW.run_id, NEW.at, NEW.layer, NEW.work_kind,
+                    NEW.model, NEW.agent_id, NEW.fleet_id, NEW.session_id,
+                    NEW.settled, NEW.turns, NEW.out_tokens, NEW.seconds,
+                    NEW.contested, NEW.space, NEW.branch, NEW.cwd, NEW.landed);
+           END""",
+)
+
 
 @dataclass(frozen=True)
 class Run:
@@ -321,6 +383,86 @@ class Run:
         value = 0.75 + 0.25 * cost
         landing = ABANDONED_PENALTY if self.landed == O.ABANDONED else 1.0
         return round(value * (0.4 if self.contested else 1.0) * landing, 6)
+
+
+class ChangeFeedState(str, Enum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    UNSUPPORTED = "unsupported"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True, slots=True)
+class FleetRunChange:
+    """One immutable run snapshot at the producer change sequence."""
+
+    seq: int
+    change_kind: str
+    space: int
+    run: Run = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.seq) is not int or self.seq <= 0:
+            raise ValueError("seq must be a positive exact int")
+        if type(self.change_kind) is not str or self.change_kind not in CHANGE_KINDS:
+            raise ValueError("change_kind is not supported")
+        if type(self.space) is not int or self.space < 0:
+            raise ValueError("space must be a non-negative exact int")
+        if type(self.run) is not Run:
+            raise TypeError("run must be an exact Run")
+
+
+@dataclass(frozen=True, slots=True)
+class FleetChangePage:
+    """A bounded page on one stable feed high-water mark.
+
+    ``next_after_seq`` is exclusive.  Reusing ``as_of_seq`` while following
+    pages gives a finite snapshot; starting again after the returned cursor
+    observes changes committed later without repeating an earlier sequence.
+    """
+
+    schema: str
+    after_seq: int
+    as_of_seq: int
+    changes: tuple[FleetRunChange, ...] = field(repr=False)
+    next_after_seq: int
+    has_more: bool
+
+    def __post_init__(self) -> None:
+        if self.schema != CHANGE_FEED_SCHEMA:
+            raise ValueError("schema is not supported")
+        for name in ("after_seq", "as_of_seq", "next_after_seq"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative exact int")
+        if type(self.changes) is not tuple or any(
+            type(change) is not FleetRunChange for change in self.changes
+        ):
+            raise TypeError("changes must be exact FleetRunChange values")
+        if type(self.has_more) is not bool:
+            raise TypeError("has_more must be an exact bool")
+        if self.changes:
+            sequences = tuple(change.seq for change in self.changes)
+            if sequences != tuple(sorted(sequences)) or len(set(sequences)) != len(sequences):
+                raise ValueError("change sequences must be unique and ordered")
+            if sequences[0] <= self.after_seq or sequences[-1] > self.as_of_seq:
+                raise ValueError("change sequences are outside the page bounds")
+            if self.next_after_seq != sequences[-1]:
+                raise ValueError("next_after_seq must name the last returned change")
+        elif self.next_after_seq != self.after_seq:
+            raise ValueError("an empty page must preserve its input cursor")
+
+
+@dataclass(frozen=True, slots=True)
+class FleetChangeReport:
+    state: ChangeFeedState
+    page: FleetChangePage | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not ChangeFeedState:
+            raise TypeError("state must be an exact ChangeFeedState")
+        if (self.state is ChangeFeedState.AVAILABLE) != (self.page is not None):
+            raise ValueError("only an available report may carry a page")
 
 
 @dataclass(frozen=True)
@@ -548,8 +690,174 @@ def default_database() -> Path:
     return Path(paths.fleet_state_dir()) / "fleet_ledger.db"
 
 
+_CHANGE_TABLE_CONTRACT = (
+    ("seq", "INTEGER", 0, 1),
+    ("change_kind", "TEXT", 1, 0),
+    ("run_id", "TEXT", 1, 0),
+    ("at", "INTEGER", 1, 0),
+    ("layer", "TEXT", 1, 0),
+    ("work_kind", "TEXT", 1, 0),
+    ("model", "TEXT", 1, 0),
+    ("agent_id", "TEXT", 1, 0),
+    ("fleet_id", "TEXT", 1, 0),
+    ("session_id", "TEXT", 1, 0),
+    ("settled", "INTEGER", 1, 0),
+    ("turns", "INTEGER", 1, 0),
+    ("out_tokens", "INTEGER", 1, 0),
+    ("seconds", "INTEGER", 0, 0),
+    ("contested", "INTEGER", 1, 0),
+    ("space", "INTEGER", 1, 0),
+    ("branch", "TEXT", 1, 0),
+    ("cwd", "TEXT", 1, 0),
+    ("landed", "TEXT", 1, 0),
+)
+
+
+def _feed_text(value: object) -> str:
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError("invalid structural text")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        raise ValueError("invalid structural text") from None
+    if len(encoded) > MAX_CHANGE_TEXT_BYTES:
+        raise ValueError("invalid structural text")
+    return value
+
+
+def _feed_optional_text(value: object) -> str:
+    if value == "" and type(value) is str:
+        return ""
+    return _feed_text(value)
+
+
+def _feed_integer(value: object, *, optional: bool = False) -> int | None:
+    if optional and value is None:
+        return None
+    if type(value) is not int or value < 0 or value > (1 << 63) - 1:
+        raise ValueError("invalid structural integer")
+    return value
+
+
+def _change_from_row(row: sqlite3.Row) -> FleetRunChange:
+    settled = row["settled"]
+    contested = row["contested"]
+    if type(settled) is not int or settled not in (0, 1):
+        raise ValueError("invalid structural state")
+    if type(contested) is not int or contested not in (0, 1):
+        raise ValueError("invalid structural state")
+    landed = _feed_text(row["landed"])
+    if landed not in O.OUTCOMES:
+        raise ValueError("invalid structural outcome")
+    run = Run(
+        run_id=_feed_text(row["run_id"]),
+        at=_feed_integer(row["at"]),
+        layer=_feed_text(row["layer"]),
+        work_kind=_feed_text(row["work_kind"]),
+        model=_feed_text(row["model"]),
+        agent_id=_feed_text(row["agent_id"]),
+        fleet_id=_feed_text(row["fleet_id"]),
+        session_id=_feed_text(row["session_id"]),
+        settled=bool(settled),
+        turns=_feed_integer(row["turns"]),
+        out_tokens=_feed_integer(row["out_tokens"]),
+        seconds=_feed_integer(row["seconds"], optional=True),
+        contested=bool(contested),
+        branch=_feed_optional_text(row["branch"]),
+        cwd=_feed_optional_text(row["cwd"]),
+        landed=landed,
+    )
+    return FleetRunChange(
+        seq=_feed_integer(row["seq"]),
+        change_kind=_feed_text(row["change_kind"]),
+        space=_feed_integer(row["space"]),
+        run=run,
+    )
+
+
+def read_change_feed(
+    database: str | Path,
+    *,
+    after_seq: int = 0,
+    as_of_seq: int | None = None,
+    limit: int = 256,
+) -> FleetChangeReport:
+    """Read a stable page without creating, migrating, or repairing a ledger.
+
+    A pre-v3 database is ``UNSUPPORTED`` even when its legacy ``runs`` table is
+    readable.  Only constructing :class:`FleetLedger` owns the migration.  The
+    sequence, rather than ``Run.at``, is the cursor so a late insert with an
+    older run timestamp cannot fall behind the reader permanently.
+    """
+    if type(after_seq) is not int or after_seq < 0:
+        raise ValueError("after_seq must be a non-negative exact int")
+    if as_of_seq is not None and (
+        type(as_of_seq) is not int or as_of_seq < after_seq
+    ):
+        raise ValueError("as_of_seq must be an exact int at or after the cursor")
+    if type(limit) is not int or not 1 <= limit <= MAX_CHANGE_PAGE:
+        raise ValueError("limit is outside the supported range")
+    path = Path(database)
+    try:
+        if not path.is_file():
+            return FleetChangeReport(ChangeFeedState.MISSING)
+        resolved = path.resolve(strict=True)
+        uri = f"{resolved.as_uri()}?mode=ro&cache=private"
+        conn = sqlite3.connect(uri, uri=True, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+    except (OSError, sqlite3.Error, ValueError):
+        return FleetChangeReport(ChangeFeedState.INVALID)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        meta = conn.execute(
+            "SELECT value FROM meta WHERE name='schema'"
+        ).fetchone()
+        if meta is None or type(meta["value"]) is not str:
+            return FleetChangeReport(ChangeFeedState.INVALID)
+        if meta["value"] != str(LEDGER_SCHEMA_VERSION):
+            return FleetChangeReport(ChangeFeedState.UNSUPPORTED)
+        contract = tuple(
+            (row["name"], str(row["type"]).upper(), row["notnull"], row["pk"])
+            for row in conn.execute("PRAGMA table_info(run_changes)")
+        )
+        if contract != _CHANGE_TABLE_CONTRACT:
+            return FleetChangeReport(ChangeFeedState.INVALID)
+        maximum_row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS maximum FROM run_changes"
+        ).fetchone()
+        maximum = _feed_integer(maximum_row["maximum"])
+        boundary = maximum if as_of_seq is None else as_of_seq
+        if boundary > maximum:
+            return FleetChangeReport(ChangeFeedState.INVALID)
+        rows = conn.execute(
+            "SELECT seq, change_kind, " + _CHANGE_COLUMNS
+            + " FROM run_changes WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
+            (after_seq, boundary, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        changes = tuple(_change_from_row(row) for row in rows[:limit])
+        next_after = changes[-1].seq if changes else after_seq
+        page = FleetChangePage(
+            schema=CHANGE_FEED_SCHEMA,
+            after_seq=after_seq,
+            as_of_seq=boundary,
+            changes=changes,
+            next_after_seq=next_after,
+            has_more=has_more,
+        )
+    except (sqlite3.Error, TypeError, ValueError, OverflowError):
+        return FleetChangeReport(ChangeFeedState.INVALID)
+    finally:
+        conn.close()
+    return FleetChangeReport(ChangeFeedState.AVAILABLE, page)
+
+
 class FleetLedger:
-    """Durable record of what every model did at every layer. Append-only."""
+    """Durable owner writer for what every model did at every layer.
+
+    Construction creates and migrates.  Read-only observation must use
+    :func:`read_change_feed`, which never constructs this class.
+    """
 
     def __init__(self, database: str | Path | None = None) -> None:
         """Open, CREATING the ledger when it is not there.
@@ -565,6 +873,7 @@ class FleetLedger:
             for statement in _DDL:
                 conn.execute(statement)
             self._migrate(conn)
+            self._install_change_feed(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO meta(name, value) VALUES('schema', ?)",
                 (str(LEDGER_SCHEMA_VERSION),))
@@ -667,6 +976,24 @@ class FleetLedger:
                 conn.execute(ddl)
                 added.append(column)
         return tuple(added)
+
+    @staticmethod
+    def _install_change_feed(conn: sqlite3.Connection) -> None:
+        """Install v3 only inside the owner writer and backfill older runs.
+
+        The insert trigger is installed before this method returns, in the same
+        transaction as the schema version update.  Existing runs receive one
+        deterministic ``recorded`` change in their SQLite insertion order.
+        Later inserts and landing reconciliations are then captured by triggers
+        in the transaction that owns the source mutation.
+        """
+        for statement in _CHANGE_DDL:
+            conn.execute(statement)
+        conn.execute(
+            f"""INSERT OR IGNORE INTO run_changes(change_kind, {_CHANGE_COLUMNS})
+                SELECT ?, {_CHANGE_COLUMNS} FROM runs ORDER BY rowid""",
+            (RECORDED,),
+        )
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         """One connection. `readonly=True` for anything that only reads.
@@ -1583,10 +1910,13 @@ def _is_contested(touched, at: int, always: set[str],
 
 __all__ = [
     "ABANDONED_PENALTY",
-    "ACCEPTED", "BELOW_FLOOR", "Career", "DEMOTED", "FleetLedger",
+    "ACCEPTED", "BELOW_FLOOR", "CHANGE_FEED_SCHEMA", "CHANGE_KINDS",
+    "Career", "ChangeFeedState", "DEMOTED", "FleetChangePage",
+    "FleetChangeReport", "FleetLedger", "FleetRunChange",
     "LEDGER_SCHEMA_VERSION", "LIVE", "MARGIN_FRACTION", "MAX_SCORE",
     "MIN_RUNS", "NOT_A_COORDINATE", "SCORE_CEILING",
-    "NOT_HELD_OUT", "NO_MARGIN", "OBSERVATION", "PAPER", "Run", "SCORE_LIMITS",
-    "STATES", "Scorecard", "Standing", "TOO_FEW_RUNS", "Verdict",
-    "default_database", "pooled_text", "runs_from_activity",
+    "NOT_HELD_OUT", "NO_MARGIN", "OBSERVATION", "PAPER", "RECORDED",
+    "RECONCILED", "Run", "SCORE_LIMITS", "STATES", "Scorecard", "Standing",
+    "TOO_FEW_RUNS", "Verdict", "default_database", "pooled_text",
+    "read_change_feed", "runs_from_activity",
 ]

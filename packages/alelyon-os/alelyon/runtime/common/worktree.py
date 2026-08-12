@@ -40,6 +40,7 @@ deleted is reported rather than repaired.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -229,6 +230,12 @@ def _prefetch_commit_times(root: str | Path, heads) -> None:
 
 def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
     """Run a read-only git query. Returns (returncode, stdout); never raises."""
+    environment = dict(os.environ)
+    # `git status` is observational here.  Without this flag Git is allowed to
+    # refresh the index as an optional optimisation even though the command's
+    # answer is read-only.  That turns opening a Fleet view into a write to
+    # another session's worktree and can contend on index.lock.
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         probe = subprocess.run(
             toolpath.argv("git", *args),
@@ -237,6 +244,7 @@ def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            env=environment,
             **toolpath.no_window(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -506,7 +514,8 @@ def _main_worktree(root: Path, worktree_list_output: str) -> str:
 def observe(repo_root: str | Path | None = None, *,
             mainline: str = "origin/main",
             now: float | None = None,
-            should_stop=None) -> WorktreeMesh:
+            should_stop=None,
+            include_session_hints: bool = True) -> WorktreeMesh:
     """Read every worktree of a repository and compute where they contend.
 
     ``mainline`` is the ref that "already landed" means. It is a parameter rather
@@ -538,7 +547,16 @@ def observe(repo_root: str | Path | None = None, *,
     observations of an unchanged repository therefore cost roughly the
     ``git status`` walks alone. ``forget_git_objects()`` empties it; correctness
     never depends on doing so, because a changed commit is a changed key.
+
+    ``include_session_hints=False`` is the content-free observation boundary.
+    It never calls the session hint adapter and reports every non-primary
+    worktree session as ``UNATTRIBUTED`` with an explicit reason.  The default
+    remains True for compatibility with the Fleet surfaces that intentionally
+    use path-derived hints.  The flag is exact-bool gated so ``1`` cannot enable
+    a privacy-sensitive seam by accident.
     """
+    if type(include_session_hints) is not bool:
+        raise TypeError("include_session_hints must be an exact bool")
     root = Path(repo_root or Path.cwd())
     observed_at = int(now if now is not None else time.time())
     notes: list[str] = []
@@ -601,9 +619,18 @@ def observe(repo_root: str | Path | None = None, *,
         # The primary checkout belongs to whoever is at the keyboard, so reading
         # a session out of its path would attribute the owner's own tree to
         # whichever agent happened to observe it.
-        session, session_evidence = (
-            (UNATTRIBUTED, "the repository's own checkout belongs to no session")
-            if is_primary else _session_hint(path))
+        if is_primary:
+            session, session_evidence = (
+                UNATTRIBUTED,
+                "the repository's own checkout belongs to no session",
+            )
+        elif include_session_hints:
+            session, session_evidence = _session_hint(path)
+        else:
+            session, session_evidence = (
+                UNATTRIBUTED,
+                "session hints disabled; structural worktree observation only",
+            )
         head = record.get("HEAD", "")
 
         # A commit's timestamp is a property of the commit, so this is asked once

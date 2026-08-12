@@ -3,21 +3,30 @@
 Extracted from `db.py` rather than imported from it, and the reason is a
 shipping boundary rather than tidiness. `db.py` is `fam.db`'s module — the
 markets database, its schema, its legacy data directory. The fleet stores need
-exactly two things from it (`try_set_wal`, `with_busy_retry`), and `fleet` is a
-PUBLISHED subsystem of `alelyon-os`, so importing `db` from `fleet_ledger` made
-`pip install alelyon-os[fleet]` raise ImportError unless the whole of `fam.db`'s
-module travelled with it. Publishing the markets foundation to obtain a WAL
-pragma is the wrong trade in both directions: it widens a public surface with
-content that has nothing to do with worktree coordination, and it does not make
-the coordination code any clearer.
+exactly two things from it (`try_set_wal`, `with_busy_retry`), and the fleet
+subsystem is PUBLISHED in `alelyon-os`, so importing `db` from `fleet_ledger`
+made a fresh install of that distribution raise ImportError unless the whole of
+`fam.db`'s module travelled with it. Publishing the markets foundation to obtain
+a WAL pragma is the wrong trade in both directions: it widens a public surface
+with content that has nothing to do with worktree coordination, and it does not
+make the coordination code any clearer.
 
 So the primitives live here, `db.py` imports them, and the fleet stores import
 them. One implementation, and the published subsystem carries ~90 lines of
 generic SQLite plumbing instead of a database it does not use.
 
 Stdlib only, and that is a SHIPPING CONSTRAINT rather than an accident: every
-module in the `fleet` file list must be importable from a bare
-`pip install alelyon-os[fleet]`, which names no third-party dependency.
+module in the fleet file list must be importable from `pip install alelyon-os`
+with nothing further named, because this subsystem declares no extra of its own.
+
+Deliberately phrased without a bracketed extra after the distribution name.
+`test_every_extra_named_in_shipped_code_is_declared` scans every shipped file
+for one and requires it to be declared, and this subsystem declares none: it
+needs no third-party package, and pyproject's doctrine is that an extra
+resolving to nothing is worse than no extra, because the install succeeds, does
+nothing further, and warns nobody. The scan matches the literal text ANYWHERE in
+the file, so a sentence cautioning against writing one still trips it -- which is
+why this paragraph describes the form instead of quoting it.
 """
 from __future__ import annotations
 

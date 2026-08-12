@@ -39,6 +39,21 @@ from alelyon.runtime.vector.lattice.contracts import (
     ScalarType,
     TopologyType,
 )
+from alelyon.runtime.vector.lattice.manifest import (
+    MAX_PARENT_REFS,
+    ArtifactManifest,
+    AxisExtent,
+    MissingnessState,
+    UncertaintyModel,
+    ValueSemantics,
+)
+from alelyon.runtime.vector.lattice.template import (
+    KNOWN_TRANSFORM_TYPES,
+    MAX_PARENT_TEMPLATE_REFS,
+    CanonicalTemplate,
+    CreationMethod,
+    TemplateTier,
+)
 from alelyon.runtime.vector.lattice.transforms import (
     MAX_TRANSFORM_CHAIN_DEPTH,
     MAX_LABEL_REINDEX_ITEMS,
@@ -65,12 +80,19 @@ AXIS_DOMAIN = "alelyon.lattice.canonical.axis/0.1"
 SPACE_DOMAIN = "alelyon.lattice.canonical.coordinate-space/0.1"
 TRANSFORM_DOMAIN = "alelyon.lattice.canonical.transform/0.1"
 CHAIN_DOMAIN = "alelyon.lattice.canonical.transform-chain/0.1"
+MANIFEST_DOMAIN = "alelyon.lattice.canonical.artifact-manifest/0.1"
+TEMPLATE_DOMAIN = "alelyon.lattice.canonical.canonical-template/0.1"
 
 # A chain embeds only space references, so this bounds the parameter payload
 # (chiefly label maps). Encoding or decoding beyond it is a refusal, never a
 # truncation.
 MAX_CANONICAL_BYTES = 64 * 1024 * 1024
 MAX_SPACE_CANONICAL_BYTES = MAX_SPACE_ENCODED_BYTES + (1024 * 1024)
+# A manifest embeds one whole coordinate space, so its ceiling is that space's
+# budget plus the manifest's own bounded scalar fields.
+MAX_MANIFEST_CANONICAL_BYTES = MAX_SPACE_CANONICAL_BYTES + (1024 * 1024)
+# A template embeds one space and references its parents, so the same ceiling.
+MAX_TEMPLATE_CANONICAL_BYTES = MAX_SPACE_CANONICAL_BYTES + (1024 * 1024)
 
 _ABSENT = b"\x00"
 _PRESENT = b"\x01"
@@ -131,6 +153,12 @@ def _build(factory, what: str, /, *args, **kwargs):
         ) from exc
 
 
+def _u64(value: int) -> bytes:
+    if value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+        raise CanonicalEncodingError("value does not fit an unsigned 64-bit field")
+    return value.to_bytes(8, "big")
+
+
 def _u32(value: int) -> bytes:
     if not 0 <= value <= _U32_MAX:
         raise CanonicalEncodingError(f"length {value} is outside the u32 domain")
@@ -180,6 +208,15 @@ class _Reader:
 
     def u32(self) -> int:
         return int.from_bytes(self.take(4), "big")
+
+    def u64(self) -> int:
+        """Read an eight-byte unsigned integer.
+
+        Extents need more than 32 bits, and widening `u32` instead would change
+        the encoding of every record already committed.
+        """
+
+        return int.from_bytes(self.take(8), "big")
 
     def blob(self) -> bytes:
         return self.take(self.u32())
@@ -875,3 +912,265 @@ _TRANSFORM_DECODERS = MappingProxyType(
         "TIMEZONE": _read_timezone,
     }
 )
+
+
+# --------------------------------------------------------------------------
+# Artifact manifests
+# --------------------------------------------------------------------------
+#
+# A manifest embeds its native coordinate space rather than referencing it by
+# hash. The alternative — commit to `coordinate_space_ref(space)` — would make a
+# manifest undecodable without a space registry to resolve the reference
+# against, and no such registry exists (§22 is unbuilt). Embedding keeps a
+# manifest self-contained, which is the property that lets a third party check
+# one, and it costs bytes rather than correctness.
+
+
+def artifact_manifest_bytes(manifest: ArtifactManifest) -> bytes:
+    """Encode a complete artifact manifest."""
+
+    if type(manifest) is not ArtifactManifest:
+        raise CanonicalEncodingError("manifest must be an ArtifactManifest")
+    payload = b"".join(
+        (
+            _domain(MANIFEST_DOMAIN),
+            _string(manifest.schema_version),
+            _string(manifest.artifact_id),
+            _string(manifest.payload_ref),
+            _string(manifest.payload_format),
+            _string(manifest.payload_commitment),
+            coordinate_space_bytes(manifest.native_space),
+            _sequence(
+                _string(item.axis_id) + _u64(item.extent)
+                for item in manifest.extents
+            ),
+            _string(manifest.value_encoding),
+            _string(manifest.value_semantics.value),
+            _string(manifest.uncertainty_model.value),
+            _sequence(_string(state.value) for state in manifest.missingness_states),
+            _optional_string(manifest.provenance),
+            _optional_string(manifest.producer_build),
+            _sequence(_string(item) for item in manifest.parent_artifact_refs),
+            _sequence(
+                _string(key) + _string(value) for key, value in manifest.metadata
+            ),
+        )
+    )
+    if len(payload) > MAX_MANIFEST_CANONICAL_BYTES:
+        raise CanonicalEncodingError(
+            f"artifact manifest encodes to {len(payload)} bytes, above the "
+            f"{MAX_MANIFEST_CANONICAL_BYTES}-byte canonical limit"
+        )
+    return payload
+
+
+def artifact_manifest_ref(manifest: ArtifactManifest) -> str:
+    """Return the content reference for an artifact manifest."""
+
+    return _content_ref(artifact_manifest_bytes(manifest))
+
+
+def read_artifact_manifest(
+    payload: bytes, *, strict: bool = True
+) -> ArtifactManifest:
+    """Recover an artifact manifest from canonical bytes, or refuse.
+
+    ``strict`` carries the same meaning and the same cost as it does for a
+    coordinate space: several fields normalise at construction — the missingness
+    states sort, the parent refs sort and de-duplicate, the metadata map sorts —
+    so a merely *decodable* byte string can present a record whose canonical
+    encoding differs from the bytes it came in as. A caller that then committed
+    to the result would hold a reference nobody else derives.
+    """
+
+    if len(payload) > MAX_MANIFEST_CANONICAL_BYTES:
+        raise CanonicalEncodingError(
+            f"artifact manifest input is {len(payload)} bytes, above the "
+            f"{MAX_MANIFEST_CANONICAL_BYTES}-byte canonical limit"
+        )
+    reader = _Reader(payload)
+    manifest = _read_artifact_manifest(reader)
+    reader.expect_end()
+    if strict and artifact_manifest_bytes(manifest) != bytes(payload):
+        raise CanonicalEncodingError(
+            "the input is not the canonical encoding of the manifest it decodes to"
+        )
+    return manifest
+
+
+def _read_artifact_manifest(reader: _Reader) -> ArtifactManifest:
+    reader.expect_domain(MANIFEST_DOMAIN)
+    schema_version = reader.string()
+    artifact_id = reader.string()
+    payload_ref = reader.string()
+    payload_format = reader.string()
+    payload_commitment = reader.string()
+    native_space = _read_coordinate_space(reader)
+    extents = tuple(
+        _build(
+            AxisExtent,
+            "axis extent",
+            reader.string(),
+            reader.u64(),
+        )
+        for _ in range(reader.count("extents", MAX_AXES))
+    )
+    value_encoding = reader.string()
+    value_semantics = _read_enum(reader, ValueSemantics, "value_semantics")
+    uncertainty_model = _read_enum(reader, UncertaintyModel, "uncertainty_model")
+    missingness_states = tuple(
+        _read_enum(reader, MissingnessState, "missingness_states")
+        for _ in range(reader.count("missingness_states", len(MissingnessState)))
+    )
+    provenance = reader.optional_string()
+    producer_build = reader.optional_string()
+    parent_artifact_refs = tuple(
+        reader.string()
+        for _ in range(reader.count("parent_artifact_refs", MAX_PARENT_REFS))
+    )
+    metadata = tuple(
+        (reader.string(), reader.string())
+        for _ in range(reader.count("metadata", MAX_METADATA_ITEMS))
+    )
+    return _build(
+        ArtifactManifest,
+        "artifact manifest",
+        artifact_id=artifact_id,
+        payload_ref=payload_ref,
+        payload_format=payload_format,
+        payload_commitment=payload_commitment,
+        native_space=native_space,
+        extents=extents,
+        value_encoding=value_encoding,
+        value_semantics=value_semantics,
+        uncertainty_model=uncertainty_model,
+        missingness_states=missingness_states,
+        provenance=provenance,
+        producer_build=producer_build,
+        parent_artifact_refs=parent_artifact_refs,
+        metadata=metadata,
+        schema_version=schema_version,
+    )
+
+
+# --------------------------------------------------------------------------
+# Canonical templates
+# --------------------------------------------------------------------------
+#
+# A template embeds its coordinate space for the reason a manifest does: without
+# a space registry to resolve a hash against, a referenced space would make the
+# template undecodable by anyone who did not already hold it. Parents are the
+# opposite case and are carried as references — a template's ancestry can be
+# arbitrarily deep, and embedding it would re-encode a shared base contract into
+# every descendant, so the one thing a reader must hold is the registry the
+# refs resolve in.
+
+
+def canonical_template_bytes(template: CanonicalTemplate) -> bytes:
+    """Encode a complete canonical template."""
+
+    if type(template) is not CanonicalTemplate:
+        raise CanonicalEncodingError("template must be a CanonicalTemplate")
+    payload = b"".join(
+        (
+            _domain(TEMPLATE_DOMAIN),
+            _string(template.schema_version),
+            _string(template.template_id),
+            _string(template.version),
+            _string(template.tier.value),
+            coordinate_space_bytes(template.coordinate_space),
+            _sequence(_string(item) for item in template.admissible_transforms),
+            _sequence(_string(item) for item in template.parent_template_refs),
+            _sequence(_string(item) for item in template.region_atlas_refs),
+            _string(template.creation_method.value),
+            _optional_string(template.provenance),
+            _sequence(
+                _string(key) + _string(value) for key, value in template.metadata
+            ),
+        )
+    )
+    if len(payload) > MAX_TEMPLATE_CANONICAL_BYTES:
+        raise CanonicalEncodingError(
+            f"canonical template encodes to {len(payload)} bytes, above the "
+            f"{MAX_TEMPLATE_CANONICAL_BYTES}-byte canonical limit"
+        )
+    return payload
+
+
+def canonical_template_ref(template: CanonicalTemplate) -> str:
+    """Return the content reference for a canonical template."""
+
+    return _content_ref(canonical_template_bytes(template))
+
+
+def read_canonical_template(
+    payload: bytes, *, strict: bool = True
+) -> CanonicalTemplate:
+    """Recover a canonical template from canonical bytes, or refuse.
+
+    ``strict`` means what it means everywhere else here: the transform,
+    parent and region sets all sort and de-duplicate at construction, so bytes
+    that merely decode can present a record whose own encoding differs. A
+    registry keyed on content references cannot afford that — two callers
+    holding the same template would compute different references and each
+    conclude the other had published something else.
+    """
+
+    if len(payload) > MAX_TEMPLATE_CANONICAL_BYTES:
+        raise CanonicalEncodingError(
+            f"canonical template input is {len(payload)} bytes, above the "
+            f"{MAX_TEMPLATE_CANONICAL_BYTES}-byte canonical limit"
+        )
+    reader = _Reader(payload)
+    template = _read_canonical_template(reader)
+    reader.expect_end()
+    if strict and canonical_template_bytes(template) != bytes(payload):
+        raise CanonicalEncodingError(
+            "the input is not the canonical encoding of the template it decodes to"
+        )
+    return template
+
+
+def _read_canonical_template(reader: _Reader) -> CanonicalTemplate:
+    reader.expect_domain(TEMPLATE_DOMAIN)
+    schema_version = reader.string()
+    template_id = reader.string()
+    version = reader.string()
+    tier = _read_enum(reader, TemplateTier, "tier")
+    coordinate_space = _read_coordinate_space(reader)
+    admissible_transforms = tuple(
+        reader.string()
+        for _ in range(
+            reader.count("admissible_transforms", len(KNOWN_TRANSFORM_TYPES))
+        )
+    )
+    parent_template_refs = tuple(
+        reader.string()
+        for _ in range(
+            reader.count("parent_template_refs", MAX_PARENT_TEMPLATE_REFS)
+        )
+    )
+    region_atlas_refs = tuple(
+        reader.string() for _ in range(reader.count("region_atlas_refs", 128))
+    )
+    creation_method = _read_enum(reader, CreationMethod, "creation_method")
+    provenance = reader.optional_string()
+    metadata = tuple(
+        (reader.string(), reader.string())
+        for _ in range(reader.count("metadata", MAX_METADATA_ITEMS))
+    )
+    return _build(
+        CanonicalTemplate,
+        "canonical template",
+        template_id=template_id,
+        version=version,
+        tier=tier,
+        coordinate_space=coordinate_space,
+        admissible_transforms=admissible_transforms,
+        parent_template_refs=parent_template_refs,
+        region_atlas_refs=region_atlas_refs,
+        creation_method=creation_method,
+        provenance=provenance,
+        metadata=metadata,
+        schema_version=schema_version,
+    )

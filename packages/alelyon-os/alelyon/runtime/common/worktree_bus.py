@@ -749,13 +749,29 @@ class FleetBus:
             return SessionResolution("", "", NO_MATCH)
         known = tuple(population) if population is not None else (
             self.known_sessions(mesh=mesh, channel=channel))
+        # An exact match is still an exact match -- but it is CANONICALISED
+        # before it is returned, and that is not the same thing as second-guessing
+        # the author. `59870ee7` is an exact match on this repository's live bus,
+        # because the split being fixed already filed rows under it; without this,
+        # addressing a prefix that legacy rows made "known" stored the SHORT form
+        # again, and only the reader's aliasing rescued it. Measured end to end on
+        # a copy of the live bus: reads worked either way, and
+        # `finding.to_session` kept the prefix -- so the half of the fix that
+        # records the resolved id never happened for exactly the 25 sessions that
+        # had the split. A clean-bus falsifier cannot see this, because there the
+        # short form is not known at all.
+        #
+        # Lengthening to an id that AGREES can never reach a different session:
+        # disagreement is what `canonical_session` refuses on.
         if handle in known:
-            return SessionResolution(handle, handle, RESOLVED, (handle,))
+            target = self.canonical_session(handle, population=known)
+            return SessionResolution(handle, target, RESOLVED, (target,))
         lowered = handle.lower()
         matched = sorted({s for s in known if s.lower().startswith(lowered)})
         if len(matched) == 1:
-            return SessionResolution(handle, matched[0], RESOLVED,
-                                     tuple(matched))
+            return SessionResolution(
+                handle, self.canonical_session(matched[0], population=known),
+                RESOLVED, tuple(matched))
         if not matched:
             return SessionResolution(handle, handle, NO_MATCH)
         # A longer id that this handle prefixes may itself be a prefix of the
