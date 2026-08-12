@@ -173,6 +173,20 @@ _BUS_LIMITS: tuple[str, ...] = (
     "A mention is resolved by prefix against sessions something else already "
     "knows about. One that matches nothing, or matches two sessions at once, "
     "delivers to NOBODY rather than guessing.",
+    "An explicit address is resolved by prefix too, but is never REFUSED: one "
+    "that resolves to nothing is filed verbatim and may reach nobody, and the "
+    "publisher is told so in the delivery's own reason. A prefix shared by two "
+    "live sessions is not guessed at either: it is filed unresolved and "
+    "reported as needing more characters.",
+    "A claim is filed under the resolved session id and released over every "
+    "form its holder claimed under, so one session cannot hold an area twice. "
+    "Rows written before that are still in the table and are reconciled at read "
+    "time, not rewritten: the record is what was actually filed.",
+    "Session identity is reconciled by prefix agreement, not established. Two "
+    "ids where one prefixes the other are treated as one session, which is "
+    "true for every case observed here and is still an inference: it would be "
+    "wrong for two sessions whose ids genuinely share a prefix, and that case "
+    "is detected and left unmerged rather than resolved.",
 )
 
 
@@ -244,6 +258,70 @@ class Delivery:
     @property
     def acknowledged(self) -> bool:
         return self.acknowledged_at is not None
+
+
+#: What `resolve_session` concluded. Three outcomes, and the two failures are
+#: kept apart because they call for opposite corrections: `no-match` means fix
+#: the address, `ambiguous` means lengthen it.
+RESOLVED = "resolved"
+NO_MATCH = "no-match"
+AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class SessionResolution:
+    """What one written-down session handle turned out to name.
+
+    Carried rather than collapsed into a string because a publisher needs all
+    three parts. `session_id` is what the row will be filed under; `outcome`
+    says whether that is a resolution or a fallback to the raw handle; and
+    `candidates` is the evidence, which for `ambiguous` is the only thing that
+    tells the author how much longer to make the prefix.
+
+    `session_id` is never empty for a non-empty handle. On both failures it
+    holds the handle verbatim, because refusing to file the message at all
+    would lose it — the existing justification for accepting an unresolvable
+    address is sound and is not undone here.
+    """
+
+    handle: str
+    session_id: str
+    outcome: str
+    candidates: tuple[str, ...] = ()
+
+    @property
+    def resolved(self) -> bool:
+        return self.outcome == RESOLVED
+
+    @property
+    def changed(self) -> bool:
+        """True when resolution rewrote the handle into a longer real id.
+
+        The case worth telling a publisher about: they typed a prefix and the
+        bus filed the message under the full id, which is why it will now
+        arrive. Distinct from `resolved`, which is also true for an address
+        that was already exact.
+        """
+        return self.resolved and self.session_id != self.handle
+
+    def note(self) -> str:
+        """One clause a publisher can act on, or empty when there is nothing
+        to say. Appended to a delivery's reason, which both CLIs print."""
+        if self.outcome == AMBIGUOUS:
+            return (f". WARNING: {self.handle!r} is a prefix of "
+                    f"{len(self.candidates)} live sessions "
+                    f"({', '.join(self.candidates[:3])}), so it was NOT "
+                    f"resolved and is filed verbatim. Nothing will read it. "
+                    f"Re-send with more characters")
+        if self.outcome == NO_MATCH:
+            return (". NOTE: this session id matches no worktree the mesh can "
+                    "see, no claim holder and no earlier delivery, so it may "
+                    "be a typo, or a session working outside every known "
+                    "convention. It is filed verbatim and may reach nobody")
+        if self.changed:
+            return (f". Addressed as {self.handle!r} and resolved to this full "
+                    f"id, so a reader asking by either form will see it")
+        return ""
 
 
 @dataclass(frozen=True)
@@ -382,6 +460,27 @@ _DDL = (
 _INDEXES_V2 = (
     "CREATE INDEX IF NOT EXISTS finding_channel ON finding(channel, at)",
     "CREATE INDEX IF NOT EXISTS finding_reply ON finding(reply_to)",
+    # `known_sessions` asks for the DISTINCT senders and recipients of every
+    # row, on every publish and every read, so these two columns are now scanned
+    # where they were previously only ever filtered. Both are covering indexes
+    # for that one query shape.
+    #
+    # Measured on this repository's live bus, copied (92 MB, 26,167 deliveries,
+    # 214 distinct recipients), best of 8:
+    #
+    #   DISTINCT finding.from_session   2.2 ms -> 0.1 ms
+    #   known_sessions()                6.4 ms -> 3.4 ms
+    #   inbox() by full id              9.4 ms -> 6.6 ms   (2.3 ms unpatched)
+    #
+    # So resolution costs about 4 ms per read here and these halve it. The
+    # residue is per-connection overhead across the opens a resolved read
+    # performs, not the scans; it was not worth folding three queries into one
+    # connection at 4 ms, and that is the thing to reach for if it ever is.
+    #
+    # Created by `_migrate`, which runs on every open, so an existing database
+    # picks them up without a schema-version bump.
+    "CREATE INDEX IF NOT EXISTS delivery_session ON delivery(to_session)",
+    "CREATE INDEX IF NOT EXISTS finding_sender ON finding(from_session)",
 )
 
 #: Columns added to `finding` after schema 1 shipped, with the default a v1 row
@@ -563,6 +662,186 @@ class FleetBus:
         from alelyon.runtime.common.worktree_areas import default_space
         return self.space if self.space is not None else default_space()
 
+    # ── who a handle names ───────────────────────────────────────────────────
+    #
+    # One session used to exist here under several ids, and nothing joined them.
+    # A handle written by a human — `--to-session 59870ee7`, `@aaac9c9c`, `ack
+    # --session aaac9c9c` — is a prefix, because that is the form this
+    # repository's conventions use everywhere. A handle derived from a worktree
+    # path is a full UUID. The two never met: the write side stored whatever was
+    # typed and the read side matched by string equality, so a message addressed
+    # by prefix was filed against a string no session equals.
+    #
+    # Measured on this bus 2026-08-11, by two sessions independently:
+    #   * findings 1bf3b1f613d5dd26 and 5d0b7a83e884810c were addressed to
+    #     `59870ee7` and `643cd3d3`; neither recipient's inbox contained them.
+    #     One was titled "TEAM 2 TO TEAM 1, I FOUND THE LEAD, STOP SEARCHING"
+    #     and team 1 spent nine minutes searching six surfaces for the desk.
+    #   * a session acked four deliveries by its 8-character prefix; three were
+    #     filed under its full id, did nothing, and reported success.
+    #
+    # The resolution below is not new logic. It is the rule the @mention leg of
+    # `_route` already applied, lifted out of it so the explicit-address leg and
+    # both read paths share ONE definition of who a handle names. The comment
+    # introducing that leg said it was avoiding "the filed against a string
+    # failure the explicit-address branch above was already caught by" — the fix
+    # stopped one line short of the branch that motivated it.
+    def known_sessions(self, *, mesh: WorktreeMesh | None = None,
+                       channel: str = "") -> tuple[str, ...]:
+        """Every session id something other than this handle already knows.
+
+        Four independent sources, deliberately unioned rather than ranked: a
+        session is real if ANY of them saw it, and each covers a blind spot of
+        the others. Claims and channel joins are self-reports but are the only
+        evidence for two sessions sharing one checkout; the mesh is observed but
+        cannot see a session working outside every path convention; and the
+        bus's OWN rows are what make a prefix already recorded by an @mention
+        joinable to the full id derived from a worktree.
+
+        That last source is the one that fixes reading. Without it a delivery
+        stored under `aaac9c9c` is unreachable from `aaac9c9c-211e-…` no matter
+        how the caller asks, because nothing else in the fleet remembers that
+        the short form was ever used.
+        """
+        known: set[str] = set()
+        # `_claim_rows`, NOT `active_claims`: that one collapses aliases, and
+        # collapsing asks `session_aliases`, which asks this method. Reading the
+        # rows raw is what keeps the two from calling each other for ever. The
+        # short forms in those rows are also exactly the evidence being looked
+        # for, so a collapsed read would hide half of what this is here to find.
+        for claim in self._claim_rows():
+            if claim.session_id:
+                known.add(claim.session_id)
+        if channel:
+            known.update(m.session_id for m in self.members(channel)
+                         if m.session_id)
+        if mesh is not None:
+            known.update(w.session for w in mesh.worktrees
+                         if w.session and w.session != UNATTRIBUTED)
+        with self._connect() as conn:
+            for table, column in (("delivery", "to_session"),
+                                  ("finding", "from_session")):
+                for row in conn.execute(
+                        f"SELECT DISTINCT {column} AS s FROM {table} "
+                        f"WHERE {column} IS NOT NULL AND {column} != ''"):
+                    if row["s"] != UNATTRIBUTED:
+                        known.add(row["s"])
+        return tuple(sorted(known))
+
+    def resolve_session(self, handle: str, *, mesh: WorktreeMesh | None = None,
+                        channel: str = "",
+                        population=None) -> SessionResolution:
+        """Resolve one handle to the single session it names.
+
+        Exact match first and unconditionally: a full id that happens to be a
+        prefix of nothing else must never be reported ambiguous, and a caller
+        who already knows exactly who they mean must not be second-guessed by a
+        population reading that could be stale.
+
+        Otherwise prefix, case-insensitively, and `AMBIGUOUS` on two matches
+        rather than a guess — the rule `_route`'s mention leg already reasons
+        about: "guessing between two sessions is worse than delivering to
+        neither, because the author would never learn it went to the wrong
+        one." Neither failure refuses; both file the handle verbatim and say so.
+        """
+        handle = str(handle or "").strip()
+        if not handle:
+            return SessionResolution("", "", NO_MATCH)
+        known = tuple(population) if population is not None else (
+            self.known_sessions(mesh=mesh, channel=channel))
+        if handle in known:
+            return SessionResolution(handle, handle, RESOLVED, (handle,))
+        lowered = handle.lower()
+        matched = sorted({s for s in known if s.lower().startswith(lowered)})
+        if len(matched) == 1:
+            return SessionResolution(handle, matched[0], RESOLVED,
+                                     tuple(matched))
+        if not matched:
+            return SessionResolution(handle, handle, NO_MATCH)
+        # A longer id that this handle prefixes may itself be a prefix of the
+        # others -- `aaac9c9c` and `aaac9c9c-211e-...` are the SAME session
+        # recorded twice, not two sessions, and calling that ambiguous would
+        # re-break exactly the ack case this method exists to fix. Two matches
+        # are two sessions only when neither prefixes the other.
+        longest = max(matched, key=len)
+        if all(longest.lower().startswith(m.lower()) for m in matched):
+            return SessionResolution(handle, longest, RESOLVED, tuple(matched))
+        return SessionResolution(handle, handle, AMBIGUOUS, tuple(matched))
+
+    @staticmethod
+    def _agreeing(given: str, known) -> tuple[tuple[str, ...], bool]:
+        """Ids that agree with `given` by prefix, and whether they disagree.
+
+        "Agree" is symmetric: `x` agrees with `y` when either prefixes the other,
+        because a short form and the full id it abbreviates are one session
+        recorded twice.
+
+        Ambiguity is judged over everything in the POPULATION sharing the
+        shortest agreeing form, not merely over the agreeing set, and the
+        difference is a delivery going to the wrong session. Given two real
+        sessions `abcd1234-0000` and `abcd1234-1111` and a message filed
+        verbatim under `abcd1234`, the set agreeing with `abcd1234-0000` is
+        {`abcd1234`, `abcd1234-0000`} and is perfectly self-consistent -- so
+        checking only that set merges the ambiguous message into the first
+        session's inbox. Looking at everyone sharing `abcd1234` finds the second
+        session and refuses. Caught by a falsifier, not by reading.
+        """
+        lowered = given.lower()
+        related = {s for s in known
+                   if s.lower().startswith(lowered)
+                   or lowered.startswith(s.lower())}
+        related.add(given)
+        shortest = min(related, key=len).lower()
+        sharing = {s for s in known if s.lower().startswith(shortest)}
+        sharing.add(given)
+        longest = max(sharing, key=len)
+        ambiguous = not all(longest.lower().startswith(s.lower())
+                            for s in sharing)
+        return tuple(sorted(related)), ambiguous
+
+    def canonical_session(self, session_id: str, *, population=None,
+                          mesh: WorktreeMesh | None = None) -> str:
+        """The longest id agreeing with this one: one session, one name.
+
+        A DIFFERENT question from `resolve_session`, and conflating them cost two
+        falsifiers before this existed. `resolve_session` answers "who did the
+        author mean", so an exact match wins unconditionally -- a caller naming a
+        full id must never be second-guessed. Reconciliation asks "which of these
+        rows are the same session", and there the exact match is the trap: a
+        short form sitting in the claim table IS a known id, precisely because
+        the split put it there, so exact-match-first would resolve `4c54083c` to
+        `4c54083c` and collapse nothing at all.
+
+        Returns the id unchanged when the agreement is ambiguous.
+        """
+        given = str(session_id or "").strip()
+        if not given:
+            return ""
+        known = tuple(population) if population is not None else (
+            self.known_sessions(mesh=mesh))
+        related, ambiguous = self._agreeing(given, known)
+        return given if ambiguous else max(related, key=len)
+
+    def session_aliases(self, session_id: str, *,
+                        mesh: WorktreeMesh | None = None) -> tuple[str, ...]:
+        """Every id under which deliveries for this session may be filed.
+
+        Reading's half of the same problem. A session asks by ONE id — whichever
+        it knows itself by — and its mail is split across every form any author
+        ever typed. This returns the set to match, always including the id as
+        given even when the bus has never seen it.
+
+        A candidate is admitted only when it and `session_id` are prefixes of
+        one another AND that agreement is unambiguous: if two distinct full ids
+        share the short form, neither is admitted, because handing one session
+        another's mail is far worse than the missed delivery this fixes.
+        """
+        given = str(session_id or "").strip()
+        if not given:
+            return ()
+        related, ambiguous = self._agreeing(given, self.known_sessions(mesh=mesh))
+        return (given,) if ambiguous else related
+
     # ── publishing ──────────────────────────────────────────────────────────
     def publish(self, *, kind: str, body: str, from_session: str,
                 from_evidence: str = "self-reported", mesh: WorktreeMesh | None = None,
@@ -601,6 +880,12 @@ class FleetBus:
                 "defaulting to broadcast, which would make every unaddressed "
                 "note interrupt everybody.")
         at = _now() if at is None else int(at)
+        # Resolved BEFORE the Finding is built, so the stored row carries the id
+        # a reader will ask by. Doing it in `_route` instead would fix delivery
+        # and leave `finding.to_session` holding the prefix — and the finding
+        # table is what every later audit of "who was this addressed to" reads.
+        addressed = self.resolve_session(to_session, mesh=mesh, channel=channel)
+        to_session = addressed.session_id
         if reply_to:
             # Flattened at WRITE time, not merely resolved at read time. A reply
             # to a reply is stored against the root, so "a thread is one level
@@ -625,7 +910,7 @@ class FleetBus:
             body=body, subject_paths=paths, to_session=to_session,
             to_area=to_area, broadcast=bool(broadcast), severity=severity,
             channel=channel, reply_to=reply_to)
-        deliveries = self._route(finding, mesh, cache)
+        deliveries = self._route(finding, mesh, cache, addressed=addressed)
         with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO finding
@@ -667,7 +952,8 @@ class FleetBus:
         return (row["channel"] or "") if row is not None else ""
 
     def _route(self, finding: Finding, mesh: WorktreeMesh | None,
-               cache=None) -> tuple[Delivery, ...]:
+               cache=None, *,
+               addressed: SessionResolution | None = None) -> tuple[Delivery, ...]:
         """Resolve a finding's subject to the sessions it reaches.
 
         The whole honesty property of this module lives in this method: with the
@@ -677,27 +963,33 @@ class FleetBus:
         out: list[Delivery] = []
         wanted = set(finding.areas_in(self.space))
         if finding.to_session:
-            # An explicit address is not checked against anything, which means a
-            # typo or a half-remembered id reports "reached 1 session" for a
-            # session that has never existed. Caught by making exactly that
-            # mistake: an 8-character prefix padded with zeros was accepted,
-            # counted as delivered, and sat in the table addressed to nobody.
+            # An explicit address used to be checked against nothing, so a typo
+            # or a half-remembered id reported "reached 1 session" for a session
+            # that has never existed. It is now put through `resolve_session`
+            # before the finding is built, which is why `finding.to_session` is
+            # already the resolved id here rather than what the publisher typed.
             #
-            # Not refused, because a real session can be invisible here -- it may
-            # work outside every path convention the mesh knows. Named instead,
-            # so the publisher can tell "delivered" from "filed against a string".
-            unknown = ""
-            if mesh is not None:
+            # Still not REFUSED when it resolves to nothing, because a real
+            # session can be invisible to every source -- it may work outside
+            # each path convention the mesh knows, hold no claim and have never
+            # published. Named instead, so the publisher can tell "delivered"
+            # from "filed against a string", and told at PUBLISH time: both CLIs
+            # print this reason back to the author.
+            note = addressed.note() if addressed is not None else ""
+            if addressed is None and mesh is not None:
+                # A direct `_route` caller (a test, or a reader replaying a row)
+                # passed no resolution. Fall back to the narrower mesh-only
+                # reading rather than silently claiming the address is fine.
                 known = {w.session for w in mesh.worktrees
                          if w.session != UNATTRIBUTED}
                 if finding.to_session not in known:
-                    unknown = (". NOTE: this session id matches no worktree the "
-                               "mesh can see, so it may be a typo, or a session "
-                               "working outside every known convention")
+                    note = (". NOTE: this session id matches no worktree the "
+                            "mesh can see, so it may be a typo, or a session "
+                            "working outside every known convention")
             out.append(Delivery(
                 finding, finding.to_session, DECLARED,
                 "addressed explicitly by the publisher; not derived from any "
-                "observed work" + unknown))
+                "observed work" + note))
 
         # Channel members. The same shape as the claim below and justified the
         # same way: a subscription is a self-report, so it is DECLARED, it never
@@ -742,9 +1034,16 @@ class FleetBus:
         # addressed to a typo is the "filed against a string" failure the
         # explicit-address branch above was already caught by; the chat layer
         # re-parses the body and reports which mentions matched nobody.
+        # Claims are read ONCE for this routing pass and shared by the mention
+        # leg below and the claim leg after it. `active_claims` reconciles
+        # identities and costs 13.9 ms on this repository's bus against 0.7 ms
+        # for the raw rows, which is nothing beside the mesh observation a
+        # publish already pays for -- but paying it twice in one function for the
+        # same answer is just waste.
+        claims = self.active_claims()
         handles, _everyone = parse_mentions(finding.body)
         if handles:
-            known = {claim.session_id for claim in self.active_claims()}
+            known = {claim.session_id for claim in claims}
             if finding.channel:
                 known |= {m.session_id for m in self.members(finding.channel)}
             if mesh is not None:
@@ -752,15 +1051,22 @@ class FleetBus:
                           if w.session != UNATTRIBUTED}
             known.discard(finding.from_session)
             for handle in handles:
-                matched = sorted(s for s in known if s.lower().startswith(handle))
-                if len(matched) != 1:
+                # Matched through `resolve_session` so there is ONE definition of
+                # who a handle names, but against the population assembled just
+                # above rather than `known_sessions`. Deliberate: adding the
+                # bus's own rows here would let `@someone` reach a session that
+                # has only ever published, which is a WIDER audience than
+                # mentions have today. Fixing two broken paths must not quietly
+                # change a third that works.
+                found = self.resolve_session(handle, population=tuple(known))
+                if not found.resolved:
                     # Zero is a typo or an invisible session; more than one is a
                     # prefix short enough to be ambiguous. Guessing between two
                     # sessions is worse than delivering to neither, because the
                     # author would never learn it went to the wrong one.
                     continue
                 out.append(Delivery(
-                    finding, matched[0], DECLARED,
+                    finding, found.session_id, DECLARED,
                     f"the author wrote @{handle}, which matches your session id; "
                     f"an address the publisher chose, not derived from your work"))
         # A claim doubles as a subscription, and it has to, because derived
@@ -777,7 +1083,7 @@ class FleetBus:
         # claim already is. Routing therefore honours claims — labelled DECLARED,
         # never merged with observed work, and worth exactly what a self-report
         # is worth.
-        for claim in self.active_claims():
+        for claim in claims:
             if claim.session_id == finding.from_session:
                 continue
             if parse_area(claim.area) in wanted:
@@ -890,8 +1196,18 @@ class FleetBus:
     # ── reading ─────────────────────────────────────────────────────────────
     def inbox(self, session_id: str, *, include_acknowledged: bool = False,
               max_age_days: float = DEFAULT_INBOX_AGE_DAYS,
-              now: int | None = None) -> tuple[Delivery, ...]:
+              now: int | None = None,
+              mesh: WorktreeMesh | None = None) -> tuple[Delivery, ...]:
         """Findings routed to one session, most urgent first, then newest.
+
+        Matched over every id this session is filed under, not the one string it
+        asked with. Before that, a reader identifying itself the way this
+        repository's conventions do — by an 8-character prefix — read an empty
+        inbox while its mail sat in the delivery table under the full id, and a
+        reader asking by full id missed everything an author had @mentioned.
+        `session_aliases` refuses to merge when a short form is shared by two
+        genuinely different sessions, so the widening cannot hand over somebody
+        else's mail.
 
         Age-filtered at READ time only. Nothing is deleted: §9's answer 1 keeps
         history because that is what a reader wants after the fact, and a
@@ -901,13 +1217,21 @@ class FleetBus:
         now = _now() if now is None else int(now)
         floor = now - int(max_age_days * 86_400)
         clause = "" if include_acknowledged else " AND d.acknowledged_at IS NULL"
+        aliases = self.session_aliases(session_id, mesh=mesh)
+        if not aliases:
+            return ()
+        holes = ",".join("?" * len(aliases))
         with self._connect() as conn:
             rows = conn.execute(
-                f"""SELECT f.*, d.provenance, d.reason, d.acknowledged_at
+                f"""SELECT f.*, d.provenance, d.reason, d.acknowledged_at,
+                           d.to_session AS filed_under
                     FROM delivery d JOIN finding f ON f.id = d.finding_id
-                    WHERE d.to_session = ? AND f.at >= ?{clause}""",
-                (session_id, floor)).fetchall()
-        out = [Delivery(self._finding(r), session_id, r["provenance"],
+                    WHERE d.to_session IN ({holes}) AND f.at >= ?{clause}""",
+                (*aliases, floor)).fetchall()
+        # `to_session` is reported as the id the row was FILED under, not the one
+        # the caller asked with. A reader acking what it just read has to be able
+        # to name the row that exists, and `acknowledge` is keyed on that string.
+        out = [Delivery(self._finding(r), r["filed_under"], r["provenance"],
                         r["reason"], r["acknowledged_at"]) for r in rows]
         out.sort(key=lambda d: (d.finding.urgency, -d.finding.at))
         return tuple(out)
@@ -928,14 +1252,27 @@ class FleetBus:
             reply_to=(row["reply_to"] if "reply_to" in row.keys() else "") or "")
 
     def acknowledge(self, finding_id: str, session_id: str,
-                    at: int | None = None) -> bool:
-        """Mark one delivery read. False when it was not addressed to them."""
+                    at: int | None = None, *,
+                    mesh: WorktreeMesh | None = None) -> bool:
+        """Mark one delivery read. False when it was not addressed to them.
+
+        Keyed over the same alias set `inbox` reads, and it has to be: a session
+        that can SEE a delivery must be able to ack it. When the two disagreed,
+        a reader acked four findings, three did nothing, the command reported
+        success, and the publisher's view was indistinguishable from being
+        ignored — "silence is not consent" quietly became "a press is not a
+        press".
+        """
+        aliases = self.session_aliases(session_id, mesh=mesh)
+        if not aliases:
+            return False
+        holes = ",".join("?" * len(aliases))
         with self._connect() as conn:
             changed = conn.execute(
-                """UPDATE delivery SET acknowledged_at = ?
-                   WHERE finding_id = ? AND to_session = ?
-                     AND acknowledged_at IS NULL""",
-                (_now() if at is None else int(at), finding_id, session_id))
+                f"""UPDATE delivery SET acknowledged_at = ?
+                    WHERE finding_id = ? AND to_session IN ({holes})
+                      AND acknowledged_at IS NULL""",
+                (_now() if at is None else int(at), finding_id, *aliases))
             return changed.rowcount > 0
 
     def deliveries_of(self, finding_id: str) -> tuple[Delivery, ...]:
@@ -1167,10 +1504,20 @@ class FleetBus:
 
     # ── territory ───────────────────────────────────────────────────────────
     def claim(self, area, session_id: str, *, note: str = "",
-              at: int | None = None) -> Claim:
-        """Take an advisory hold. Never refuses — see `contested`."""
+              at: int | None = None, mesh: WorktreeMesh | None = None) -> Claim:
+        """Take an advisory hold. Never refuses — see `contested`.
+
+        The session is resolved the same way an address is. A claim is the FIRST
+        thing §18 tells a session in a shared checkout to do and the only way two
+        agents in one directory can reach each other, so a claim filed under a
+        prefix while everything else knows the full id splits the one identity the
+        protocol depends on. `ALSO HELD BY` printed 21 full ids beside `4c54083c`
+        and `f221d7f6` on this repository's live bus, which is one session counted
+        twice, twice over.
+        """
         text = str(area)
-        record = Claim(area=text, session_id=session_id,
+        resolved = self.resolve_session(session_id, mesh=mesh)
+        record = Claim(area=text, session_id=resolved.session_id,
                        at=_now() if at is None else int(at), note=note)
         with self._connect() as conn:
             conn.execute(
@@ -1179,15 +1526,34 @@ class FleetBus:
                 (record.area, record.session_id, record.at, record.note))
         return record
 
-    def release(self, area, session_id: str, at: int | None = None) -> bool:
+    def release(self, area, session_id: str, at: int | None = None, *,
+                mesh: WorktreeMesh | None = None) -> bool:
+        """Drop a hold, whichever form of its id the holder claimed under.
+
+        Over aliases for the same reason `acknowledge` is: a session that can see
+        its own claim must be able to release it. It also releases BOTH rows of a
+        legacy split, because a half-released claim reads as a live hold and
+        would keep an area occupied by nobody.
+        """
+        aliases = self.session_aliases(session_id, mesh=mesh)
+        if not aliases:
+            return False
+        holes = ",".join("?" * len(aliases))
         with self._connect() as conn:
             changed = conn.execute(
-                """UPDATE claim SET released_at = ?
-                   WHERE area = ? AND session_id = ? AND released_at IS NULL""",
-                (_now() if at is None else int(at), str(area), session_id))
+                f"""UPDATE claim SET released_at = ?
+                    WHERE area = ? AND session_id IN ({holes})
+                      AND released_at IS NULL""",
+                (_now() if at is None else int(at), str(area), *aliases))
             return changed.rowcount > 0
 
-    def active_claims(self) -> tuple[Claim, ...]:
+    def _claim_rows(self) -> tuple[Claim, ...]:
+        """Live claim rows exactly as stored, one per row.
+
+        The record, before any identity reconciliation. `known_sessions` needs
+        this rather than `active_claims` to avoid a cycle, and a caller auditing
+        the table itself needs to see both halves of a split.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM claim WHERE released_at IS NULL ORDER BY at"
@@ -1196,11 +1562,56 @@ class FleetBus:
                            at=r["at"], note=r["note"],
                            released_at=r["released_at"]) for r in rows)
 
+    def active_claims(self) -> tuple[Claim, ...]:
+        """Live claims, one per session per area.
+
+        Collapsed here rather than in each consumer, because there are four --
+        `_route`, `contested`, `survey` and `open_areas` -- and a rule applied in
+        four places is four rules. `_route` is the one that made this urgent: two
+        rows for one session produce two deliveries with two different
+        `to_session` strings, `_strongest` dedups on that string and keeps both,
+        and `publish` then reports reaching two sessions when it reached one.
+        Over-reporting reach is the single lie this module exists to prevent.
+
+        THE NOTE IS NEVER DROPPED. A lead's whole dispatch is often one claim
+        note, so when two collapsed rows carry different ones, both are kept and
+        joined. Losing the older half would delete the only record of why an area
+        was taken.
+        """
+        rows = self._claim_rows()
+        population = self.known_sessions()
+        # Group by area, then by resolved identity within the area.
+        best: dict[tuple[str, str], Claim] = {}
+        for claim in rows:
+            key = (claim.area,
+                   self.canonical_session(claim.session_id,
+                                          population=population))
+            held = best.get(key)
+            if held is None:
+                best[key] = Claim(area=claim.area, session_id=key[1],
+                                  at=claim.at, note=claim.note,
+                                  released_at=claim.released_at)
+                continue
+            notes = [n for n in (held.note, claim.note) if n]
+            joined = " | ".join(dict.fromkeys(notes))
+            best[key] = Claim(
+                area=held.area, session_id=key[1],
+                # The EARLIEST timestamp: the hold began when the session first
+                # said so, and reporting the later row's time would make a
+                # long-standing claim look freshly taken.
+                at=min(held.at, claim.at), note=joined,
+                released_at=held.released_at)
+        return tuple(sorted(best.values(), key=lambda c: (c.at, c.area)))
+
     def contested(self) -> tuple[str, ...]:
         """Areas held by more than one session at once.
 
         Not an error condition and not prevented. Two project managers can both
         think they own a workstream; the useful thing a system can do is say so.
+
+        What it must not do is invent the disagreement. Counted over
+        `active_claims`, so one session holding an area under two forms of its own
+        id is one holder and the area is not reported contested.
         """
         held: dict[str, set[str]] = {}
         for claim in self.active_claims():

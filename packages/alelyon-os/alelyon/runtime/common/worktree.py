@@ -122,6 +122,32 @@ MESH_LIMITS: tuple[str, ...] = (
 _GIT_TIMEOUT = 30
 _MAX_PATHS_PER_WORKTREE = 5_000
 
+#: Aggregate wall-clock ceiling for one `observe()`, in seconds.
+#:
+#: `_GIT_TIMEOUT` bounds a single query and nothing bounded the sum of them. At
+#: this repository's 287 worktrees that is 287 x 4 queries x 30 s of unbounded
+#: exposure -- hours -- on a reading whose caller is a GUI worker thread. The
+#: per-call timeout is not a budget; it is the point at which one hung query is
+#: abandoned, and a reading can be entirely composed of slow-but-not-hung
+#: queries.
+#:
+#: A reading that runs out of budget returns the SAME prefix a `should_stop`
+#: caller gets: `stopped` set, a note saying how far it reached, and contention
+#: that a consumer must not draw. That is deliberate -- there is exactly one
+#: partial-observation contract and this reuses it rather than inventing a
+#: second one that views would have to learn.
+#:
+#: The bound is the budget PLUS the tail of the worktree in flight when it
+#: expires, because `subprocess.run` is not interruptible once entered. That is
+#: at most four queries, so the honest ceiling is OBSERVE_BUDGET_SECONDS + 4 x
+#: `_GIT_TIMEOUT`, not OBSERVE_BUDGET_SECONDS.
+OBSERVE_BUDGET_SECONDS = 120.0
+
+#: SHAs per batched `git show`. Windows caps a command line near 32k characters
+#: and a full hash costs 41 of them, so this stays an order of magnitude clear
+#: of the limit rather than computing how close it can get.
+_COMMIT_BATCH = 100
+
 #: Answers memoised across observations, keyed on the git object hashes they are
 #: a function of.
 #:
@@ -167,6 +193,38 @@ def _memoised(key: tuple, compute):
             _OBJECT_CACHE.clear()
         _OBJECT_CACHE[key] = value
     return value
+
+
+def _prefetch_commit_times(root: str | Path, heads) -> None:
+    """Fill the commit-time memo for many SHAs using ONE git process per batch.
+
+    `git show -s` takes any number of revisions, so asking one commit time per
+    worktree was a batching opportunity rather than a necessary spawn. Measured
+    on this repository at 287 worktrees, a cold observation spent 273 of its 886
+    subprocesses on exactly this question.
+
+    It changes no answer. The key, the value and the "only successful answers
+    are kept" rule are the ones `_memoised` already applies, so a batch that
+    fails or comes back short simply leaves those SHAs to the per-worktree path
+    that was always there. That is the property worth keeping: this is a
+    prefetch, never a source of truth, and deleting it must slow the reading
+    down without changing a single field on the mesh.
+    """
+    wanted = [sha for sha in dict.fromkeys(heads)
+              if sha and ("committed-at", sha) not in _OBJECT_CACHE]
+    for start in range(0, len(wanted), _COMMIT_BATCH):
+        batch = wanted[start:start + _COMMIT_BATCH]
+        code, out = _git("show", "-s", "--format=%H %ct", *batch, cwd=root)
+        if code != 0:
+            return
+        for line in out.splitlines():
+            sha, _, when = line.strip().partition(" ")
+            when = when.strip()
+            if not when.isdigit() or ("committed-at", sha) in _OBJECT_CACHE:
+                continue
+            if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
+                _OBJECT_CACHE.clear()
+            _OBJECT_CACHE[("committed-at", sha)] = int(when)
 
 
 def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
@@ -471,6 +529,10 @@ def observe(repo_root: str | Path | None = None, *,
     a **prefix** of an observation and not a small one, so contention computed
     from it can only under-report; do not draw it.
 
+    ``OBSERVE_BUDGET_SECONDS`` is the aggregate ceiling and it ends a reading the
+    same way, with the same prefix contract. ``_GIT_TIMEOUT`` bounds one query;
+    it never bounded their sum, and a caller with no cancel had no ceiling at all.
+
     Per-commit answers are memoised in ``_OBJECT_CACHE`` across calls, keyed on
     the git hashes they are a function of rather than on a clock. Repeated
     observations of an unchanged repository therefore cost roughly the
@@ -507,7 +569,20 @@ def observe(repo_root: str | Path | None = None, *,
     worktrees: list[Worktree] = []
     records = _parse_worktree_list(out)
     stopped = False
+    # One process for every commit time this reading still needs, before the
+    # loop asks for them one at a time. Purely a prefetch into the same memo.
+    _prefetch_commit_times(root, [record.get("HEAD", "") for record in records])
+    budget = OBSERVE_BUDGET_SECONDS
+    deadline = (time.monotonic() + budget) if budget and budget > 0 else None
     for record in records:
+        if deadline is not None and time.monotonic() >= deadline:
+            stopped = True
+            notes.append(
+                f"the observation ran out of its {budget:.0f}s budget after "
+                f"{len(worktrees)} of {len(records)} worktree(s); what is here "
+                f"is a prefix of an observation, not a complete small one, and "
+                f"its contention is an under-count")
+            break
         if should_stop is not None and should_stop():
             stopped = True
             notes.append(

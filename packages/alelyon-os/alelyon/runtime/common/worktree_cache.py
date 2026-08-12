@@ -65,12 +65,35 @@ import subprocess
 import time
 from typing import Iterable
 
+from alelyon.runtime.common import sqlite_wal as _DB
 from alelyon.runtime.common import toolpath
 from alelyon.runtime.common.worktree import (
     UNATTRIBUTED, WorktreeMesh, observe, session_for_path,
 )
 
 SCHEMA_VERSION = 1
+
+#: How long one SQLite call may wait for a lock, and how many times a BUSY is
+#: retried before it becomes a refusal.
+#:
+#: This was 1.0s with no retry at all, on a path that opens with BEGIN IMMEDIATE
+#: — a write lock — while the store it takes it on is shared by every session in
+#: the repository. Under the rollback journal those stores ran on, one writer
+#: excluded every reader, so a second later the caller raised
+#: `RepositoryScopeUnavailable` and the views that depend on it did not load.
+#: A fail-fast budget turns ordinary contention into an outage.
+#:
+#: The numbers are proportionate rather than generous: worst case is
+#: `_SQLITE_BUSY_ATTEMPTS` waits of at most 0.8s of backoff plus the 5s lock
+#: wait each, and it is BOUNDED — a fixed count, a capped delay, then the
+#: original error by name.
+_SQLITE_TIMEOUT_SECONDS = 5.0
+_SQLITE_BUSY_TIMEOUT_MS = int(_SQLITE_TIMEOUT_SECONDS * 1000)
+_SQLITE_BUSY_ATTEMPTS = 4
+
+#: The shared bus itself. Already 10s; now also the explicit busy_timeout, so
+#: "how long may this block" is one number rather than two that can drift.
+_BUS_TIMEOUT_SECONDS = 10.0
 
 #: Validated with `node scripts/validate_palette.js "<hex,…>" --mode <mode> --pairs all`
 #: (dataviz skill). Both modes ALL CHECKS PASS at three slots:
@@ -257,8 +280,15 @@ class WorktreeCache:
                 (str(SCHEMA_VERSION),))
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.database), timeout=10.0)
+        conn = sqlite3.connect(str(self.database), timeout=_BUS_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
+        # WAL. Measured 2026-08-11 this file was `journal_mode=delete` at 91 MB
+        # with ten sessions live in one checkout: every `publish`, `claim` and
+        # `status` took an EXCLUSIVE whole-database lock and every other session
+        # waited for it. `db.try_set_wal` carries the cold-open retry subtlety
+        # and declines rather than refuses where WAL is unavailable.
+        _DB.try_set_wal(conn)
+        conn.execute(f"PRAGMA busy_timeout = {int(_BUS_TIMEOUT_SECONDS * 1000)}")
         return conn
 
     # ── writing ─────────────────────────────────────────────────────────────
@@ -515,22 +545,23 @@ class RepositoryScopeUnavailable(RuntimeError):
 
 
 def _anchor_cache_marker(anchor: str) -> tuple[int, ...]:
-    """Cheap incarnation stamp preventing stale path-to-repository cache hits."""
-    values: list[int] = []
-    root = Path(anchor).expanduser().resolve()
-    for entry in (root, root / ".git"):
-        try:
-            metadata = entry.lstat()
-        except OSError:
-            values.extend((-1, -1, -1, -1, -1))
-            continue
-        values.extend((
-            int(metadata.st_dev), int(metadata.st_ino),
-            int(getattr(metadata, "st_size", 0)),
-            int(getattr(metadata, "st_mtime_ns", 0)),
-            int(getattr(metadata, "st_ctime_ns", 0)),
-        ))
-    return tuple(values)
+    """Cheap incarnation stamp preventing stale path-to-repository cache hits.
+
+    Device/inode/mode/birth identity, and deliberately NOT modification time.
+
+    This key used to carry ``st_mtime_ns`` and ``st_ctime_ns`` for the selected
+    root and its ``.git``, which made it a cache key that could not hit: a
+    directory's mtime moves whenever Git writes inside it, and one ordinary
+    ``git status`` in the primary checkout is enough to change it. Measured on
+    this repository at 287 worktrees, the identity LRU behind this marker took
+    ONE hit per 287 lookups and re-spawned ``git rev-parse`` for the other 286.
+
+    What these caches have to notice is an *unrelated checkout arriving at the
+    same path*. That is a question about filesystem identity, which is exactly
+    what ``_root_incarnation_marker`` already answers correctly, and which an
+    ordinary edit inside the repository must not disturb.
+    """
+    return _root_incarnation_marker(anchor)
 
 
 def _root_incarnation_marker(anchor: str) -> tuple[int, ...]:
@@ -781,6 +812,62 @@ def _linked_worktree_arrival(root: Path, common: Path) -> int | None:
     return int(metadata.st_mtime_ns) // 1_000_000_000 + 1
 
 
+def _binds_to_common(root: Path, common: Path) -> bool | None:
+    """Whether ``root`` is a checkout of ``common``, from Git's own pointers.
+
+    True or False when the administrative files answer outright; **None** when
+    they do not, which is the caller's signal to fall back to the
+    ``git rev-parse --git-common-dir`` probe. None is a real third answer here:
+    a separated Git directory and another repository's worktree look alike
+    through these files, and only one of them is a refusal.
+
+    This is the binding ``_linked_worktree_arrival`` already validates, read for
+    a different purpose. It exists because the probe is a subprocess and its
+    callers ask this question once per worktree. Measured on this repository at
+    287 worktrees, re-probing cost 286 spawns and 9.5-12.7 s inside
+    ``validated_roots`` on every two-second activity tick, and another 287
+    inside ``database_for``. Git had already written the answer down; deriving
+    it again per path was re-asking a question we had been handed.
+
+    The reverse pointer is what makes this a binding rather than a claim. A
+    ``gitdir:`` file left behind by a checkout that has since moved still names
+    an administrative directory, but that directory no longer points back.
+    """
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        # A primary checkout: its own ``.git`` IS the shared common directory.
+        try:
+            return dot_git.resolve() == common
+        except OSError:
+            return None
+    if not dot_git.is_file():
+        return False
+    admin = _git_pointer(dot_git, prefix="gitdir:")
+    if admin is None:
+        return None
+    try:
+        worktrees = (common / "worktrees").resolve()
+    except OSError:
+        return None
+    if admin.parent != worktrees:
+        return None
+    pointed_back = _git_pointer(admin / "gitdir")
+    if pointed_back is None:
+        return None
+    try:
+        return pointed_back == dot_git.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _belongs_to_common(root: Path, common: Path) -> bool:
+    """``_binds_to_common``, falling back to the Git probe where it abstains."""
+    bound = _binds_to_common(root, common)
+    if bound is None:
+        return _repository_identity(str(root)) == common
+    return bound
+
+
 def _linked_worktree_binding_marker(root: Path) -> tuple[int, ...]:
     """Cheap revision token for a linked worktree's path binding.
 
@@ -898,40 +985,57 @@ def _path_context_boundary(anchor: str | Path, context: str, *,
     """
     target = Path(database) if database is not None else _path_context_database()
     key = _path_context_key(anchor)
+
+    def attempt() -> int | None:
+        connection = sqlite3.connect(target, timeout=_SQLITE_TIMEOUT_SECONDS)
+        try:
+            with connection:
+                # WAL first: under the rollback journal this ran on, BEGIN
+                # IMMEDIATE below takes an EXCLUSIVE whole-database lock and
+                # every reader of this file blocks behind it.
+                _DB.try_set_wal(connection)
+                connection.execute(
+                    f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS selected_path_context ("
+                    "path_hash TEXT PRIMARY KEY, context_id TEXT NOT NULL, "
+                    "observed_at INTEGER NOT NULL, transitioned INTEGER NOT NULL "
+                    "CHECK (transitioned IN (0, 1)), schema TEXT NOT NULL)")
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT context_id, observed_at, transitioned, schema "
+                    "FROM selected_path_context WHERE path_hash = ?", (key,)
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        "INSERT INTO selected_path_context "
+                        "(path_hash, context_id, observed_at, transitioned, schema) "
+                        "VALUES (?, ?, ?, 0, ?)",
+                        (key, context, int(observed_at), _PATH_CONTEXT_SCHEMA))
+                    return None
+                previous_context, previous_at, transitioned, schema = row
+                if schema != _PATH_CONTEXT_SCHEMA:
+                    raise RepositoryScopeUnavailable(
+                        "the selected-path context ledger schema is unsupported")
+                if previous_context == context:
+                    return int(previous_at) + 1 if int(transitioned) else None
+                transition_at = max(int(previous_at), int(observed_at))
+                connection.execute(
+                    "UPDATE selected_path_context SET context_id = ?, "
+                    "observed_at = ?, transitioned = 1, schema = ? "
+                    "WHERE path_hash = ?",
+                    (context, transition_at, _PATH_CONTEXT_SCHEMA, key))
+                return transition_at + 1
+        finally:
+            connection.close()
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(target, timeout=1.0) as connection:
-            connection.execute("PRAGMA busy_timeout = 1000")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS selected_path_context ("
-                "path_hash TEXT PRIMARY KEY, context_id TEXT NOT NULL, "
-                "observed_at INTEGER NOT NULL, transitioned INTEGER NOT NULL "
-                "CHECK (transitioned IN (0, 1)), schema TEXT NOT NULL)")
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT context_id, observed_at, transitioned, schema "
-                "FROM selected_path_context WHERE path_hash = ?", (key,)
-            ).fetchone()
-            if row is None:
-                connection.execute(
-                    "INSERT INTO selected_path_context "
-                    "(path_hash, context_id, observed_at, transitioned, schema) "
-                    "VALUES (?, ?, ?, 0, ?)",
-                    (key, context, int(observed_at), _PATH_CONTEXT_SCHEMA))
-                return None
-            previous_context, previous_at, transitioned, schema = row
-            if schema != _PATH_CONTEXT_SCHEMA:
-                raise RepositoryScopeUnavailable(
-                    "the selected-path context ledger schema is unsupported")
-            if previous_context == context:
-                return int(previous_at) + 1 if int(transitioned) else None
-            transition_at = max(int(previous_at), int(observed_at))
-            connection.execute(
-                "UPDATE selected_path_context SET context_id = ?, "
-                "observed_at = ?, transitioned = 1, schema = ? "
-                "WHERE path_hash = ?",
-                (context, transition_at, _PATH_CONTEXT_SCHEMA, key))
-            return transition_at + 1
+        # Bounded retry on SQLITE_BUSY, and bounded is the load-bearing word: a
+        # fixed attempt count with capped backoff, never a spin. The whole block
+        # is the retry unit because the `with` rolls its transaction back before
+        # the next attempt starts, so re-running it from the top is safe.
+        return _DB.with_busy_retry(attempt, attempts=_SQLITE_BUSY_ATTEMPTS)
     except RepositoryScopeUnavailable:
         raise
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
@@ -948,15 +1052,25 @@ def _path_context_revision(
     """Read one content-free durable path revision without creating state."""
     target = Path(database) if database is not None else _path_context_database()
     key = _path_context_key(anchor)
-    try:
+
+    def attempt():
         uri = target.resolve(strict=True).as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
-            connection.execute("PRAGMA query_only = ON")
-            connection.execute("PRAGMA busy_timeout = 1000")
-            row = connection.execute(
-                "SELECT context_id, observed_at, transitioned, schema "
-                "FROM selected_path_context WHERE path_hash = ?", (key,)
-            ).fetchone()
+        connection = sqlite3.connect(uri, uri=True,
+                                     timeout=_SQLITE_TIMEOUT_SECONDS)
+        try:
+            with connection:
+                connection.execute("PRAGMA query_only = ON")
+                connection.execute(
+                    f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+                return connection.execute(
+                    "SELECT context_id, observed_at, transitioned, schema "
+                    "FROM selected_path_context WHERE path_hash = ?", (key,)
+                ).fetchone()
+        finally:
+            connection.close()
+
+    try:
+        row = _DB.with_busy_retry(attempt, attempts=_SQLITE_BUSY_ATTEMPTS)
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         if not required and not target.exists():
             return None
@@ -1070,8 +1184,13 @@ class RepositoryScopeCache:
         refused = 0
         for value in values:
             root = Path(value)
+            # `_belongs_to_common` answers from Git's own administrative
+            # pointers and only spawns a probe where those cannot decide. The
+            # probe used to run per candidate against a 32-entry process-global
+            # LRU, so at this cardinality it missed on essentially every
+            # lookup -- one Git process per mesh root, every activity tick.
             if not (root / ".git").exists() \
-                    or _repository_identity(str(root)) != common:
+                    or not _belongs_to_common(root, common):
                 refused += 1
                 continue
             accepted.append(value)
@@ -1132,7 +1251,7 @@ def _repository_member_roots(common: Path, current: Path) -> tuple[Path, ...]:
             continue
         member = dot_git.parent if dot_git.name == ".git" else None
         if (member is not None and member not in members
-                and _repository_identity(str(member)) == common):
+                and _belongs_to_common(member, common)):
             members.append(member)
     return tuple(members)
 

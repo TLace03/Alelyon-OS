@@ -25,7 +25,7 @@ work. What follows is the smallest thing that makes that expressible.
 
 Not a future problem: measured today
 ------------------------------------
-Three sessions worked in `C:/Users/tommy/famMain` at the same time on
+Three sessions worked in the same repository checkout at the same time on
 2026-08-06 — one checkout, one path, one derived identity. They were
 distinguishable only because each passed `--session`, which the CLI correctly
 labels self-reported, and one of them published a finding under the **wrong

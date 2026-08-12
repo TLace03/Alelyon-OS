@@ -33,6 +33,46 @@ So the resolution now distinguishes the two cases by name rather than by acciden
 found": a wheel installed into a directory that happens to sit under some unrelated
 project's checkout would otherwise adopt that project's `globals/` and write another
 program's state into it.
+
+Resolution is LAZY, and why that is not a style choice
+-----------------------------------------------------
+`REPO_ROOT, GLOBALS_DIR, INSTALLED` used to be assigned at module import and never
+recomputed. `alelyon.platform.deployment.runtime_env.bootstrap()` publishes
+`$ALELYON_HOME` and is documented as "the FIRST thing an entry point does" — but a
+module that imported this one before `bootstrap()` ran froze the pre-bootstrap answer
+for the life of the process, and the two answers disagree about the `globals/`
+component. Both were populated on this workstation: measured 2026-08-11, one
+`fleet_repository_paths.sqlite3` at the state-root top level and a second under
+`<state root>/globals/`, written the same day nine hours apart. Two live stores with
+divergent contents is the failure that produces.
+
+So the three names are served by a module `__getattr__` over a resolver cached on the
+environment it depends on (`ALELYON_HOME`, `ALELYON_FORCE_PACKAGED`). Reading them
+still looks exactly the same to every existing importer; the difference is that a
+`bootstrap()` which runs after this module was imported is now seen rather than
+ignored. Names bound by `from ... import GLOBALS_DIR` are still snapshots at *that*
+module's import — that is a Python binding rule, not something this file can change —
+which is why `default_database()`-style callers should read through `globals_dir()`.
+
+The two branches also had to be made to AGREE. `ALELYON_HOME` resolves to
+`<root>/globals`, and `bootstrap()` creates exactly that directory; the installed
+branch returned `<state root>` with no `globals/` component at all. It now returns
+`<state root>/globals`, which is the same directory `bootstrap()` prepares.
+
+`ALELYON_FORCE_PACKAGED` is honoured here as well. `runtime_env` documents it as the
+way to reproduce a packaged layout from an unfrozen interpreter, and this module not
+consulting it meant the packaged-layout smoke test resolved SOURCE paths and could not
+detect this bug class at all.
+
+Fleet-wide state is anchored on the git common dir
+--------------------------------------------------
+`GLOBALS_DIR` is "the directory holding `pyproject.toml`", which a linked worktree
+satisfies too — and there are 287 of them here, each with its own. That is right for
+state a checkout owns and wrong for state the *fleet* shares. `fleet_state_dir()` is
+the shared answer, keyed on `git rev-parse --git-common-dir`, which every worktree of
+one repository reports identically. This is not a new decision: `pr_relay` and
+`worktree_cache.default_database()` already anchor there, for the same reason and with
+the same words.
 """
 from __future__ import annotations
 
@@ -42,6 +82,23 @@ from pathlib import Path
 
 #: Directory names that mean "this module was installed, not checked out".
 _INSTALL_MARKERS = ("site-packages", "dist-packages")
+
+#: The explicit state-root override. `runtime_env.STATE_ROOT_ENV` is the same name;
+#: it is spelled literally here because this module is the runtime floor and cannot
+#: import the packaging layer that publishes it.
+_HOME_ENV = "ALELYON_HOME"
+
+#: Opt into packaged path rules from an unfrozen interpreter. Same variable as
+#: `runtime_env.FORCE_PACKAGED_ENV`, and honoured here so that a smoke test which
+#: sets it actually exercises packaged path resolution.
+_FORCE_PACKAGED_ENV = "ALELYON_FORCE_PACKAGED"
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+#: How long a `git rev-parse` may take before the fleet anchor degrades to the
+#: per-checkout answer. Matches the sibling modules that already shell out to git
+#: (`worktree.py`, `worktree_cache.py`, `fleet_outcomes.py` use 30-60s).
+_GIT_TIMEOUT = 30.0
 
 #: Where per-user state goes when there is no checkout. One directory per
 #: platform convention, so the answer is where that platform's users look.
@@ -73,12 +130,34 @@ def _user_state_dir() -> Path:
     return Path.home() / ".local" / "share" / _APP_DIR.lower()
 
 
+def _forced_packaged() -> bool:
+    """True when `$ALELYON_FORCE_PACKAGED` asks for packaged path rules.
+
+    Kept byte-compatible with `runtime_env.is_packaged()` so the two cannot drift
+    into disagreeing about what the same variable means.
+    """
+    return (os.environ.get(_FORCE_PACKAGED_ENV) or "").strip().lower() in _TRUTHY
+
+
 def _resolve() -> tuple[Path, Path, bool]:
-    """Return (repo root or state root, state home, whether this is installed)."""
-    env = os.environ.get("ALELYON_HOME")
-    if env:
+    """Return (repo root or state root, state home, whether this is installed).
+
+    Every branch ends in a `globals/` component. The installed branch used to
+    return the state root itself, which meant a process that ran `bootstrap()`
+    and a process that did not wrote to two different directories under the same
+    name — see the module docstring for the measurement.
+    """
+    env = os.environ.get(_HOME_ENV)
+    if env and env.strip():
         root = Path(env).expanduser().resolve()
         return root, root / "globals", False
+
+    if _forced_packaged():
+        # An unfrozen interpreter that asked to be treated as packaged. Honouring
+        # it here is what lets the packaged-layout smoke test resolve packaged
+        # paths instead of quietly measuring the source checkout.
+        state = _user_state_dir()
+        return state, state / "globals", True
 
     here = Path(__file__).resolve()
     if not _is_installed(here):
@@ -91,10 +170,134 @@ def _resolve() -> tuple[Path, Path, bool]:
     # module's own nesting depth writes into whatever directory happens to be
     # there. A per-user directory is the honest answer.
     state = _user_state_dir()
-    return state, state, True
+    return state, state / "globals", True
 
 
-REPO_ROOT, GLOBALS_DIR, INSTALLED = _resolve()
+# ── Lazy resolution ──────────────────────────────────────────────────────────
+# Cached on the environment the answer depends on, so `bootstrap()` publishing
+# `$ALELYON_HOME` after this module was imported is seen rather than ignored.
+
+_RESOLVED: tuple[Path, Path, bool] | None = None
+_RESOLVED_KEY: tuple[str | None, str | None] | None = None
+
+
+def _environment_key() -> tuple[str | None, str | None]:
+    return (os.environ.get(_HOME_ENV), os.environ.get(_FORCE_PACKAGED_ENV))
+
+
+def resolve(*, refresh: bool = False) -> tuple[Path, Path, bool]:
+    """`(REPO_ROOT, GLOBALS_DIR, INSTALLED)`, recomputed when the env changed."""
+    global _RESOLVED, _RESOLVED_KEY
+    key = _environment_key()
+    if refresh or _RESOLVED is None or _RESOLVED_KEY != key:
+        _RESOLVED = _resolve()
+        _RESOLVED_KEY = key
+    return _RESOLVED
+
+
+def repo_root() -> Path:
+    """The checkout root, or the state root when there is no checkout."""
+    return resolve()[0]
+
+
+def globals_dir() -> Path:
+    """The on-disk state home. Prefer this over the `GLOBALS_DIR` snapshot.
+
+    A module-level `from ... import GLOBALS_DIR` binds one value at that module's
+    import; calling this binds nothing and always reflects the current answer.
+    """
+    return resolve()[1]
+
+
+def installed() -> bool:
+    """True when no source checkout backs these paths."""
+    return resolve()[2]
+
+
+_LAZY_NAMES = {"REPO_ROOT": 0, "GLOBALS_DIR": 1, "INSTALLED": 2}
+
+
+def __getattr__(name: str):
+    """Serve the three historical module constants without freezing them.
+
+    Deliberately does NOT write the value into the module globals: doing so
+    would defeat the environment-keyed cache the first time anyone read a name.
+    """
+    index = _LAZY_NAMES.get(name)
+    if index is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return resolve()[index]
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_NAMES))
+
+
+def fleet_state_dir() -> Path:
+    """State shared by every worktree of ONE repository.
+
+    `GLOBALS_DIR` answers "state this checkout owns", and a linked worktree is a
+    real checkout with a `pyproject.toml` of its own — so anchoring fleet-wide
+    state there gives each of the 287 worktrees on this workstation a private
+    copy of a store whose entire purpose is to be shared. Git already knows the
+    right scope: every worktree of a repository reports the same
+    `--git-common-dir`.
+
+    Degrades to `globals_dir()` rather than raising, and the degradation is
+    ordinary rather than exceptional: an installed wheel has no git and no
+    checkout, and that case was never the broken one. A git failure degrades the
+    same way — a private store is worse than a shared one, and no store at all is
+    worse than both.
+    """
+    root, state, is_installed = resolve()
+    if is_installed or (os.environ.get(_HOME_ENV) or "").strip():
+        # An explicit state root wins outright, as it does everywhere else. It
+        # may sit inside some unrelated checkout, and adopting that checkout's
+        # git anchor would write this program's state into another project.
+        return state
+    shared = _git_common_root(root)
+    if shared is None:
+        return state
+    return shared / "globals"
+
+
+_FLEET_ANCHORS: dict[str, Path | None] = {}
+
+
+def _git_common_root(start: Path) -> Path | None:
+    """The primary checkout of the repository containing `start`, or None.
+
+    Cached per starting directory: this shells out, and `fleet_state_dir()` is
+    called on read paths that a view may poll.
+    """
+    key = os.path.normcase(str(start))
+    if key in _FLEET_ANCHORS:
+        return _FLEET_ANCHORS[key]
+    answer: Path | None = None
+    try:
+        import subprocess
+
+        from alelyon.runtime.common import toolpath
+
+        proc = subprocess.run(
+            toolpath.argv("git", "-C", str(start), "rev-parse",
+                          "--path-format=absolute", "--git-common-dir"),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_GIT_TIMEOUT, **toolpath.no_window())
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and out:
+            common = Path(out).resolve()
+            # `<primary>/.git` for a checkout and for every worktree of it.
+            parent = common.parent
+            if parent.exists():
+                answer = parent
+    except Exception:                                              # noqa: BLE001
+        # git absent, not a repository, timed out, or the toolpath layer is not
+        # importable in this process. Every one of those means "no shared
+        # anchor", which the caller degrades on.
+        answer = None
+    _FLEET_ANCHORS[key] = answer
+    return answer
 
 
 def _package_root() -> Path:
@@ -141,8 +344,13 @@ PACKAGE_ROOT = _package_root()
 #: Use for locating code and shipped assets. For STATE, use `GLOBALS_DIR`.
 INSTALL_ROOT = PACKAGE_ROOT.parent
 
-#: True when no source checkout backs these paths — `REPO_ROOT` is then a state
-#: directory rather than a repository, and nothing may assume a repository
-#: layout (`<root>/alelyon/...`, `<root>/docs/...`) exists beneath it.
+#: `INSTALLED` is True when no source checkout backs these paths — `REPO_ROOT`
+#: is then a state directory rather than a repository, and nothing may assume a
+#: repository layout (`<root>/alelyon/...`, `<root>/docs/...`) exists beneath it.
+#:
+#: `REPO_ROOT`, `GLOBALS_DIR` and `INSTALLED` are served lazily by `__getattr__`
+#: and are not module globals. They read identically; what changed is that they
+#: are recomputed when `$ALELYON_HOME` or `$ALELYON_FORCE_PACKAGED` changes.
 __all__ = ["REPO_ROOT", "GLOBALS_DIR", "INSTALLED", "PACKAGE_ROOT",
-           "INSTALL_ROOT"]
+           "INSTALL_ROOT", "fleet_state_dir", "globals_dir", "installed",
+           "repo_root", "resolve"]

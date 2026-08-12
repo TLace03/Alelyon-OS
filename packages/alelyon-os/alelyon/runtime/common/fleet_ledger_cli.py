@@ -124,11 +124,18 @@ def _open_existing(args) -> tuple[Optional[L.FleetLedger], Path]:
     these commands and then report "nothing has been measured" — which reads as
     a finding about models and is really a description of the file it just made.
     The hierarchy panel learned this first; the same rule applies here.
+
+    The absence check now lives on the ledger as `open_existing()`, so the three
+    call sites that each grew their own `path.exists()` share one refusal. This
+    keeps the `(None, path)` shape its callers already print `_no_ledger` for,
+    and lets the two OTHER named refusals — a newer schema, an unreadable file —
+    reach the operator instead of being flattened into "no ledger".
     """
     path = _database(args)
-    if not path.exists():
+    try:
+        return L.FleetLedger.open_existing(path), path
+    except L.LedgerAbsent:
         return None, path
-    return L.FleetLedger(path), path
 
 
 def _no_ledger(path: Path) -> None:
@@ -263,7 +270,7 @@ def record_runs(*, database=None, cwd: str = "", records_root: str = "",
         path = Path(database) if database else L.default_database()
         return RecordOutcome(database=str(path), added=0, written=False, **shape)
 
-    ledger = L.FleetLedger(database or None)
+    ledger = L.FleetLedger.create(database or None)
     added = ledger.record_all(runs)
     return RecordOutcome(database=str(ledger.database), added=added,
                          written=True, **shape)

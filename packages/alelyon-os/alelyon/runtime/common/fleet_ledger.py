@@ -63,9 +63,15 @@ from pathlib import Path
 import sqlite3
 import time
 
+from alelyon.runtime.common import sqlite_wal as _DB
 from alelyon.runtime.common import fleet_hierarchy as H
 from alelyon.runtime.common import fleet_outcomes as O
 from alelyon.runtime.common import session_records as SR
+
+#: How long a connection waits for a lock before giving up. Ten seconds was
+#: already the connect timeout here; it is now also the explicit busy_timeout,
+#: so the two halves of "how long may this block" are one number.
+_CONNECT_TIMEOUT = 10.0
 
 #: 2 added `branch`, `cwd` and `landed` to `runs`. Migrated in place rather than
 #: versioned into a new layer space: the columns are additive and `landed`
@@ -495,26 +501,145 @@ def pooled_text(record) -> str:
     return f"{record.mean_score:.3f}" if record.measured else "UNMEASURED"
 
 
+class LedgerAbsent(FileNotFoundError):
+    """No ledger at this path, and a reader will not make one to find out.
+
+    A refusal rather than an empty result, deliberately. `FleetLedger(...)`
+    creates its file, so a reader that opened one manufactures an empty ledger
+    and then truthfully reports "nothing has been measured" — which reads as a
+    finding about models and is a description of the file it made a moment
+    earlier. Three call sites had each grown their own `if not path.exists()`
+    guard around that; this is the one refusal they now share.
+    """
+
+
+class LedgerSchemaUnsupported(RuntimeError):
+    """The ledger was written by a NEWER build than this one.
+
+    Named, because the alternative is what this replaces: an unconditional
+    `UPDATE meta SET value=?` walked the marker BACKWARDS to whatever version
+    the opening process happened to be, while leaving the newer build's tables
+    in place. The newer reader then saw a marker it could not reconcile with the
+    schema in front of it and refused for the rest of that ledger's life. A
+    downgrade is not a migration and must not happen silently.
+    """
+
+
+class LedgerUnreadable(RuntimeError):
+    """The file exists and SQLite will not read it as this ledger."""
+
+
 def default_database() -> Path:
-    from alelyon.runtime.common.paths import GLOBALS_DIR
-    return Path(GLOBALS_DIR) / "fleet_ledger.db"
+    """The ledger, anchored on the REPOSITORY rather than on this worktree.
+
+    `GLOBALS_DIR` is "the directory holding `pyproject.toml`", which a linked
+    worktree satisfies too — 287 of them on this workstation, each of which would
+    keep a private career record of a fleet whose whole point is to be shared.
+    `paths.fleet_state_dir()` keys on `git rev-parse --git-common-dir`, the one
+    directory every worktree of a repository reports identically, and degrades to
+    `GLOBALS_DIR` where there is no git (an installed wheel, which was never the
+    broken case).
+
+    In the primary checkout, under `$ALELYON_HOME`, and in a packaged install the
+    answer is byte-identical to what it was. Only a linked worktree moves, and it
+    moves onto the file the primary checkout was already using.
+    """
+    from alelyon.runtime.common import paths
+    return Path(paths.fleet_state_dir()) / "fleet_ledger.db"
 
 
 class FleetLedger:
     """Durable record of what every model did at every layer. Append-only."""
 
     def __init__(self, database: str | Path | None = None) -> None:
+        """Open, CREATING the ledger when it is not there.
+
+        This is the create path and is spelled `create()` when the intent
+        matters. A caller that is only reading must use `open_existing()`, which
+        refuses instead — see `LedgerAbsent`.
+        """
         self.database = Path(database or default_database())
         self.database.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            self._guard_schema(conn)
             for statement in _DDL:
                 conn.execute(statement)
             self._migrate(conn)
             conn.execute(
                 "INSERT OR IGNORE INTO meta(name, value) VALUES('schema', ?)",
                 (str(LEDGER_SCHEMA_VERSION),))
-            conn.execute("UPDATE meta SET value=? WHERE name='schema'",
-                         (str(LEDGER_SCHEMA_VERSION),))
+            # A RATCHET, not an assignment. `CAST(value AS INTEGER)` is how
+            # SQLite compares a marker stored as TEXT; the row is only ever
+            # raised. `_guard_schema` has already refused anything higher, so
+            # this clause is the second of two guards rather than the only one:
+            # the WHERE holds even under a concurrent writer that raised the
+            # version between the read and this statement.
+            conn.execute(
+                "UPDATE meta SET value=? "
+                "WHERE name='schema' AND CAST(value AS INTEGER) < ?",
+                (str(LEDGER_SCHEMA_VERSION), LEDGER_SCHEMA_VERSION))
+
+    # ── construction ─────────────────────────────────────────────────────────
+    @classmethod
+    def create(cls, database: str | Path | None = None) -> "FleetLedger":
+        """Open the ledger, creating it when absent. The explicit spelling."""
+        return cls(database)
+
+    @classmethod
+    def open_existing(cls, database: str | Path | None = None) -> "FleetLedger":
+        """Open an EXISTING ledger. Refuses rather than creating one.
+
+        Raises `LedgerAbsent` when there is no file, `LedgerSchemaUnsupported`
+        when a newer build wrote it, and `LedgerUnreadable` when SQLite will not
+        read it. Each is a named refusal and none of them is an empty ledger:
+        "nothing has been measured here" and "this could not be read" are
+        different facts and a reader must not print the first for the second.
+        """
+        path = Path(database or default_database())
+        if not path.exists():
+            raise LedgerAbsent(
+                f"no fleet ledger at {path}; nothing has been recorded here, "
+                f"which is not the same as nothing having happened, and reading "
+                f"will not create one to find out")
+        try:
+            return cls(path)
+        except (LedgerAbsent, LedgerSchemaUnsupported):
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise LedgerUnreadable(
+                f"the fleet ledger at {path} could not be read "
+                f"({type(exc).__name__}: {exc})") from exc
+
+    def _guard_schema(self, conn: sqlite3.Connection) -> int | None:
+        """Refuse BY NAME on a ledger a newer build wrote. Returns its version.
+
+        Read before any DDL runs, so a refusal leaves the file untouched.
+        `None` means there is no marker yet — a fresh file, or one written
+        before `meta` existed — and that is not an error.
+        """
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE name='schema'").fetchone()
+        except sqlite3.OperationalError:
+            return None                      # no `meta` table yet
+        if row is None:
+            return None
+        raw = row[0] if not isinstance(row, sqlite3.Row) else row["value"]
+        try:
+            found = int(str(raw).strip())
+        except (TypeError, ValueError) as exc:
+            raise LedgerSchemaUnsupported(
+                f"the fleet ledger at {self.database} carries a schema marker "
+                f"{raw!r} that is not a version number; refusing to overwrite "
+                f"it") from exc
+        if found > LEDGER_SCHEMA_VERSION:
+            raise LedgerSchemaUnsupported(
+                f"the fleet ledger at {self.database} is schema v{found}; this "
+                f"build understands v{LEDGER_SCHEMA_VERSION}. Refusing: writing "
+                f"v{LEDGER_SCHEMA_VERSION} over it would leave the newer "
+                f"build's tables in place under an older marker, and the newer "
+                f"reader would then refuse the ledger permanently")
+        return found
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -543,9 +668,48 @@ class FleetLedger:
                 added.append(column)
         return tuple(added)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.database), timeout=10.0)
+    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        """One connection. `readonly=True` for anything that only reads.
+
+        The read connection is opened `mode=ro` with `query_only=ON`, so "a read
+        does not write to the ledger" is enforced by SQLite rather than asserted
+        by this module. It is not decoration: under WAL an ordinary read-write
+        connection CHECKPOINTS on close, which moves pages out of the `-wal` and
+        physically rewrites the main file. Nothing logical changes, but the
+        bytes do, and `test_it_writes_nothing_to_a_ledger_it_reads` measures the
+        bytes. Rather than loosen that test to accommodate WAL, the reads were
+        made incapable of the write it was watching for.
+
+        A read-only connection also cannot create the file, which is the same
+        guarantee `open_existing()` makes at the other end.
+        """
+        if readonly:
+            uri = Path(self.database).resolve(strict=False).as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=_CONNECT_TIMEOUT)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            conn.execute(f"PRAGMA busy_timeout = {int(_CONNECT_TIMEOUT * 1000)}")
+            self._register_functions(conn)
+            return conn
+        conn = sqlite3.connect(str(self.database), timeout=_CONNECT_TIMEOUT)
         conn.row_factory = sqlite3.Row
+        # WAL, because under the rollback journal this used to run on, a writer
+        # takes an EXCLUSIVE whole-database lock and every reader blocks behind
+        # it — including the panels that poll this file. `db.try_set_wal` owns
+        # the one subtlety (`PRAGMA journal_mode=WAL` does not honour
+        # busy_timeout, so a cold concurrent open needs a short retry) and
+        # returns False rather than refusing where the filesystem cannot do WAL.
+        _DB.try_set_wal(conn)
+        # busy_timeout as well as the connect timeout: they are not the same
+        # budget. `sqlite3.connect(timeout=...)` sets the busy handler for this
+        # connection, but a PRAGMA makes it explicit and survives anything that
+        # resets the handler.
+        conn.execute(f"PRAGMA busy_timeout = {int(_CONNECT_TIMEOUT * 1000)}")
+        self._register_functions(conn)
+        return conn
+
+    @staticmethod
+    def _register_functions(conn: sqlite3.Connection) -> None:
         # Repository placement is evaluated inside SQLite so an unrelated
         # machine-ledger row never crosses the query boundary and reaches
         # ``_run_from_row``.  A Python function is used instead of spelling
@@ -556,7 +720,6 @@ class FleetLedger:
             lambda left, right: int(SR.same_directory(
                 str(left or ""), str(right or ""))),
             deterministic=True)
-        return conn
 
     @staticmethod
     def _scope_predicate(
@@ -656,7 +819,7 @@ class FleetLedger:
     # ── reading ──────────────────────────────────────────────────────────────
     def scorecard(self, layer: str, work_kind: str, model: str, *,
                   since: int = 0) -> Scorecard | None:
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             row = conn.execute(
                 """SELECT COUNT(*) AS runs, SUM(settled) AS settled,
                           SUM(contested) AS contested, AVG(out_tokens) AS tokens,
@@ -719,7 +882,7 @@ class FleetLedger:
                 for model in scoped_models) if card is not None]
             return tuple(sorted(cards,
                                 key=lambda card: (-card.mean_score, card.model)))
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             global_models = [r["model"] for r in conn.execute(
                 """SELECT DISTINCT model FROM runs
                     WHERE layer=? AND work_kind=? AND at>? AND space=?""",
@@ -759,7 +922,7 @@ class FleetLedger:
             clauses.append(scope_clause)
             values.extend(scope_values)
         values.append(capped)
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 f"""SELECT * FROM runs WHERE {' AND '.join(clauses)}
                      ORDER BY at DESC, run_id LIMIT ?""", values).fetchall()
@@ -781,7 +944,7 @@ class FleetLedger:
             return ()
         scope_clause, scope_values = self._scope_predicate(
             cwds, cwd_inceptions)
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 f"SELECT * FROM runs WHERE space=? AND {scope_clause} "
                 "ORDER BY at, run_id",
@@ -809,7 +972,7 @@ class FleetLedger:
         if cwds is not None:
             return self._scoped_runs(
                 cwds, cwd_inceptions=cwd_inceptions)
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT * FROM runs WHERE space=? ORDER BY at, run_id",
                 (H.LAYER_SPACE_VERSION,)).fetchall()
@@ -829,7 +992,7 @@ class FleetLedger:
         Today it excludes nothing: all 1,439 rows are in space 1, measured
         2026-08-09. That is the argument for having it now rather than against.
         """
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT space, COUNT(*) AS runs FROM runs "
                 "GROUP BY space ORDER BY space").fetchall()
@@ -943,7 +1106,7 @@ class FleetLedger:
 
     def standing(self, layer: str, work_kind: str) -> Standing | None:
         """The current standing, or None where nothing has been promoted."""
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             row = conn.execute(
                 """SELECT * FROM standings
                     WHERE layer=? AND work_kind=? AND space=?
@@ -962,7 +1125,7 @@ class FleetLedger:
         The history is the point. A demotion appends; nothing is deleted, so
         "which model held this and when did it stop" is always answerable.
         """
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT * FROM standings WHERE layer=? AND work_kind=?
                     ORDER BY seq DESC""", (layer, work_kind)).fetchall()
@@ -972,7 +1135,7 @@ class FleetLedger:
             set_at=int(r["set_at"]), reason=r["reason"]) for r in rows)
 
     def coordinates(self) -> tuple[tuple[str, str], ...]:
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT DISTINCT layer, work_kind FROM runs WHERE space=?
                     ORDER BY layer, work_kind""",
@@ -1221,7 +1384,7 @@ class FleetLedger:
 
     def standings_held(self, model: str) -> tuple[str, ...]:
         """Layers where this model is currently the standing."""
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT DISTINCT layer, work_kind FROM standings
                     WHERE model=? AND state=? AND space=?""",
@@ -1241,7 +1404,7 @@ class FleetLedger:
         declaration. A model with no standing anywhere returns None and falls
         back to its entry class.
         """
-        with self._connect() as conn:
+        with self._connect(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT layer FROM standings
                     WHERE model=? AND state=? AND space=?""",
