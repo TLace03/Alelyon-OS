@@ -9,16 +9,9 @@
     alelyon-fleet claim engine/tools --note "adding a unit checker"
     alelyon-fleet ack <finding-id>
     alelyon-fleet areas                        # the coordinate space in force
-    alelyon-fleet supply                       # where the work is STUCK
 
 Read-only with respect to git — every git call is a query. It writes to one
 SQLite file.
-
-`status` answers *who is where* and `supply` answers *where the work has piled
-up* — the fleet read as a production line, with the constraint marked, the areas
-several documents run through, and the joins no record here can supply. It is
-the expensive one: it curates the Markdown corpus and expands every queued item,
-so it is asked for rather than folded into `status`.
 
 **Which repository?** `--repo` (default: the current directory). Everything is
 resolved from there: the worktrees, the coordinate space, the tracked paths.
@@ -47,6 +40,7 @@ there is one implementation rather than one that ships and one that works.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 import time
 from dataclasses import replace
@@ -63,6 +57,42 @@ from alelyon.runtime.common import worktree_cache as C
 from alelyon.runtime.common import worktree_disciplines as D
 from alelyon.runtime.common import worktree_launch as LAUNCH
 from alelyon.runtime.common import worktree_resume as RES
+
+
+# The work-supply view is a source-repository composition over a larger planning
+# graph. The public wheel deliberately does not ship that graph. Capability is
+# therefore derived from the import graph itself: the same source registers the
+# command in a full checkout and omits it from a distribution that cannot serve
+# it. Looking up specs avoids paying for the expensive graph on every other CLI
+# invocation.
+_SUPPLY_REQUIRED_MODULES = (
+    "alelyon.runtime.common.blueprint",
+    "alelyon.runtime.common.blueprint_focus",
+    "alelyon.runtime.common.blueprint_live",
+    "alelyon.runtime.common.job_path",
+    "alelyon.runtime.common.pr_relay",
+    "alelyon.runtime.common.session_supply",
+)
+_SUPPLY_REFUSAL = "the work-supply view is unavailable in this distribution"
+
+
+def _supply_available() -> bool:
+    """Whether this installation carries the work-supply view's whole graph."""
+    try:
+        return all(importlib.util.find_spec(name) is not None
+                   for name in _SUPPLY_REQUIRED_MODULES)
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+_SUPPLY_ENABLED = _supply_available()
+_SUPPLY_DESCRIPTION = """
+
+`status` answers *who is where* and `supply` answers *where work has piled up*:
+the fleet read as a production line, with the constraint marked, the areas
+several documents run through, and the joins no record here can supply. It is
+the expensive one, so it is asked for rather than folded into `status`.
+"""
 
 
 def _identify(mesh, override: str) -> tuple[str, str]:
@@ -482,15 +512,18 @@ def _cmd_open_areas(args, mesh, bus, session, evidence, space) -> int:
 def _cmd_supply(args, mesh, bus, session, evidence, space) -> int:
     """The fleet read as a production system: the line, and where it is stuck.
 
-    Everything the Work Supply Chain view draws, in a terminal. It exists here
-    rather than only in the window for the same reason the rest of this module
-    does: the fleet subsystems ship in the `alelyon-os` wheel, and a picture that
-    can only be seen inside one desktop application is not a shipped capability.
+    Everything the Work Supply Chain view draws, in a terminal. The command is
+    registered only when its complete planning graph is present; a distribution
+    that does not ship that graph must not advertise a command it cannot serve.
 
     Read-only, and expensive by this CLI's standards — it curates the Markdown
     corpus and expands every queued item — so it is a command a reader asks for
     rather than part of `status`.
     """
+    if not _SUPPLY_ENABLED:
+        print(_SUPPLY_REFUSAL, file=sys.stderr)
+        return 2
+
     from alelyon.runtime.common import blueprint as BP
     from alelyon.runtime.common import blueprint_focus as BF
     from alelyon.runtime.common import job_path as JP
@@ -1079,9 +1112,11 @@ _COMMANDS = {
     "open-areas": _cmd_open_areas, "claim": _cmd_claim,
     "release": _cmd_release, "ack": _cmd_ack,
     "disciplines": _cmd_disciplines, "areas": _cmd_areas,
-    "supply": _cmd_supply, "resume": _cmd_resume, "waiting": _cmd_waiting,
+    "resume": _cmd_resume, "waiting": _cmd_waiting,
     "whoami": _cmd_whoami,
 }
+if _SUPPLY_ENABLED:
+    _COMMANDS["supply"] = _cmd_supply
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1102,7 +1137,8 @@ def build_parser() -> argparse.ArgumentParser:
     ))
     parser = argparse.ArgumentParser(
         prog="alelyon-fleet",
-        description=__doc__,
+        description=(__doc__ or "") + (
+            _SUPPLY_DESCRIPTION if _SUPPLY_ENABLED else ""),
         parents=[leading],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = CLI.subcommands(parser, trailing, dest="command", required=True)
@@ -1163,17 +1199,18 @@ def build_parser() -> argparse.ArgumentParser:
                              help="place these paths instead of this "
                                   "worktree's outstanding work")
 
-    supply = sub.add_parser(
-        "supply", help="the fleet as a production line: where work is stuck")
-    supply.add_argument("--limit", type=int, default=12,
-                        help="how many risk-carrying areas to list")
-    supply.add_argument("--no-corpus", action="store_true",
-                        help="skip the Markdown corpus and the job expansion. "
-                             "Much faster, and the line is then empty -- which "
-                             "is a missing reading, not an idle fleet")
-    supply.add_argument("--no-chain", action="store_true",
-                        help="skip the harness transcripts; no fleet or agent "
-                             "then appears on the graph")
+    if "supply" in _COMMANDS:
+        supply = sub.add_parser(
+            "supply", help="the fleet as a production line: where work is stuck")
+        supply.add_argument("--limit", type=int, default=12,
+                            help="how many risk-carrying areas to list")
+        supply.add_argument("--no-corpus", action="store_true",
+                            help="skip the Markdown corpus and the job expansion. "
+                                 "Much faster, and the line is then empty -- which "
+                                 "is a missing reading, not an idle fleet")
+        supply.add_argument("--no-chain", action="store_true",
+                            help="skip the harness transcripts; no fleet or agent "
+                                 "then appears on the graph")
 
     waiting = sub.add_parser(
         "waiting", help="which sessions have stopped and are waiting for you")

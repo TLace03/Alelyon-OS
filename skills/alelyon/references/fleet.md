@@ -71,15 +71,20 @@ session that cannot establish who it is should not be publishing as anyone.
 ## Where work is stuck
 
 ```bash
-alelyon-fleet supply            # the fleet as a production line
 alelyon-fleet waiting           # sessions that stopped and are waiting for you
 alelyon-fleet resume            # what is dormant, and what waking it would involve
 alelyon-fleet disciplines       # which specialist rules govern what you touched
 ```
 
-`supply --no-corpus` is much faster and the line is then **empty** — which is a missing
-reading, not an idle fleet. The tool says so rather than showing you a clean board. Same
-for `waiting --max-sessions`: anything the cap hides is reported as hidden.
+In a full source checkout, where the complete work-supply planning graph is present,
+`alelyon-fleet supply` adds the fleet-as-production-line view. The public wheel omits
+that source-only graph, so its CLI does not advertise the command. Do not infer a broken
+installation from its absence.
+
+Where `supply` is available, `supply --no-corpus` is much faster and the line is then
+**empty** — which is a missing reading, not an idle fleet. The tool says so rather than
+showing you a clean board. Same for `waiting --max-sessions`: anything the cap hides is
+reported as hidden.
 
 That pattern is the whole design. A tool that cannot see something reports that it cannot
 see it, because a blank panel and a clean panel look identical and mean opposite things.

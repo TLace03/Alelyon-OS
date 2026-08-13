@@ -11,9 +11,10 @@
 #
 # WHAT SHIPS is declared per subsystem in `subsystems.py`, which is the file to read
 # and review. In summary: the CNE verifier and the producer path that feeds it, the
-# lattice registration engine and Model Morphometry, the whole fleet/worktree
-# coordination layer including its CLI, the Workspace conversation, the compute DAG,
-# and the API SDK.
+# lattice registration engine and Model Morphometry, the public fleet/worktree
+# coordination surface including its CLIs, the Workspace conversation, the compute
+# DAG, and the API SDK. Source-only Fleet commands are capability-gated when their
+# larger planning graph is absent from the wheel.
 #
 # WHAT DOES NOT SHIP: the capture engine, the history store, DataService, the GUI, the
 # HTTP API service, identity/auth/gateway, the DSL-authoring model, and every signing

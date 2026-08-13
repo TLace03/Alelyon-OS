@@ -49,6 +49,7 @@ import threading
 import time
 
 from alelyon.runtime.common import toolpath
+from alelyon.runtime.common import throughput
 
 #: Returned wherever a fact could not be derived. Never an empty string: a blank
 #: beside a filled field reads as "checked, nothing there".
@@ -173,8 +174,8 @@ _OBSERVE_POOL_SWEEP_EVIDENCE = (
     "walk of a working tree that shares one physical disk with 162 others. A "
     "repository with fewer or larger worktrees, or one on a different storage "
     "device, is UNMEASURED here and `ALELYON_MESH_WORKERS` is the override.",
-    "THE ROWS ARE NOT IN `local_ci`'s UNITS AND MUST BE CONVERTED. A row of "
-    "`local_ci._JOBS_SWEEP` is N INDEPENDENT copies of a check and the wall "
+    "THE ROWS ARE NOT IN `throughput_knee`'s UNITS AND MUST BE CONVERTED. A "
+    "row accepted by that helper is N INDEPENDENT copies and the wall "
     "clock for all N, so its throughput is `N/wall`. A row here is ONE FIXED "
     "workload -- 163 worktrees -- split N ways, so its throughput is `1/wall` "
     "and N/wall is a unit error. Handing these rows to `_throughput_knee` "
@@ -184,9 +185,9 @@ _OBSERVE_POOL_SWEEP_EVIDENCE = (
     "That is a guard calibrated on the wrong law, and the conversion in "
     "`observe_pool_width` is what stops it.",
     "THE KNEE IS NOT COMPUTED HERE. `observe_pool_width()` hands the converted "
-    "rows to `local_ci._throughput_knee`, which is where this repository's rule "
-    "for 'the last worker that paid for itself' lives, and `ci_sweep` already "
-    "passes a fresh sweep to that same function for the same reason. A second "
+    "rows to `throughput.throughput_knee`, which is where this repository's rule "
+    "for 'the last worker that paid for itself' lives. The private `local_ci` "
+    "adapter and `ci_sweep` pass their rows to that same function. A second "
     "copy of the arithmetic could disagree with the first for reasons that had "
     "nothing to do with either measurement.",
     "WHAT THE POOL DOES NOT CHANGE. It runs the same git commands, per "
@@ -218,12 +219,12 @@ def observe_pool_width() -> int:
     not a missing optimisation, and it is why the answer here is to pay the
     walks faster rather than to skip them.
 
-    **The number.** Derived, not chosen: `local_ci._throughput_knee` over
+    **The number.** Derived, not chosen: `throughput.throughput_knee` over
     `_OBSERVE_POOL_SWEEP` -- the last worker that still returned at least half
-    of what the first one returned. `local_ci` owns that rule and its
-    `_MARGINAL_FLOOR`; this module supplies a sweep of its own workload and
-    nothing else, because a second knee policy would be two constants each
-    derived from the other's consequences.
+    of what the first one returned. The dependency-free `throughput` module
+    owns that rule and its `DEFAULT_MARGINAL_FLOOR`; this module supplies a
+    sweep of its own workload and nothing else, because a second knee policy
+    would be two constants each derived from the other's consequences.
 
     **The conversion, and why leaving it out is a wrong answer and not a
     rounding error.** `_throughput_knee` reads a row's second column as the wall
@@ -273,16 +274,13 @@ def observe_pool_width() -> int:
             asked = 0
         if asked >= 1:
             return asked
-    # Imported here rather than at module scope: `worktree` is imported by
-    # packaging and CLI paths that have no reason to pull in the CI registry.
-    from alelyon.runtime.common import local_ci
-    return max(1, local_ci._throughput_knee(
-        sweep=observe_pool_sweep_in_jobs_units()))
+    return max(1, throughput.throughput_knee(
+        observe_pool_sweep_in_jobs_units()))
 
 
 def observe_pool_sweep_in_jobs_units(
         sweep=None) -> tuple[tuple[int, float], ...]:
-    """`_OBSERVE_POOL_SWEEP` restated in `local_ci._JOBS_SWEEP`'s units.
+    """`_OBSERVE_POOL_SWEEP` restated in `throughput_knee`'s units.
 
     A row becomes `(workers, workers * wall)`: the wall clock this concurrency
     would need to finish `workers` whole meshes rather than the one it actually

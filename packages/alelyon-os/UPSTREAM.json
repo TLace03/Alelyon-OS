@@ -23,7 +23,7 @@
     "packages/alelyon-os/alelyon/runtime/common/desk_dispatch.py": "48ab727028149677811cb70ee1eee71f72434c6da126b6e87b09482076c00af0",
     "packages/alelyon-os/alelyon/runtime/common/development_chain.py": "793ef3e7572b0b6d13a2fbbf6c53c5dc4d39f00cf152dc785efbc550094f899a",
     "packages/alelyon-os/alelyon/runtime/common/fleet_chat.py": "4708f440d1afcc86a0d297efec08c3f17dd26a0247814e573365c74dd7507d8f",
-    "packages/alelyon-os/alelyon/runtime/common/fleet_cli.py": "6b725ac95621a32f01283b41845f04fcb861c2893d537d8ed9d30bfdc547afe6",
+    "packages/alelyon-os/alelyon/runtime/common/fleet_cli.py": "e000ab1179bc1423905b537a1014f5764ab835036138942b95b355b1948d0fb4",
     "packages/alelyon-os/alelyon/runtime/common/fleet_dispatch.py": "55c1957ea1db9d37e436421b1f69717eab236a6dfa5200af2fe7f5b7e4ca5556",
     "packages/alelyon-os/alelyon/runtime/common/fleet_hierarchy.py": "b3efc1283d60cf02c81ee75b0b4d099279f21b1b788618636f226d9ed2ee5f69",
     "packages/alelyon-os/alelyon/runtime/common/fleet_ledger.py": "1b7ad4f4ab44f569bb5b5f15f49f7850949533e68b3c7e73c4c32d2e5d6fce58",
@@ -34,8 +34,9 @@
     "packages/alelyon-os/alelyon/runtime/common/session_attention.py": "465f20522873ea3952a0d3f7f5a9c87c565e9ad9ec3e00cf81a14fa6c5add8e5",
     "packages/alelyon-os/alelyon/runtime/common/session_records.py": "72182e2d690dffca23b810381b7857354624f8f259bf299dcde25c618e07195b",
     "packages/alelyon-os/alelyon/runtime/common/sqlite_wal.py": "13142ab56271f50eb02f263b663e5c58516bf9dfc3902c7794d9a499bbaed0f6",
+    "packages/alelyon-os/alelyon/runtime/common/throughput.py": "6e9ad8fc8ec943a741ee9c6ff05a35503a7a583191ebd673e6fd0168362db144",
     "packages/alelyon-os/alelyon/runtime/common/toolpath.py": "12d90a6738bcf1cf13fc3ef1dcfa0fae433a10ee9baf7a31f105111585fc98fa",
-    "packages/alelyon-os/alelyon/runtime/common/worktree.py": "3562c8c955ffe273f15890f060b6d87f473f5c4038d7550612a29ab0838fbf6e",
+    "packages/alelyon-os/alelyon/runtime/common/worktree.py": "c8f926f629886818e59106a9f726c2e282ac362342c378e9b9f42e560a7ba419",
     "packages/alelyon-os/alelyon/runtime/common/worktree_areas.py": "b71a469a59b20bd0da21262a98e5ff642387daeab6174dd82e9acb96e74122d7",
     "packages/alelyon-os/alelyon/runtime/common/worktree_bus.py": "c0dcfd15c099cdc510cd95d25e6559dc1f1978a4350e15b33220c43a6627a2b4",
     "packages/alelyon-os/alelyon/runtime/common/worktree_cache.py": "44bf8ec468f8351c3fe90424d988105e2dfbaf655a33c70b4dad96a352da6e27",
@@ -148,7 +149,7 @@
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-input-data.json": "1664da864c77fd7642618a1c171db1d2be3ecaef6ffe8eaab4e848ac24d53daf",
     "packages/alelyon-os/alelyon/verify/vectors/partial-no-pinned-key.json": "fb6ca366f2ace5d7d2e77eecaad613329b759e04e1c6d57771fb23436b47ce7c",
     "packages/alelyon-os/alelyon/verify/vectors/partial-substrate-mismatch.json": "a3361b7c449bf5ee4ed2fce6e05eee2beceac20f307f5b31adc29b4e374fc600",
-    "packages/alelyon-os/pyproject.toml": "52d155814af11740fecbb0644bac6a8cac5c4e2afc88d07b53f0aa159eaceeab",
+    "packages/alelyon-os/pyproject.toml": "8e61e526311b76261a561c4953d0fa181f092d1d7e0c6aed77ba1b69d4bb817a",
     "packages/alelyon-os/tests/test_conformance.py": "9b197ce3aabd526d89086fd82bd7f1bb9f9480d23136a66a2dc8b435356435a1",
     "packages/alelyon-os/tests/test_hardening.py": "5d0c14ba7d6827f8a981d775e736b8d361108bff0969cba92794c696dc79ad5d",
     "papers/00-research-log.md": "c80d6c9c27460b4f9b095fb0106913cbde14bb3f9dc7c9b5c973db080025ee33",
@@ -171,6 +172,6 @@
     "spec/cne-v0.md": "3690b655d57f3044a7b7b5f50485c39a843ca8f0c12c525cd818aa7a9ea7e8c9"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "893548eb5ff3e8ee614ab044f347d1468736f2f9",
+  "source_commit": "140d4e3390ff3c101745e82d71098c95bb4dae2a",
   "source_repository": "TLace03/famMain"
 }
