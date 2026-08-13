@@ -90,17 +90,15 @@ to `alelyon-verify verify`. A revoked signing key is then refused rather than re
 
 ```bash
 alelyon-verify version    # verifier version, spec version, substrate, envelope types
-alelyon-verify selftest   # 48 cases: goldens + forgeries
+alelyon-verify selftest   # installed suite totals and results, no network
 alelyon-verify vectors    # list the bundled vectors
 ```
 
-Expected output, measured:
-
-- fallback build: `3/9 goldens fully verified, 36/36 forgeries rejected`
-- deterministic kernel: `9/9 goldens fully verified, 36/36 forgeries rejected`
-
-Forgery rejection does not depend on the substrate. If a build claims `9/9` goldens on
-the fallback, do not trust that build.
+The suite grows as adversarial cases are added, so its exact totals belong to the
+installed `selftest` output rather than this reference. Every bundled forgery must
+reject for its declared reason. A fallback build must leave substrate-sensitive
+nonzero-width goldens not fully verified, while exact-zero goldens may verify fully. A
+specified deterministic substrate must fully verify every bundled golden.
 
 ## What a pass is worth
 

@@ -53,6 +53,7 @@ not its rank: a new worktree never repaints the ones already on screen.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import functools
 import hashlib
@@ -94,6 +95,13 @@ _SQLITE_BUSY_ATTEMPTS = 4
 #: The shared bus itself. Already 10s; now also the explicit busy_timeout, so
 #: "how long may this block" is one number rather than two that can drift.
 _BUS_TIMEOUT_SECONDS = 10.0
+
+# A linked worktree's ``.git`` marker is a short ``gitdir: ...`` pointer. Its
+# contents are part of the checkout incarnation: rewriting that pointer in
+# place must invalidate cached repository identity even when the file's inode
+# is unchanged. Read only a bounded prefix; a valid pointer's operative first
+# line is far smaller than this budget.
+_GIT_POINTER_IDENTITY_BYTES = 4096
 
 #: Validated with `node scripts/validate_palette.js "<hex,…>" --mode <mode> --pairs all`
 #: (dataviz skill). Both modes ALL CHECKS PASS at three slots:
@@ -272,7 +280,7 @@ class WorktreeCache:
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             for statement in _DDL:
                 conn.execute(statement)
             conn.execute(
@@ -300,7 +308,7 @@ class WorktreeCache:
         tracking possible: a single observation is a state, and two are a history.
         """
         operations: list[Operation] = []
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             seen_keys = set()
             for tree in mesh.worktrees:
                 key = _key_for(mesh.repo_root, tree.path)
@@ -389,7 +397,7 @@ class WorktreeCache:
         """
         key = _key_for(repo_root, path)
         moment = int(at if at is not None else time.time())
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO declaration(key, at, session_id, model, note)"
                 " VALUES(?,?,?,?,?)", (key, moment, session_id, model, note))
@@ -399,7 +407,7 @@ class WorktreeCache:
     # ── reading ─────────────────────────────────────────────────────────────
 
     def identities(self) -> tuple[WorktreeIdentity, ...]:
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT * FROM worktree ORDER BY first_seen, key").fetchall()
         return tuple(WorktreeIdentity(
@@ -413,7 +421,7 @@ class WorktreeCache:
         The per-worktree track: what a reader follows when they want one
         worktree's story instead of the whole mesh's.
         """
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT * FROM operation WHERE key=? ORDER BY at DESC, rowid DESC"
                 " LIMIT ?", (key, limit)).fetchall()
@@ -423,7 +431,7 @@ class WorktreeCache:
 
     def recent(self, *, limit: int = 100) -> tuple[Operation, ...]:
         """The collective feed across every worktree, newest first."""
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT * FROM operation ORDER BY at DESC, rowid DESC LIMIT ?",
                 (limit,)).fetchall()
@@ -432,7 +440,7 @@ class WorktreeCache:
                                paths=tuple(json.loads(r["paths"]))) for r in rows)
 
     def declarations(self, key: str | None = None) -> tuple[Declaration, ...]:
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             if key is None:
                 rows = conn.execute(
                     "SELECT * FROM declaration ORDER BY at DESC").fetchall()
@@ -471,7 +479,7 @@ class WorktreeCache:
         the guarantee is one-sided — a conflict named is real, a silent tree is
         unproven rather than clear. `WorktreeMesh.limits` says so too.
         """
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT d.key AS key, w.path AS path, w.label AS label,"
                 "       d.session_id AS session_id, MAX(d.at) AS at"
@@ -510,7 +518,7 @@ class WorktreeCache:
         A session claiming a path git does not list is the event this cache
         exists to surface, so it is reported rather than reconciled.
         """
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT DISTINCT d.key, d.session_id FROM declaration d "
                 "LEFT JOIN worktree w ON w.key = d.key WHERE w.key IS NULL"
@@ -521,7 +529,7 @@ class WorktreeCache:
 
     def colour_capacity(self) -> tuple[int, int]:
         """(slots held, slots available). Past capacity, colour stops helping."""
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn, conn:
             held = conn.execute(
                 "SELECT COUNT(*) c FROM worktree WHERE colour_slot != ?",
                 (UNSLOTTED,)).fetchone()["c"]
@@ -557,22 +565,91 @@ def _anchor_cache_marker(anchor: str) -> tuple[int, ...]:
     ONE hit per 287 lookups and re-spawned ``git rev-parse`` for the other 286.
 
     What these caches have to notice is an *unrelated checkout arriving at the
-    same path*. That is a question about filesystem identity, which is exactly
-    what ``_root_incarnation_marker`` already answers correctly, and which an
-    ordinary edit inside the repository must not disturb.
+    same path* or a linked checkout being rebound to another common directory.
+    Root/``.git`` filesystem identity handles the first. Bounded digests of the
+    administrative ``commondir`` and reverse ``gitdir`` pointers handle the
+    second without making ordinary source edits invalidate the cache.
     """
-    return _root_incarnation_marker(anchor)
+    marker = _root_incarnation_marker(anchor)
+    try:
+        root = Path(anchor).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return marker + (-1, -1)
+    admin = _linked_admin_directory(root / ".git")
+    if admin is None:
+        return marker + (-1, -1)
+    return marker + (
+        _bounded_identity_digest(admin / "commondir"),
+        _bounded_identity_digest(admin / "gitdir"),
+    )
+
+
+def _bounded_identity_payload(path: Path) -> bytes | None:
+    """Read one small structural Git file for a cache identity only."""
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) \
+                or metadata.st_size > _GIT_POINTER_IDENTITY_BYTES:
+            return None
+        with path.open("rb") as handle:
+            payload = handle.read(_GIT_POINTER_IDENTITY_BYTES + 1)
+    except (OSError, RuntimeError):
+        return None
+    return payload if len(payload) <= _GIT_POINTER_IDENTITY_BYTES else None
+
+
+def _bounded_identity_digest(path: Path) -> int:
+    payload = _bounded_identity_payload(path)
+    if payload is None:
+        return -1
+    return int.from_bytes(hashlib.sha256(payload).digest(), "big")
+
+
+def _linked_admin_directory(dot_git: Path) -> Path | None:
+    """Resolve only a bounded ``gitdir:`` marker; run no Git process."""
+    payload = _bounded_identity_payload(dot_git)
+    if payload is None:
+        return None
+    try:
+        value = payload.decode("utf-8", errors="strict").strip()
+    except UnicodeError:
+        return None
+    prefix = "gitdir:"
+    if len(value.splitlines()) != 1 \
+            or not value.lower().startswith(prefix):
+        return None
+    target = value[len(prefix):].strip()
+    if not target:
+        return None
+    candidate = Path(target)
+    if not candidate.is_absolute():
+        candidate = dot_git.parent / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_dir() else None
 
 
 def _root_incarnation_marker(anchor: str) -> tuple[int, ...]:
-    """Stable root/.git identity, insensitive to ordinary repository edits."""
+    """Stable root/.git identity, including a linked-worktree binding.
+
+    Directory metadata is deliberately insensitive to ordinary repository
+    edits. A linked worktree is different: its ``.git`` file binds the visible
+    directory to an administrative Git directory, and that file can be
+    rewritten without changing its inode. A bounded digest of its operative
+    prefix prevents a stale cached identity from surviving that reassignment.
+    """
     values: list[int] = []
-    root = Path(anchor).expanduser().resolve()
+    try:
+        root = Path(anchor).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return (-1,) * 10
     for entry in (root, root / ".git"):
         try:
             metadata = entry.lstat()
-        except OSError:
-            values.extend((-1, -1, -1, -1))
+        except (OSError, RuntimeError):
+            values.extend((-1, -1, -1, -1, -1))
             continue
         birth = getattr(metadata, "st_birthtime_ns", None)
         if birth is None and os.name == "nt":
@@ -580,6 +657,10 @@ def _root_incarnation_marker(anchor: str) -> tuple[int, ...]:
         values.extend((
             int(metadata.st_dev), int(metadata.st_ino),
             int(metadata.st_mode), int(birth or -1)))
+        pointer_digest = -1
+        if entry.name == ".git" and stat.S_ISREG(metadata.st_mode):
+            pointer_digest = _bounded_identity_digest(entry)
+        values.append(pointer_digest)
     return tuple(values)
 
 
@@ -755,7 +836,12 @@ def superseded_selected_state() -> tuple[Path, ...]:
     return tuple(stranded)
 
 
-def _repository_namespace(identity: Path, *, git_common: bool) -> str:
+def _namespace_metadata(path: Path) -> os.stat_result:
+    """Injectable filesystem identity read for namespace falsifiers."""
+    return path.stat()
+
+
+def _repository_namespace(identity: str | Path, *, git_common: bool) -> str:
     """Opaque name for one filesystem incarnation (path only as fallback).
 
     Per-user state outlives a checkout. A path alone would therefore let an
@@ -764,17 +850,29 @@ def _repository_namespace(identity: Path, *, git_common: bool) -> str:
     separates those incarnations while every linked worktree still shares the
     one Git-common directory marker.
     """
-    resolved = identity.resolve()
+    raw = Path(identity)
+    if not raw.is_absolute():
+        raise RepositoryScopeUnavailable(
+            "repository namespace identity must be an absolute path")
+    try:
+        resolved = raw.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise RepositoryScopeUnavailable(
+            "repository namespace identity is unavailable") from exc
     normalized = os.path.normcase(str(resolved))
     try:
-        metadata = resolved.stat()
-        incarnation = f"{metadata.st_dev}:{metadata.st_ino}"
+        metadata = _namespace_metadata(resolved)
+        device = int(metadata.st_dev)
+        inode = int(metadata.st_ino)
         birth = getattr(metadata, "st_birthtime_ns", None)
         if birth is None and os.name == "nt":
             birth = getattr(metadata, "st_ctime_ns", None)
-        if birth is not None:
-            incarnation += f":{int(birth)}"
-    except OSError:
+        # Device number and timestamps are shared/coarse. A nonzero inode is
+        # the per-object component that licenses a path-independent namespace.
+        usable = inode not in (-1, 0)
+        incarnation = (f"{device}:{inode}:{int(birth or -1)}"
+                       if usable else "metadata-unavailable")
+    except (OSError, RuntimeError):
         # Callers use existing selected roots/common dirs. If metadata becomes
         # unreadable between validation and this read, keep the path scoped;
         # downstream opening will refuse rather than fall back to another DB.
@@ -793,13 +891,29 @@ def _repository_namespace(identity: Path, *, git_common: bool) -> str:
 def _known_repository_context(
         anchor: str, marker: tuple[int, ...]) -> str:
     normalized = os.path.normcase(str(Path(anchor).expanduser().resolve()))
-    # Device/inode/birth identity is the context. The path is used only when a
-    # platform/filesystem supplied no usable identity marker at all.
-    usable = any(marker[index] not in (-1, 0)
-                 for index in (0, 1, 3, 4, 5, 7)
-                 if index < len(marker))
+    # Device and birth time alone are not per-object identities: every path on
+    # one filesystem can share the former and several entries can share the
+    # latter. Require a root/.git inode or the bounded linked-worktree pointer
+    # digest. Otherwise include the normalized absolute path and make the
+    # degraded scope local to that directory instead of collapsing a volume.
+    usable = _repository_context_marker_is_strong(marker)
     material = repr(marker) if usable else f"{normalized}\0{marker!r}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _repository_context_marker_is_strong(marker: tuple[int, ...]) -> bool:
+    # marker: root(dev, ino, mode, birth, pointer), then .git in the same form.
+    # Only .git can carry a pointer digest, at slot 9.
+    return any(marker[index] not in (-1, 0)
+               for index in (1, 6, 9) if index < len(marker))
+
+
+def _repository_context_stamp(anchor: str | Path) -> tuple[str, bool]:
+    """Return one content-free checkout id and whether it is path-independent."""
+    root = str(Path(anchor).expanduser().resolve())
+    marker = _root_incarnation_marker(root)
+    return (_known_repository_context(root, marker),
+            _repository_context_marker_is_strong(marker))
 
 
 def repository_context_id(anchor: str | Path) -> str:
@@ -809,8 +923,7 @@ def repository_context_id(anchor: str | Path) -> str:
     placed at the same path. Unlike a directory mtime, it does not change when
     an ordinary source file is added or removed.
     """
-    root = str(Path(anchor).expanduser().resolve())
-    return _known_repository_context(root, _root_incarnation_marker(root))
+    return _repository_context_stamp(anchor)[0]
 
 
 def _created_at(path: Path) -> int | None:

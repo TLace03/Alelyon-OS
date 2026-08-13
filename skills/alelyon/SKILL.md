@@ -105,15 +105,11 @@ reproduces bit-for-bit on the substrate that produced it. On a plain `pip instal
 (the numpy fallback), a receipt carrying a nonzero width honestly degrades: the width is
 left **unverified** rather than guessed.
 
-Measured on this toolkit, both directions:
-
-| Build | Goldens fully verified | Forgeries rejected |
-|---|---|---|
-| numpy fallback (a plain `pip install`) | 3 / 9 | 36 / 36 |
-| deterministic kernel | 9 / 9 | 36 / 36 |
-
-If you see `9/9` claimed on a fallback build, something is wrong. Forgery rejection is
-unaffected by the substrate — that is the part that always works.
+The bundled suite grows as adversarial cases are added, so do not copy a denominator
+from this document. Run `alelyon-verify selftest` to measure the installed version.
+Every bundled forgery must reject for its declared reason. On the numpy fallback,
+nonzero-width goldens honestly remain not fully verified; exact-zero goldens may verify
+fully. A specified deterministic substrate must fully verify every bundled golden.
 
 **The exception that matters commercially:** a width of exactly **zero** is
 substrate-independent. Under the exact-cents law every Δ is zero, the perturbation is
@@ -172,10 +168,11 @@ Load the reference file only when the task calls for it.
 
 ## 3. Working on the toolkit itself
 
-This tree is **generated**. `packages/alelyon-os/**` and `spec/**` in the public mirror
-are produced from Alelyon's private monorepo by an exporter driven by the same allowlist
-that builds the published wheel. A pull request editing those paths cannot be merged as
-written — the next export overwrites it. Open an issue instead, or edit upstream.
+This tree is **generated**. `packages/alelyon-os/**`, `spec/**`, and
+`skills/alelyon/**` in the public mirror are produced from Alelyon's private monorepo;
+the package export is driven by the same allowlist that builds the published wheel. A
+pull request editing those paths cannot be merged as written — the next export
+overwrites it. Open an issue instead, or edit upstream.
 
 `UPSTREAM.json` names the source commit and a SHA-256 per generated file. That is
 self-declared traceability, not authenticated provenance. Do not describe it as the

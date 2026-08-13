@@ -1136,13 +1136,29 @@ def verify_registration_certificate(
             evidence=evidence,
         )
 
+    # The structural half always ran. Coordinate replay only ran if the caller
+    # supplied a case, and `replay_cases` defaults to empty — the product path,
+    # `morphometry.certify()`, supplies none. So an unconditional "replayed to
+    # every claimed source coordinate" is VACUOUSLY true over an empty set, and
+    # a consumer quoting CERTIFICATE_VERIFIED reads it as behaviour exercised.
+    # The module docstring was corrected to say "the supplied" and this sentence
+    # was not, which is the whole defect: the prose a user actually sees outran
+    # what was checked. `docs/cne/CLAIMS.md` — name what was verified.
+    replayed = replay.cases_replayed if replay is not None else 0
+    structural = (
+        "the certificate is canonical, hashes to its reference, is signed by "
+        "the pinned key, and re-running the registration ladder on the two "
+        "spaces it names produces that same chain"
+    )
     return CertificateReport(
         code=CertificateCode.CERTIFICATE_VERIFIED,
         explanation=(
-            "the certificate is canonical, hashes to its reference, is signed by "
-            "the pinned key, its committed chain replayed to every claimed "
-            "source coordinate, and re-running the registration ladder on the "
-            "two spaces it names produces that same chain"
+            f"{structural}, and its committed chain replayed to "
+            f"{replayed} claimed source coordinate(s)"
+            if replayed
+            else f"{structural}. No coordinate was replayed: no replay case was "
+                 f"supplied, so this establishes the structural facts above and "
+                 f"nothing about coordinate reproduction"
         ),
         certificate_ref=actual_ref,
         key_id=pinned_key_id,

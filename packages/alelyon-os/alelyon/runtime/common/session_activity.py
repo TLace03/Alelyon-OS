@@ -28,13 +28,15 @@ is carried on the dataclasses rather than left to a reader:
 * **DERIVED** — that a turn happened, when, on which model, with which tool
   names, how many tokens it cost, and which files its tool calls named. The
   harness wrote every one of those; the model cannot edit them after the fact.
-* **QUOTED** — the text of an assistant turn and its thinking block. That is the
-  model's own output. It is displayed because it is the only window into *why* a
-  fleet did what it did, and it is labelled at every read, because nothing here
-  checks it and a confident paragraph is not evidence.
+* **QUOTED** — the text of an assistant turn and its thinking block, plus the
+  agent's *brief*: the first user record of its transcript, which is the
+  instruction whatever spawned it wrote. That is the model's (or the spawner's)
+  own output. It is displayed because it is the only window into *why* a fleet
+  did what it did, and it is labelled at every read, because nothing here checks
+  it and a confident paragraph is not evidence.
 
-`Turn.text` and `Turn.thinking` are the only content fields in this module. Every
-other field is structure.
+`Turn.text`, `Turn.thinking`, and `AgentRun.brief` are the only content fields in
+this module. Every other field is structure.
 
 Privacy: content is read here, and that is a change
 ---------------------------------------------------
@@ -44,8 +46,10 @@ and the owner authorized that access". **The owner authorized it on 2026-08-03**
 asking that a session's and a fleet's reasoning be recorded and displayed in the
 Fleet view. This module is the minimum that satisfies that:
 
-* only `text` and `thinking` blocks of **assistant** turns are read, truncated to
-  `EXCERPT_CHARS`;
+* only `text` and `thinking` blocks of **assistant** turns, and the first user
+  record of an agent transcript (its `brief` — the instruction it was given), are
+  read, each truncated to `EXCERPT_CHARS`. Later user records are tool results
+  and are not read;
 * **tool results are never read.** That is where file contents, positions, fills
   and broker output land, and none of it is needed to say what an agent is doing;
 * a `Bash` command and a file path are kept because they are what "working on"

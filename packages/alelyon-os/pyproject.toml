@@ -34,7 +34,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alelyon-os"
-version = "0.2.3"
+version = "0.3.0"
 description = "The open Alelyon developer surface: certified-number production and verification, exact coordinate registration and model morphometry, multi-session worktree coordination, a local-model conversation with constrained decoding, uncertainty-propagating compute, and the API client."
 readme = "README.md"
 requires-python = ">=3.10"
