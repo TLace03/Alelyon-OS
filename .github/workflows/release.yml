@@ -17,7 +17,7 @@
 # it changes the export contract and its tests.
 # ─────────────────────────────────────────────────────────────────────────────────
 #
-# PRODUCTION PUBLICATION IS OFF, and turning it on is TWO deliberate owner acts.
+# PRODUCTION PUBLICATION IS ARMED OUTSIDE THIS FILE, and remains TWO-GATED.
 #
 # The predecessor workflow shipped with no production job at all, on the stated
 # grounds that historical revisions and external trusted-publisher/environment
@@ -27,21 +27,27 @@
 #   1. a repository variable `ALELYON_OS_PRODUCTION_RELEASE` is set to `enabled`, and
 #   2. a GitHub Environment named `pypi` exists WITH REQUIRED REVIEWERS.
 #
-# Neither is set by this file. Until both are, tagging produces a fully validated
-# artifact and stops — which is the correct outcome for a workflow nobody has yet
-# audited against a live index.
+# Neither control is set by this file. Observed 2026-08-13, the repository variable is
+# enabled and the `pypi` environment has a required reviewer, so a matching release tag
+# can reach the approval gate. Those are mutable repository settings, not properties of
+# this source: inspect them before every release. If either is absent, tagging produces
+# a validated artifact and stops without publishing.
 #
-# THE PUBLISHER TO REGISTER ON PyPI (pending, not project-level):
+# THE PROJECT-LEVEL PUBLISHER ON PyPI:
 #
 #   Owner            TLace03
 #   Repository name  Alelyon-OS
 #   Workflow name    release.yml
 #   Environment      pypi   (or leave blank to match any)
 #
-# It must be a PENDING publisher. `alelyon-os` has never been published — measured
-# 2026-08-03 it returns 404 — and a project-level registration cannot exist until the
-# first upload succeeds. Run `tools/pypi_oidc_preflight.py --index pypi --dist-name
-# alelyon-os` in the monorepo to see which registration governs, with no credentials.
+# `alelyon-os` now exists on PyPI, so a pending publisher cannot authorize an upload.
+# Only the publisher on the project's own settings page is matched:
+#
+#   https://pypi.org/manage/project/alelyon-os/settings/publishing/
+#
+# Run `tools/pypi_oidc_preflight.py --index pypi --dist-name alelyon-os` in the
+# monorepo to re-check which registration kind governs, with no credentials. The
+# workflow's publish step remains the authoritative test of the registered tuple.
 #
 # NO TESTPYPI REHEARSAL (removed 2026-08-03, owner decision). There was one, and it
 # cost four runs to `invalid-publisher` with a claim set that was correct in every
@@ -54,9 +60,9 @@
 # What replaces it is honest about its own limits: `workflow_dispatch` builds,
 # validates, rebuilds the wheel from its own sdist and smoke-tests every subsystem
 # from a clean install — then stops, holding no `id-token` permission at all. It
-# exercises everything up to the index and nothing at it. The first real exchange
-# with PyPI therefore happens on the first tagged release, and the two production
-# switches are what stand between a mistake and a published artifact.
+# exercises everything up to the index and nothing at it. Only a tagged release makes
+# an OIDC exchange with PyPI, and the two production controls still stand between a
+# mistake and a published artifact.
 
 name: Release
 
@@ -347,9 +353,8 @@ jobs:
     needs: [resolve, build]
     runs-on: ubuntu-24.04
     environment:
-      # This environment must exist WITH REQUIRED REVIEWERS. Without it the job runs
-      # unattended; with it, a human approves each production upload. Creating it is
-      # the owner's act, not this file's.
+      # This environment must exist WITH REQUIRED REVIEWERS. Without that repository
+      # setting the source cannot promise human approval; inspect it before tagging.
       name: pypi
       url: https://pypi.org/p/alelyon-os
     permissions:

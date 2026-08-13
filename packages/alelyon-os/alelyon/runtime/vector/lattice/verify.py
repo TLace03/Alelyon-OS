@@ -277,12 +277,25 @@ def verify_transform_chain(
                 **facts,
             )
 
+    # The structural facts below always ran. Coordinate reproduction did NOT if
+    # no case was supplied — `replay_cases` defaults to empty and the product
+    # path supplies none — and "reproduce each claimed source coordinate" is then
+    # vacuously true over an empty set. A consumer quoting REPLAY_MATCHED reads
+    # that as behaviour exercised. `cases_replayed` already carries the count;
+    # the prose must not outrun it (docs/cne/CLAIMS.md: name what was checked).
+    _structural = (
+        "the committed bytes are canonical, hash to the pinned reference, and "
+        "satisfy every contract invariant"
+    )
     return ReplayReport(
         code=ReplayCode.REPLAY_MATCHED,
         explanation=(
-            "the committed bytes are canonical, hash to the pinned reference, "
-            "satisfy every contract invariant, and reproduce each claimed source "
-            "coordinate"
+            f"{_structural}, and reproduce {len(cases)} claimed source "
+            f"coordinate(s)"
+            if cases
+            else f"{_structural}. No coordinate was reproduced: no replay case "
+                 f"was supplied, so this establishes the structural facts above "
+                 f"and nothing about coordinate reproduction"
         ),
         cases_replayed=len(cases),
         **facts,  # type: ignore[arg-type]
