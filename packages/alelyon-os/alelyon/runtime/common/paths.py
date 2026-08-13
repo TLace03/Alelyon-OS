@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import os
 import sys
+import sys as _sys
+import types as _types
 from pathlib import Path
 
 #: Directory names that mean "this module was installed, not checked out".
@@ -130,6 +132,25 @@ def _user_state_dir() -> Path:
     return Path.home() / ".local" / "share" / _APP_DIR.lower()
 
 
+def user_state_home() -> Path:
+    """The per-user state home — `globals/` component INCLUDED.
+
+    `_user_state_dir()` is the platform directory; this is the state home inside
+    it, and the difference between the two is exactly one component and one
+    divergent database. A caller that needs per-user state in a SOURCE checkout
+    cannot use `globals_dir()` (which anchors on the checkout) and so reached for
+    `_user_state_dir()` instead — landing one component above every other branch
+    of `_resolve()`. Measured on this workstation 2026-08-11, that produced two
+    live `fleet_repository_paths.sqlite3` stores with divergent contents:
+    106,496 B at the platform directory and 40,960 B under its `globals/`.
+
+    So the component is defined ONCE, here, and `_resolve()`'s installed branch
+    is written in terms of it. The two cannot drift apart again by being edited
+    separately, which is how they drifted apart in the first place.
+    """
+    return _user_state_dir() / "globals"
+
+
 def _forced_packaged() -> bool:
     """True when `$ALELYON_FORCE_PACKAGED` asks for packaged path rules.
 
@@ -156,8 +177,7 @@ def _resolve() -> tuple[Path, Path, bool]:
         # An unfrozen interpreter that asked to be treated as packaged. Honouring
         # it here is what lets the packaged-layout smoke test resolve packaged
         # paths instead of quietly measuring the source checkout.
-        state = _user_state_dir()
-        return state, state / "globals", True
+        return _user_state_dir(), user_state_home(), True
 
     here = Path(__file__).resolve()
     if not _is_installed(here):
@@ -169,8 +189,7 @@ def _resolve() -> tuple[Path, Path, bool]:
     # way there is no repository to anchor state to, and inventing one from the
     # module's own nesting depth writes into whatever directory happens to be
     # there. A per-user directory is the honest answer.
-    state = _user_state_dir()
-    return state, state / "globals", True
+    return _user_state_dir(), user_state_home(), True
 
 
 # ── Lazy resolution ──────────────────────────────────────────────────────────
@@ -216,17 +235,69 @@ def installed() -> bool:
 
 _LAZY_NAMES = {"REPO_ROOT": 0, "GLOBALS_DIR": 1, "INSTALLED": 2}
 
+#: Explicit overrides a CALLER assigned, by name. Separate storage from the
+#: module globals, so restoring a value cannot be mistaken for assigning one.
+_OVERRIDES: dict[str, object] = {}
 
-def __getattr__(name: str):
-    """Serve the three historical module constants without freezing them.
+#: The exact object last handed out for each name, kept BY IDENTITY. See
+#: `_PathsModule` for why identity rather than equality.
+_HANDED_OUT: dict[str, object] = {}
 
-    Deliberately does NOT write the value into the module globals: doing so
-    would defeat the environment-keyed cache the first time anyone read a name.
+
+class _PathsModule(_types.ModuleType):
+    """Serves the three historical constants through a property, not PEP 562.
+
+    A module `__getattr__` cannot hold this on its own, and the way it fails
+    looks exactly like a passing test. PEP 562 fires only when normal attribute
+    lookup FAILS. `monkeypatch.setattr(paths, "GLOBALS_DIR", x)` reads the old
+    value first — through `__getattr__`, since there is no real global — and on
+    teardown restores it by SETTING it. That creates a real module global, which
+    from then on satisfies normal lookup, so `__getattr__` is never consulted
+    again and the environment-keyed cache below it is dead for the life of the
+    process. `tests/runtime/test_worktree_bus.py` patches this name, and after it
+    ran, `test_the_module_constants_follow_a_later_bootstrap` in
+    `test_fleet_store_resilience.py` read the frozen answer and failed —
+    MEASURED, and it passed in isolation, which is what made it look like flake.
+
+    A restore is told from an assignment BY IDENTITY: if the value being set is
+    the very object this module last handed out for that name, it is an undo and
+    clears the override rather than pinning it. Identity rather than equality
+    because these are a `Path`, a `Path` and a `bool`, and `bool` cannot be
+    subclassed to carry a marker the way `db._DB_PATH` does. Assigning the
+    identical object the module just produced is a no-op override in any case,
+    so treating it as one is not a lost capability.
     """
-    index = _LAZY_NAMES.get(name)
-    if index is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return resolve()[index]
+
+    def __getattr__(self, name: str):
+        # Only reached when normal lookup fails, which is every read of these
+        # three, because nothing ever writes them into the module globals.
+        index = _LAZY_NAMES.get(name)
+        if index is None:
+            raise AttributeError(
+                f"module {self.__name__!r} has no attribute {name!r}")
+        if name in _OVERRIDES:
+            return _OVERRIDES[name]
+        value = resolve()[index]
+        _HANDED_OUT[name] = value
+        return value
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in _LAZY_NAMES:
+            if _HANDED_OUT.get(name) is value:
+                _OVERRIDES.pop(name, None)      # an undo, not a redirect
+            else:
+                _OVERRIDES[name] = value
+            return
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in _LAZY_NAMES:
+            _OVERRIDES.pop(name, None)
+            return
+        super().__delattr__(name)
+
+
+_sys.modules[__name__].__class__ = _PathsModule
 
 
 def __dir__() -> list[str]:

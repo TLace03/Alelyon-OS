@@ -58,9 +58,11 @@ models is reuse rather than a second invented lifecycle.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Iterator
 import sqlite3
 import time
 
@@ -184,8 +186,10 @@ SCORE_LIMITS: tuple[str, ...] = (
     "A career's pooled score mixes coordinates. Work kinds are not one scale, "
     "so a model that mostly ran mechanical jobs and one that mostly refereed "
     "designs are not comparable on it - only their per-coordinate cards are.",
-    "Nothing here dispatches. A standing is a recommendation a caller may read "
-    "before naming a model, and a session is free to ignore it.",
+    "Nothing here dispatches autonomously. The commanding model must consult a "
+    "standing before dispatch. A different route needs a recorded, concrete "
+    "expected-total-cost reason while preserving capability, risk, and evidence "
+    "floors.",
 )
 
 _DDL = (
@@ -868,7 +872,7 @@ class FleetLedger:
         """
         self.database = Path(database or default_database())
         self.database.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with self._session() as conn:
             self._guard_schema(conn)
             for statement in _DDL:
                 conn.execute(statement)
@@ -1035,6 +1039,40 @@ class FleetLedger:
         self._register_functions(conn)
         return conn
 
+    @contextmanager
+    def _session(self, *, readonly: bool = False
+                 ) -> Iterator[sqlite3.Connection]:
+        """`_connect`, as one transaction, and then actually CLOSED.
+
+        `with sqlite3.connect(...) as conn` is a TRANSACTION context manager —
+        it commits or rolls back and does **not** close the connection. Every
+        block in this class was written that way, so no connection here was ever
+        closed: they were reclaimed by the cycle collector, because
+        `create_function` puts the registered callable and the connection in a
+        reference cycle and takes them off the refcount fast path.
+
+        Under WAL that is not a correctness bug, which is why it survived. What
+        it costs is determinism. An unclosed connection keeps the `-wal` and
+        `-shm` files alive and the checkpoint pending, so "the ledger's bytes on
+        disk after this call" has no answer until a collection nobody scheduled;
+        `tests/runtime/test_fleet_store_resilience.py` had to call `gc.collect()`
+        to make its own measurements reproducible, which is the defect showing
+        through the test rather than the test being fussy.
+
+        `finally: close()` after the transaction block, so a rollback still
+        happens first and an exception still propagates. The read path is
+        unaffected in every respect that was load-bearing: `mode=ro` and
+        `query_only=ON` are set by `_connect`, closing cannot write through a
+        connection SQLite will not let write, and `_connect` itself still hands
+        back a bare connection for the one test that asserts exactly that.
+        """
+        conn = self._connect(readonly=readonly)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     @staticmethod
     def _register_functions(conn: sqlite3.Connection) -> None:
         # Repository placement is evaluated inside SQLite so an unrelated
@@ -1087,7 +1125,7 @@ class FleetLedger:
         offer the same finished agent on every pass. A ledger that counted a run
         once per poll would make a long-lived agent look like a hundred.
         """
-        with self._connect() as conn:
+        with self._session() as conn:
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO runs
                    (run_id, at, layer, work_kind, model, agent_id, fleet_id,
@@ -1123,7 +1161,7 @@ class FleetLedger:
         """
         moment = int(now if now is not None else time.time())
         tally: dict[str, int] = {"read": 0, "unchanged": 0}
-        with self._connect() as conn:
+        with self._session() as conn:
             pending = conn.execute(
                 "SELECT run_id, at, branch, cwd, landed FROM runs "
                 f"WHERE landed IN ({','.join('?' * len(O.PROVISIONAL))})",
@@ -1146,7 +1184,7 @@ class FleetLedger:
     # ── reading ──────────────────────────────────────────────────────────────
     def scorecard(self, layer: str, work_kind: str, model: str, *,
                   since: int = 0) -> Scorecard | None:
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             row = conn.execute(
                 """SELECT COUNT(*) AS runs, SUM(settled) AS settled,
                           SUM(contested) AS contested, AVG(out_tokens) AS tokens,
@@ -1209,7 +1247,7 @@ class FleetLedger:
                 for model in scoped_models) if card is not None]
             return tuple(sorted(cards,
                                 key=lambda card: (-card.mean_score, card.model)))
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             global_models = [r["model"] for r in conn.execute(
                 """SELECT DISTINCT model FROM runs
                     WHERE layer=? AND work_kind=? AND at>? AND space=?""",
@@ -1249,7 +1287,7 @@ class FleetLedger:
             clauses.append(scope_clause)
             values.extend(scope_values)
         values.append(capped)
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 f"""SELECT * FROM runs WHERE {' AND '.join(clauses)}
                      ORDER BY at DESC, run_id LIMIT ?""", values).fetchall()
@@ -1271,7 +1309,7 @@ class FleetLedger:
             return ()
         scope_clause, scope_values = self._scope_predicate(
             cwds, cwd_inceptions)
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 f"SELECT * FROM runs WHERE space=? AND {scope_clause} "
                 "ORDER BY at, run_id",
@@ -1299,7 +1337,7 @@ class FleetLedger:
         if cwds is not None:
             return self._scoped_runs(
                 cwds, cwd_inceptions=cwd_inceptions)
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT * FROM runs WHERE space=? ORDER BY at, run_id",
                 (H.LAYER_SPACE_VERSION,)).fetchall()
@@ -1319,7 +1357,7 @@ class FleetLedger:
         Today it excludes nothing: all 1,439 rows are in space 1, measured
         2026-08-09. That is the argument for having it now rather than against.
         """
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT space, COUNT(*) AS runs FROM runs "
                 "GROUP BY space ORDER BY space").fetchall()
@@ -1433,7 +1471,7 @@ class FleetLedger:
 
     def standing(self, layer: str, work_kind: str) -> Standing | None:
         """The current standing, or None where nothing has been promoted."""
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             row = conn.execute(
                 """SELECT * FROM standings
                     WHERE layer=? AND work_kind=? AND space=?
@@ -1452,7 +1490,7 @@ class FleetLedger:
         The history is the point. A demotion appends; nothing is deleted, so
         "which model held this and when did it stop" is always answerable.
         """
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT * FROM standings WHERE layer=? AND work_kind=?
                     ORDER BY seq DESC""", (layer, work_kind)).fetchall()
@@ -1462,7 +1500,7 @@ class FleetLedger:
             set_at=int(r["set_at"]), reason=r["reason"]) for r in rows)
 
     def coordinates(self) -> tuple[tuple[str, str], ...]:
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT DISTINCT layer, work_kind FROM runs WHERE space=?
                     ORDER BY layer, work_kind""",
@@ -1521,7 +1559,7 @@ class FleetLedger:
         flight.
         """
         moment = int(now if now is not None else time.time())
-        with self._connect() as guard:
+        with self._session() as guard:
             guard.execute("BEGIN IMMEDIATE")
             verdict = self._assess(layer, work_kind, model)
             if not verdict.accepted:
@@ -1711,7 +1749,7 @@ class FleetLedger:
 
     def standings_held(self, model: str) -> tuple[str, ...]:
         """Layers where this model is currently the standing."""
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT DISTINCT layer, work_kind FROM standings
                     WHERE model=? AND state=? AND space=?""",
@@ -1731,7 +1769,7 @@ class FleetLedger:
         declaration. A model with no standing anywhere returns None and falls
         back to its entry class.
         """
-        with self._connect(readonly=True) as conn:
+        with self._session(readonly=True) as conn:
             rows = conn.execute(
                 """SELECT layer FROM standings
                     WHERE model=? AND state=? AND space=?""",
@@ -1763,7 +1801,7 @@ class FleetLedger:
         if conn is not None:
             conn.execute(statement, row)
             return
-        with self._connect() as owned:
+        with self._session() as owned:
             owned.execute(statement, row)
 
     # ── reporting ────────────────────────────────────────────────────────────

@@ -14,11 +14,12 @@ Two things this is NOT
 drift. Inventing a parallel severity scale would mean two answers to "may this
 change ship" and no rule for which wins.
 
-**Not a scheduler.** Nothing here dispatches, and nothing can. A layer
-assignment is *data a caller may read* before choosing a model for an agent, in
-the same way `Domain` is data the assistant reads before choosing tools. The
-mesh's own amendment applies unchanged: it answers "what rank is this work?",
-never "you must use this model".
+**Not an autonomous scheduler.** Nothing here launches an agent or mutates a
+dispatch, and nothing can. A layer assignment is data the commanding model must
+read before choosing a model for an agent, in the same way `Domain` is data the
+assistant reads before choosing tools. It answers "what rank is this work?" and
+supplies a capability floor; the commanding model chooses the lowest-cost
+admissible execution graph and remains accountable for that choice.
 
 The board is not a model, and that is a design truth
 ----------------------------------------------------
@@ -207,8 +208,10 @@ LIMITS: tuple[str, ...] = (
     "Placing work from prose is a phrase rule, not understanding. A job "
     "described in words no pattern matches is placed at the bottom layer, "
     "which is the safe direction - it escalates rather than acts.",
-    "This is data a caller may read. It dispatches nothing, and a session free "
-    "to name any model for any agent remains free to ignore every word of it.",
+    "This module dispatches nothing. The highest active model layer must read "
+    "its placement before dispatch, choose the cheapest model that meets the "
+    "capability and authority floors, and record why it overrides available "
+    "standing evidence.",
     "The board layer cannot be occupied by a model. AGENTS.md section 3 "
     "requires explicit owner authority for Tier 3, so a model may prepare that "
     "decision and never make it.",
