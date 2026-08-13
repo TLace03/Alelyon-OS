@@ -2,7 +2,7 @@
   "files": {
     "packages/alelyon-os/LICENSE-APACHE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
     "packages/alelyon-os/LICENSE-MIT": "5831e9062dfc7531a041f709e8236b68dda914914e1c0e5ab9f7ae0041a2025b",
-    "packages/alelyon-os/README.md": "56f9f8206f3e53b70e91a6d841f2ea4d7763e02cf65ed18889788c6516bb0ace",
+    "packages/alelyon-os/README.md": "ff8d26bdbbd92388f863a794e0220cfa322d11a65eca95e0059d088dfc6e18b0",
     "packages/alelyon-os/SPEC-cne-v0.md": "3690b655d57f3044a7b7b5f50485c39a843ca8f0c12c525cd818aa7a9ea7e8c9",
     "packages/alelyon-os/alelyon/__init__.py": "a1ce017c06073213068709a636ff7c6c119a73144245dc85057c02ba997c3469",
     "packages/alelyon-os/alelyon/platform/__init__.py": "8ba640126e0a7fbdc0931e1e5b74ff5d7b9a339e191c2552f89497e2f931d2ea",
@@ -20,11 +20,11 @@
     "packages/alelyon-os/alelyon/runtime/common/branch_index.py": "eceaf456a036b4178620137c600b1966491a330a107a22f9dc2fa260e8196618",
     "packages/alelyon-os/alelyon/runtime/common/chat_cli.py": "f31cd501780a5d8523e38f86bdef3042e31a59b155a18f6f1511d1385953614c",
     "packages/alelyon-os/alelyon/runtime/common/cli_flags.py": "0eb3f125c43b5cd3f0ca8d69ba5e011116d629e8fe1cb3548a941457bc628747",
-    "packages/alelyon-os/alelyon/runtime/common/desk_dispatch.py": "717c6ba6986349dbd92a353f38d73cb6538d77399e889aae0fc74ae2a80103a1",
+    "packages/alelyon-os/alelyon/runtime/common/desk_dispatch.py": "48ab727028149677811cb70ee1eee71f72434c6da126b6e87b09482076c00af0",
     "packages/alelyon-os/alelyon/runtime/common/development_chain.py": "793ef3e7572b0b6d13a2fbbf6c53c5dc4d39f00cf152dc785efbc550094f899a",
     "packages/alelyon-os/alelyon/runtime/common/fleet_chat.py": "4708f440d1afcc86a0d297efec08c3f17dd26a0247814e573365c74dd7507d8f",
     "packages/alelyon-os/alelyon/runtime/common/fleet_cli.py": "6b725ac95621a32f01283b41845f04fcb861c2893d537d8ed9d30bfdc547afe6",
-    "packages/alelyon-os/alelyon/runtime/common/fleet_dispatch.py": "4597e19a10c2f3f94a17e7acf3718623822e4e7fe5634aa9c109ef803893017e",
+    "packages/alelyon-os/alelyon/runtime/common/fleet_dispatch.py": "55c1957ea1db9d37e436421b1f69717eab236a6dfa5200af2fe7f5b7e4ca5556",
     "packages/alelyon-os/alelyon/runtime/common/fleet_hierarchy.py": "b3efc1283d60cf02c81ee75b0b4d099279f21b1b788618636f226d9ed2ee5f69",
     "packages/alelyon-os/alelyon/runtime/common/fleet_ledger.py": "1b7ad4f4ab44f569bb5b5f15f49f7850949533e68b3c7e73c4c32d2e5d6fce58",
     "packages/alelyon-os/alelyon/runtime/common/fleet_ledger_cli.py": "1f54c503f4c5ce709069dc0370168019071a1f900d4f8cf66d477e07e1ae1e00",
@@ -171,6 +171,6 @@
     "spec/cne-v0.md": "3690b655d57f3044a7b7b5f50485c39a843ca8f0c12c525cd818aa7a9ea7e8c9"
   },
   "schema": "alelyon.os-export/v1",
-  "source_commit": "627d2c7652a2cd9c7dca05ba6cda67e0871a87b7",
+  "source_commit": "893548eb5ff3e8ee614ab044f347d1468736f2f9",
   "source_repository": "TLace03/famMain"
 }

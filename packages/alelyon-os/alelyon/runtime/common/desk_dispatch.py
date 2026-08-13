@@ -45,17 +45,20 @@ plan look more decisive than the evidence supports.
 
 5. **A desk already occupied is not opened again.** Occupancy is supplied by the
    caller — the mesh knows who is editing where — and a busy desk's new demands
-   queue rather than doubling up. This is what stops a second team being sent
-   into a lane a first team is mid-change in.
+   are withheld as outstanding rather than being assigned to a second team. This
+   is what stops a second team being sent into a lane a first team is mid-change
+   in. This module has no queue.
 
 6. **A disabled or retired desk, team, or worker is never selected.** State is
    read, never inferred from absence. Work owned only by a closed desk is
    `DESK-CLOSED`, not `UNROUTABLE`.
 
 **What this does not do, deliberately.** It does not spawn anything, start a
-worktree, write to a store, or talk to git. It returns one mandatory planning
-input; the commanding layer decides whether and how to act after combining it
-with model standing, separability, reuse, risk, and evidence constraints.
+worktree, write to a store, or talk to git. It returns one read-only planning
+input; repository policy requires the commanding layer to consult that input
+when a hierarchy snapshot exists, but this module cannot enforce consultation.
+The commanding layer decides whether and how to act after combining it with
+model standing, separability, reuse, risk, and evidence constraints.
 `AGENTS.md` §18 governs what a session owes the fleet once it does. The lead
 publishes the dispatch record; a spawned teammate publishes its own lane record
 when its harness exposes coordination tools, and the lead relays only when
@@ -85,8 +88,9 @@ WITHHELD_REASONS = (UNROUTABLE, WITHHELD_BUDGET, DESK_OCCUPIED, DESK_CLOSED,
 #: What a plan cannot establish. Printed by every surface that shows one, for
 #: the same reason `desk_lanes.LANE_LIMITS` is.
 DISPATCH_LIMITS: tuple[str, ...] = (
-    "A plan is a READ-ONLY RECOMMENDATION. The commanding layer must consult "
-    "it before desk or team activation. Nothing here spawns an agent, opens a "
+    "A plan is a READ-ONLY RECOMMENDATION. Repository policy requires the "
+    "commanding layer to consult it before desk or team activation; this module "
+    "cannot enforce consultation. Nothing here spawns an agent, opens a "
     "worktree, or reserves anything, and a second session planning against the "
     "same snapshot will produce the same plan rather than a conflicting one -- "
     "which is a property of purity, not a lock.",
@@ -275,10 +279,11 @@ def plan(snapshot: DC.HierarchySnapshot, demands: tuple[Demand, ...], *,
     """Choose the desks to open. Pure: records in, records out.
 
     ``space`` must describe the repository from which ``Demand.paths`` came.
-    Deterministic in the strong sense — two callers handed the same snapshot,
-    demands, budget, occupancy and area space produce byte-identical plans.
-    That is what lets a second session check a first session's dispatch instead
-    of relitigating it.
+    Deterministic by value — two callers handed the same snapshot, demands,
+    budget, occupancy and area space produce equal immutable ``DispatchPlan``
+    values. No canonical byte encoding is defined or claimed. Value stability is
+    what lets a second session check a first session's dispatch instead of
+    relitigating it.
     """
     budget = budget or DispatchBudget()
     space = space or AREAS.default_space()
@@ -329,8 +334,9 @@ def plan(snapshot: DC.HierarchySnapshot, demands: tuple[Demand, ...], *,
         if desk_key in occupied_desks:
             withheld.extend(Withheld(
                 d.key, DESK_OCCUPIED,
-                f"{desk_key} already has work in flight; this queues rather "
-                f"than opening a second team into the same lane") for d in group)
+                f"{desk_key} already has work in flight; this remains "
+                f"outstanding and is withheld rather than opening a second "
+                f"team into the same lane") for d in group)
             continue
         if opened >= budget.max_desks:
             withheld.extend(Withheld(

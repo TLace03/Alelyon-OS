@@ -132,8 +132,10 @@ architecture and storage precision — and nothing about learned behaviour.
 
 **The fleet modules are observational or advisory.** A claim is not a lock, and a
 finding's body is self-reported. Nothing in them verifies that another session's
-declaration is true. A dispatch plan is a mandatory input for a commanding layer,
-not a token-cost or quality oracle and not an activation.
+declaration is true. Repository policy requires a commanding layer to consult a
+dispatch plan when a hierarchy snapshot exists; the module cannot mechanically
+enforce that policy. A plan is not a token-cost or quality oracle and not an
+activation.
 
 ## Migrating from the old packages
 

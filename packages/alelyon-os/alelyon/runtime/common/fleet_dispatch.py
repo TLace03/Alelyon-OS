@@ -133,16 +133,30 @@ def recommend(brief: str, *, work_kind: str | None = None,
     """Which model the record supports for this brief, and how strongly.
 
     `work_kind` overrides what the brief's own wording matched, for a caller that
-    already knows its coordinate. Passing one that names a different layer than
-    the prose does is the caller's business: the layer comes from the placement,
-    the coordinate from the kind, and a disagreement between them is reported in
-    `detail` rather than silently resolved.
+    already knows its coordinate. Known cross-layer pairs at model-occupiable
+    layers remain the explicit pair for any permitted ledger lookup, even when
+    the kind's canonical hierarchy layer differs from the prose placement.
+    Owner authority or ledger unavailability may prevent that lookup. The
+    disagreement is reported in ``detail`` rather than silently resolved or
+    incorrectly described as an invalid coordinate.
     """
     layer, matched_kind, layer_evidence = H.placement(brief)
     kind = (work_kind or matched_kind or "").strip()
     owner = H.board_matter(brief)
+    coordinate_note = ""
+
+    if kind in H.WORK_KINDS:
+        kind_layer = H.layer_for_kind(kind)
+        if kind_layer.key != layer.key:
+            coordinate_note = (
+                f"The explicit work kind {kind!r} canonically maps to "
+                f"{kind_layer.key}, while the brief was placed at "
+                f"{layer.key}; the requested ledger coordinate remains "
+                f"{layer.key}/{kind} for any permitted lookup")
 
     def _out(model, provenance, reason, detail, *, standing=None, cands=()):
+        if coordinate_note:
+            detail = f"{detail}. {coordinate_note}"
         return Recommendation(
             layer=layer.key, layer_evidence=layer_evidence, work_kind=kind,
             model=model, capability=layer.capability, provenance=provenance,
