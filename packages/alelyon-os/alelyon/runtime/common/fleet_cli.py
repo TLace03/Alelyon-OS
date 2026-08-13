@@ -253,6 +253,31 @@ def _cmd_status(args, mesh, bus, session, evidence, space) -> int:
         if len(stranded) > 5:
             print(f"    ... and {len(stranded) - 5} more")
 
+    # Selected-repository stores left at the root this build no longer resolves
+    # to. Printed for the same reason as STRANDED above: the alternative to
+    # naming them is adopting one side of a divergence nobody adjudicated.
+    try:
+        superseded = C.superseded_selected_state()
+    except Exception:                                          # noqa: BLE001
+        superseded = ()
+    if superseded:
+        print()
+        print(f"SUPERSEDED - {len(superseded)} selected-repository store(s) sit "
+              f"at a state root")
+        print("  this build no longer reads. Resolution used to depend on "
+              "whether bootstrap()")
+        print("  had run in the process, so one machine wrote two of them with "
+              "divergent contents.")
+        print("  NOT merged, moved or deleted: which one is truth is an owner "
+              "decision, and")
+        print("  adopting either silently is the failure that produced this.")
+        for path in superseded:
+            try:
+                size = f"{path.stat().st_size:,} B" if path.is_file() else "directory"
+            except OSError:
+                size = "UNMEASURED (not readable)"
+            print(f"    {size:>22}  {path}")
+
     contested = bus.contested()
     if contested:
         print()

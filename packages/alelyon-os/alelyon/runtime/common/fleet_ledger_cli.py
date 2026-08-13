@@ -99,9 +99,10 @@ LIMITS: tuple[str, ...] = (
     "Narrow with --cwd if that is not wanted.",
     "Nothing here demotes. `demote()` needs a floor, and a floor is a policy "
     "number the owner sets rather than one a command line invents.",
-    "A standing is a recommendation a caller may read before naming a model. "
-    "This writes the record the recommendation is computed from; it dispatches "
-    "nothing and a session is free to ignore all of it.",
+    "This command writes the record from which a standing is computed; it "
+    "dispatches nothing autonomously. The commanding model must consult that "
+    "standing before dispatch and record a concrete expected-total-cost reason "
+    "for an override without weakening capability, risk, or evidence floors.",
 )
 
 

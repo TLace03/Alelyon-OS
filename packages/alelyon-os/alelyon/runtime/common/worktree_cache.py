@@ -663,16 +663,96 @@ setattr(_repository_globals, "cache_clear",
 def _selected_repository_state_root() -> Path:
     """Per-user state root for repositories that have no legacy Fleet bus.
 
-    The path module already owns the platform convention. Its helper is private
-    because ordinary callers should use ``GLOBALS_DIR``; this selected-project
+    The path module already owns the platform convention. This selected-project
     case is deliberately different in a source checkout, where ``GLOBALS_DIR``
     points back into the source repository. An explicit ``ALELYON_HOME`` remains
     authoritative, as it is for every other runtime path.
+
+    SINGLE-VALUED, and that is the whole change
+    -------------------------------------------
+    Both branches now end in the same ``globals/`` component, which is what
+    ``paths`` uses for every branch of its own resolution. They did not: the
+    ``ALELYON_HOME`` branch returned ``<home>/globals`` and the other returned
+    ``<state root>`` with no component at all, so ONE machine wrote two stores
+    depending only on whether ``runtime_env.bootstrap()`` had run in that
+    process. That is not a hypothesis — measured on this workstation 2026-08-11,
+    ``fleet_repository_paths.sqlite3`` exists at both, 106,496 B at the top level
+    and 40,960 B under ``globals/``, with divergent contents.
+
+    Fixing ``paths`` could not reach this function, because it does not read
+    ``globals_dir()``: in a source checkout that answer is inside the repository,
+    which is the one place this state must not go. ``paths.user_state_home()`` is
+    the per-user answer WITH the component, so the two branches agree again.
+
+    **Nothing here migrates, merges, moves or deletes the store that leaves.**
+    Which of the two existing files is truth is an owner decision under
+    AGENTS.md §6, and adopting one silently is the failure this refuses to
+    commit. What it does instead is make the abandoned one VISIBLE — see
+    :func:`superseded_selected_state`, which every caller of this function can
+    report and none of them may act on.
     """
     from alelyon.runtime.common import paths
     if os.environ.get("ALELYON_HOME"):
         return Path(paths.GLOBALS_DIR)
-    return paths._user_state_dir()
+    return Path(paths.user_state_home())
+
+
+def _superseded_selected_repository_state_root() -> Path | None:
+    """Where this function used to answer, when that is a DIFFERENT directory.
+
+    ``None`` when the two coincide, which is the ``ALELYON_HOME`` branch: it
+    already carried the ``globals/`` component and did not move.
+    """
+    from alelyon.runtime.common import paths
+    if os.environ.get("ALELYON_HOME"):
+        return None
+    return Path(paths._user_state_dir())
+
+
+#: Files this module used to keep at the superseded root. Named rather than
+#: globbed: a glob would also sweep up whatever else a user put there, and this
+#: list exists to report OUR stores, not to inventory somebody's directory.
+_SELECTED_STATE_NAMES = ("fleet_repository_paths.sqlite3", "fleet_repositories")
+
+
+def superseded_selected_state() -> tuple[Path, ...]:
+    """Selected-repository stores at the OLD root that still exist on disk.
+
+    A named, visible degraded state rather than a silent adoption. When this
+    returns a non-empty tuple, those files hold coordination history that this
+    build no longer reads and will never read: resolution moved by one
+    ``globals/`` component so that it stops producing two answers on one machine.
+
+    It is deliberately NOT a repair. Reading the old store would adopt one side
+    of a divergence nobody has adjudicated; deleting it would destroy the other
+    side of it; merging them is a state migration and an owner decision under
+    AGENTS.md §6. So this reports, and an operator decides.
+
+    Returns an empty tuple both when nothing was left behind and when the old
+    root IS the new one. Those are the same fact for a caller — there is nothing
+    stranded — which is why they are not distinguished here.
+    """
+    old = _superseded_selected_repository_state_root()
+    if old is None:
+        return ()
+    new = _selected_repository_state_root()
+    try:
+        if old.resolve() == new.resolve():
+            return ()
+    except OSError:
+        return ()
+    stranded: list[Path] = []
+    for name in _SELECTED_STATE_NAMES:
+        candidate = old / name
+        try:
+            if candidate.exists():
+                stranded.append(candidate)
+        except OSError:
+            # An unreadable candidate is not evidence of absence, and saying
+            # "nothing stranded" on a failed stat is the one answer that would
+            # be worse than saying nothing.
+            stranded.append(candidate)
+    return tuple(stranded)
 
 
 def _repository_namespace(identity: Path, *, git_common: bool) -> str:
@@ -1319,9 +1399,40 @@ def _safe_legacy_database(legacy_globals: Path) -> Path | None:
     # A filename is not a compatibility contract. Read the marker and complete
     # table vocabulary through a query-only connection before allowing normal
     # Fleet collection to mutate this file.
+    # This probe used to keep its own 1.0s budget, from before the shared-store
+    # budgets were raised. It follows them now, and the reason is its FAILURE
+    # MODE rather than its cost: every exception below returns None, `database_
+    # for` then hands back the scoped path instead of this one, and the caller
+    # writes its findings and claims to a DIFFERENT FILE than its peers without
+    # anything saying so. That is the stranded-bus outcome `default_database`
+    # documents -- twelve private databases holding 70 findings nobody could
+    # see -- reached this time by a transient lock rather than by a wrong path.
+    # A loud refusal at one second would be a defensible trade; a silent
+    # divergence at one second is not.
+    #
+    # MEASURED 2026-08-11, on a fixture holding the lock for 3s. A reader is not
+    # blocked by an ordinary writer at all: `BEGIN IMMEDIATE` takes RESERVED,
+    # which is compatible with the SHARED lock this takes, and the probe
+    # returned in 0.03-0.05s at either budget. What blocks it is EXCLUSIVE --
+    # taken while a commit writes back, and by checkpoint and VACUUM. Under a
+    # held `BEGIN EXCLUSIVE` the 1.0s budget DECLINED adoption after 1.76s while
+    # 5.0s adopted correctly after 2.62s.
+    #
+    # The bounded retry that `_read_scope_row` wraps around its writes is NOT
+    # copied here. `timeout` already re-tries a BUSY internally for the whole
+    # budget, so an outer `_SQLITE_BUSY_ATTEMPTS` loop would multiply this to
+    # ~20s on a path a mesh read waits for, to answer a question whose wrong
+    # answer is corrected at the next incarnation. The budget is the fix; a
+    # retry on top of it is not proportionate.
+    #
+    # The busy_timeout is derived from the same constant rather than written
+    # out, so "how long may this block" cannot drift into two numbers.
     try:
         uri = database.resolve(strict=True).as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+        with sqlite3.connect(uri, uri=True,
+                             timeout=_SQLITE_TIMEOUT_SECONDS) as connection:
+            connection.execute(
+                f"PRAGMA busy_timeout = {int(_SQLITE_TIMEOUT_SECONDS * 1000)}")
             connection.execute("PRAGMA query_only = ON")
             tables = {str(row[0]) for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -1508,5 +1619,5 @@ __all__ = [
     "WorktreeCache",
     "WorktreeIdentity",
     "database_for", "default_database", "record_now", "repository_context_id",
-    "repository_inception", "stranded_buses",
+    "repository_inception", "stranded_buses", "superseded_selected_state",
 ]

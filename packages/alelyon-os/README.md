@@ -40,9 +40,58 @@ the promise is cheap to make once the corrections stop, and dishonest before.
 | `alelyon.verify` | Verify a Certified Number Envelope by replay against your own copy of the inputs, under a key you pin out of band. Ships the `alelyon-verify` CLI, the normative spec, and the conformance vectors. |
 | `alelyon.runtime.vector.lattice` | Exact coordinate registration: immutable coordinate contracts, exact target-to-source transforms with a declared loss/invertibility surface, canonical byte encoding with content commitments, a replay checker, and a signed Registration Certificate. |
 | `alelyon.runtime.vector.lattice.morphometry` | Model Morphometry — a canonical `(block, module)` template for transformer models and an exact registration of a model's native axis order onto it. |
-| `alelyon.runtime.common.worktree*` | Fleet coordination: what several agent sessions in one repository can each observe and declare, stored apart and never merged. |
+| `alelyon.runtime.common` fleet modules | Fleet coordination plus read-only organization, desk/team, and model-routing planners. Observed and declared records stay separate; planners expose what they withheld and never spawn work. |
 | `alelyon.runtime.vector.compute` | A typed dependency DAG with Monte-Carlo uncertainty propagation and variance attribution. |
 | `alelyon.platform.sdk` | Python client for the Alelyon read-only HTTP API. Requires the `sdk` extra. |
+
+## Plan a bounded development fleet
+
+The public fleet surface can place repository paths into caller-declared areas,
+select a desk and team under an explicit concurrency budget, and expose every
+demand it withheld. The planner is pure: it does not spawn an agent, open a
+worktree, reserve a lane, or write a record.
+
+```python
+from alelyon.runtime.common import development_chain as org
+from alelyon.runtime.common import desk_dispatch, worktree_areas
+
+snapshot = org.build_snapshot(
+    version=1,
+    desks=(org.DevelopmentDesk(
+        "runtime", "Runtime", 1, areas=("runtime.common",)),),
+    teams=(org.DevelopmentTeam(
+        "core", "Core", "runtime", 1, owned_paths=("src",)),),
+    workers=(),
+)
+space = worktree_areas.AreaSpace(rules=(
+    worktree_areas.Rule("src/", "runtime.common", depth=1),
+)).normalised()
+plan = desk_dispatch.plan(
+    snapshot,
+    (desk_dispatch.Demand(
+        "parser", "Parser", paths=("src/parser/core.py",), weight=10),),
+    budget=desk_dispatch.DispatchBudget(max_desks=1),
+    space=space,
+)
+
+print(plan.activations)
+print(plan.withheld)
+```
+
+Model routing is a separate read-only question. `fleet_dispatch.recommend()`
+combines the hierarchy placement with an existing fleet ledger when one is
+available; it never creates a ledger merely to report that no measurement
+exists. A named model is the best measured candidate, not a claim that it is the
+best possible model. Callers remain responsible for total expected cost,
+capability, risk, and acceptance evidence.
+
+```python
+from alelyon.runtime.common import fleet_dispatch
+
+route = fleet_dispatch.recommend("implement the parser")
+print(route.layer, route.model, route.provenance, route.reason)
+print(fleet_dispatch.limits())
+```
 
 ## Verify a receipt
 
@@ -81,8 +130,10 @@ every signing key are outside it.
 runtime's *declared* metadata and runs no forward pass, so it measures declared
 architecture and storage precision — and nothing about learned behaviour.
 
-**The fleet modules are observational.** A claim is not a lock, and a finding's body is
-self-reported. Nothing in them verifies that another session's declaration is true.
+**The fleet modules are observational or advisory.** A claim is not a lock, and a
+finding's body is self-reported. Nothing in them verifies that another session's
+declaration is true. A dispatch plan is a mandatory input for a commanding layer,
+not a token-cost or quality oracle and not an activation.
 
 ## Migrating from the old packages
 

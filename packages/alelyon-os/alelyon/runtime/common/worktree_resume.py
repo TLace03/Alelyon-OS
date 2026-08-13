@@ -18,10 +18,11 @@ IT DOES NOT RESUME ANYTHING, AND THAT IS DELIBERATE
 There is no `start()` here and there should not be. Waking a worktree means
 launching a coding agent, in a directory, with a brief, against a paid API — a
 process this repository does not own, spending money, writing code, under
-`AGENTS.md` §3 Tier 3 process control. `fleet_hierarchy` already states the
-principle for its own layer space and it applies unchanged: *it answers "what
-rank is this work?", never "you must use this model"*, and *nothing here
-dispatches, and nothing can*.
+`AGENTS.md` §3 Tier 3 process control. `fleet_hierarchy` now makes placement
+and measured standing mandatory inputs to the commanding layer's route while
+remaining read-only. The same split applies here: this module supplies the
+reviewable plan and launches nothing; the authorised process owner consumes the
+plan and records a concrete total-cost reason for any override.
 
 So the output is a **plan**: a fully specified, reviewable description of what
 *would* be started, where, with what brief, at what layer, and what it would

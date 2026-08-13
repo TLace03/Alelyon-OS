@@ -39,11 +39,13 @@ deleted is reported rather than repaired.
 """
 from __future__ import annotations
 
+from concurrent import futures
 from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import threading
 import time
 
 from alelyon.runtime.common import toolpath
@@ -144,6 +146,155 @@ _MAX_PATHS_PER_WORKTREE = 5_000
 #: `_GIT_TIMEOUT`, not OBSERVE_BUDGET_SECONDS.
 OBSERVE_BUDGET_SECONDS = 120.0
 
+#: Wall seconds for one WARM `observe()` at N pool workers, measured through
+#: this module's own code path on 2026-08-11 on this workstation, over this
+#: repository's 163 worktrees. `_OBSERVE_POOL_SWEEP_EVIDENCE` records what the
+#: rows are and what they are not.
+#:
+#: A warm reading is the right subject: it is `git status --untracked-files=all`
+#: once per worktree and almost nothing else, because everything that is a
+#: function of a commit hash is already memoised. It is also the reading a GUI
+#: actually repeats -- a cold one happens once per process.
+#:
+#: Each figure is the MINIMUM of five round-robin rounds. Nineteen sessions
+#: share this box, so a single timing measures whoever else was running; the
+#: minimum is the least-contended observation and therefore a lower bound on
+#: cost, and the ratio of two lower bounds is the cleanest speedup this machine
+#: can report. Round-robin rather than five rounds of one width, so load drift
+#: is spread across every width instead of landing on one of them.
+_OBSERVE_POOL_SWEEP: tuple[tuple[int, float], ...] = (
+    (1, 7.610), (2, 4.500), (4, 2.344), (8, 1.375),
+    (16, 0.985), (24, 1.125), (32, 1.079),
+)
+
+_OBSERVE_POOL_SWEEP_EVIDENCE = (
+    "THE ROWS ARE ONE WORKLOAD ON ONE MACHINE. Each is a warm `observe()` of "
+    "this repository, whose per-worktree cost is dominated by a full untracked "
+    "walk of a working tree that shares one physical disk with 162 others. A "
+    "repository with fewer or larger worktrees, or one on a different storage "
+    "device, is UNMEASURED here and `ALELYON_MESH_WORKERS` is the override.",
+    "THE ROWS ARE NOT IN `local_ci`'s UNITS AND MUST BE CONVERTED. A row of "
+    "`local_ci._JOBS_SWEEP` is N INDEPENDENT copies of a check and the wall "
+    "clock for all N, so its throughput is `N/wall`. A row here is ONE FIXED "
+    "workload -- 163 worktrees -- split N ways, so its throughput is `1/wall` "
+    "and N/wall is a unit error. Handing these rows to `_throughput_knee` "
+    "unconverted returns 32, the last row of the table, at a width whose wall "
+    "clock is measurably WORSE than 16's; see `observe_pool_width` for the "
+    "arithmetic showing that on raw rows the test can never fail at any width. "
+    "That is a guard calibrated on the wrong law, and the conversion in "
+    "`observe_pool_width` is what stops it.",
+    "THE KNEE IS NOT COMPUTED HERE. `observe_pool_width()` hands the converted "
+    "rows to `local_ci._throughput_knee`, which is where this repository's rule "
+    "for 'the last worker that paid for itself' lives, and `ci_sweep` already "
+    "passes a fresh sweep to that same function for the same reason. A second "
+    "copy of the arithmetic could disagree with the first for reasons that had "
+    "nothing to do with either measurement.",
+    "WHAT THE POOL DOES NOT CHANGE. It runs the same git commands, per "
+    "worktree, that the serial loop ran; it spawns no extra process and skips "
+    "none. Only the wall clock moves. `test_mesh_read_cost.py` asserts that "
+    "field-for-field against a serial reading of the same tree.",
+)
+
+#: Environment override for the pool width. `1` restores the serial reading
+#: exactly, which is what the falsifier uses to show the speedup is real.
+POOL_WIDTH_ENV = "ALELYON_MESH_WORKERS"
+
+
+def observe_pool_width() -> int:
+    """How many worktrees `observe()` reads at once.
+
+    **Why a pool is admissible at all.** The per-worktree cost here is a
+    `subprocess.run`, which releases the GIL for its whole duration. The threads
+    are not computing anything; they are each holding one git process's hand.
+    So this is concurrency over a wait, not parallelism over a computation, and
+    the answers are unchanged because the commands are unchanged.
+
+    **Why not a cheap invalidation token instead.** Because there is not one.
+    The dominant cost is `git status --untracked-files=all`, and every candidate
+    key for it is a lie: an index mtime does not move when an untracked file
+    appears, and a directory mtime does not move when content changes in a
+    subdirectory. A token built from either reports stale uncommitted work,
+    which is the single thing this mesh exists to show. That is a design truth,
+    not a missing optimisation, and it is why the answer here is to pay the
+    walks faster rather than to skip them.
+
+    **The number.** Derived, not chosen: `local_ci._throughput_knee` over
+    `_OBSERVE_POOL_SWEEP` -- the last worker that still returned at least half
+    of what the first one returned. `local_ci` owns that rule and its
+    `_MARGINAL_FLOOR`; this module supplies a sweep of its own workload and
+    nothing else, because a second knee policy would be two constants each
+    derived from the other's consequences.
+
+    **The conversion, and why leaving it out is a wrong answer and not a
+    rounding error.** `_throughput_knee` reads a row's second column as the wall
+    clock for `workers` INDEPENDENT units, so it computes throughput as
+    `workers/wall`. A row here is one FIXED workload split `workers` ways, whose
+    throughput is `1/wall`. Multiplying the wall by `workers` restates the row
+    in the function's units -- "the wall clock this concurrency would need for
+    `workers` whole meshes" -- and `workers/(workers*wall)` is then `1/wall`,
+    which is the rate this workload actually has.
+
+    Unconverted, the rule cannot fail at any width, and that is arithmetic
+    rather than bad luck. The wall clock has a floor `F` (0.985 s here, the
+    point where adding workers stops helping), so the marginal rate per added
+    worker approaches `1/F = 1.02`, while the bar it must clear is
+    `_MARGINAL_FLOOR / wall(1) = 0.5/7.61 = 0.066`. A test whose threshold is
+    fifteen times below the value it is testing is not a knee; it returns the
+    last row of whatever table it is given. On this sweep that is 32 workers, at
+    a wall clock (1.079 s) measurably WORSE than 16's.
+
+    Converted, the same function and the same `_MARGINAL_FLOOR` return **8**:
+    workers 9 through 16 each returned 0.036 mesh/s against a bar of 0.066, so
+    they are where the pool starts paying more than it collects. That is the
+    number, and it is a real trade rather than a free one -- 16 workers were
+    measured at 0.985 s against 8 workers' 1.375 s, so eight more threads bought
+    0.39 s. The rule says those eight did not earn it, and on a box that
+    nineteen sessions share, threads that each hold a git process cost
+    neighbours something this wall clock does not show.
+
+    **Why `cpu_count()` is NOT the ceiling here, unlike `default_jobs()`.**
+    There it bounds work that saturates a box; a two-core machine must not run a
+    sixteen-core knee. Here each worker owns one short-lived git process that
+    spends its life in the filesystem, so cores are not the resource in
+    question -- capping at `cpu_count() - 2` would serialise a two-core laptop
+    onto a wait it is not paying for. The sweep's own knee is the ceiling, and
+    the population is a second one: a repository with four worktrees gets four
+    workers, never the knee.
+
+    `ALELYON_MESH_WORKERS` overrides both, and a value below 1 is ignored rather
+    than obeyed, because a zero-width pool is not a slower reading, it is no
+    reading at all.
+    """
+    override = os.environ.get(POOL_WIDTH_ENV, "").strip()
+    if override:
+        try:
+            asked = int(override)
+        except ValueError:
+            asked = 0
+        if asked >= 1:
+            return asked
+    # Imported here rather than at module scope: `worktree` is imported by
+    # packaging and CLI paths that have no reason to pull in the CI registry.
+    from alelyon.runtime.common import local_ci
+    return max(1, local_ci._throughput_knee(
+        sweep=observe_pool_sweep_in_jobs_units()))
+
+
+def observe_pool_sweep_in_jobs_units(
+        sweep=None) -> tuple[tuple[int, float], ...]:
+    """`_OBSERVE_POOL_SWEEP` restated in `local_ci._JOBS_SWEEP`'s units.
+
+    A row becomes `(workers, workers * wall)`: the wall clock this concurrency
+    would need to finish `workers` whole meshes rather than the one it actually
+    finished. See `observe_pool_width` for why the raw rows are a unit error and
+    what the unconverted answer is.
+
+    Separate and public so a test can assert the two answers differ, rather than
+    the conversion being an unremarked `*` inside a return statement.
+    """
+    rows = _OBSERVE_POOL_SWEEP if sweep is None else tuple(sweep)
+    return tuple((workers, workers * wall) for workers, wall in rows)
+
 #: SHAs per batched `git show`. Windows caps a command line near 32k characters
 #: and a full hash costs 41 of them, so this stays an order of magnitude clear
 #: of the limit rather than computing how close it can get.
@@ -178,21 +329,42 @@ _OBJECT_CACHE: dict = {}
 #: a backstop against a long-lived process, not a working limit.
 _OBJECT_CACHE_LIMIT = 8192
 
+#: Guards `_OBJECT_CACHE`, because `observe()` reads worktrees on a thread pool.
+#:
+#: It covers the dict operations ONLY, never the `compute()` that fills them. A
+#: lock held across the git subprocess would serialise the pool back down to one
+#: worker, which is the whole thing the pool exists to stop.
+#:
+#: The consequence is explicit and accepted: two threads that miss the same key
+#: at the same moment both compute it. That costs a duplicate git process and
+#: cannot produce a wrong answer, because every memoised value here is a pure
+#: function of the git hashes in its key -- the second writer stores what the
+#: first one did. Duplicate compute is possible only where two worktrees share a
+#: HEAD, and only on the pass that first sees it.
+_CACHE_LOCK = threading.Lock()
+
 
 def forget_git_objects() -> None:
     """Drop the memoised per-commit answers. For tests and for a cold read."""
-    _OBJECT_CACHE.clear()
+    with _CACHE_LOCK:
+        _OBJECT_CACHE.clear()
 
 
 def _memoised(key: tuple, compute):
-    """`compute()` once per key. Only truthy-resolved answers are kept."""
-    if key in _OBJECT_CACHE:
-        return _OBJECT_CACHE[key]
+    """`compute()` once per key. Only truthy-resolved answers are kept.
+
+    Safe to call from several threads; see `_CACHE_LOCK` for what that does and
+    does not promise.
+    """
+    with _CACHE_LOCK:
+        if key in _OBJECT_CACHE:
+            return _OBJECT_CACHE[key]
     value, keep = compute()
     if keep:
-        if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
-            _OBJECT_CACHE.clear()
-        _OBJECT_CACHE[key] = value
+        with _CACHE_LOCK:
+            if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
+                _OBJECT_CACHE.clear()
+            _OBJECT_CACHE[key] = value
     return value
 
 
@@ -211,8 +383,9 @@ def _prefetch_commit_times(root: str | Path, heads) -> None:
     prefetch, never a source of truth, and deleting it must slow the reading
     down without changing a single field on the mesh.
     """
-    wanted = [sha for sha in dict.fromkeys(heads)
-              if sha and ("committed-at", sha) not in _OBJECT_CACHE]
+    with _CACHE_LOCK:
+        wanted = [sha for sha in dict.fromkeys(heads)
+                  if sha and ("committed-at", sha) not in _OBJECT_CACHE]
     for start in range(0, len(wanted), _COMMIT_BATCH):
         batch = wanted[start:start + _COMMIT_BATCH]
         code, out = _git("show", "-s", "--format=%H %ct", *batch, cwd=root)
@@ -221,11 +394,14 @@ def _prefetch_commit_times(root: str | Path, heads) -> None:
         for line in out.splitlines():
             sha, _, when = line.strip().partition(" ")
             when = when.strip()
-            if not when.isdigit() or ("committed-at", sha) in _OBJECT_CACHE:
+            if not when.isdigit():
                 continue
-            if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
-                _OBJECT_CACHE.clear()
-            _OBJECT_CACHE[("committed-at", sha)] = int(when)
+            with _CACHE_LOCK:
+                if ("committed-at", sha) in _OBJECT_CACHE:
+                    continue
+                if len(_OBJECT_CACHE) >= _OBJECT_CACHE_LIMIT:
+                    _OBJECT_CACHE.clear()
+                _OBJECT_CACHE[("committed-at", sha)] = int(when)
 
 
 def _git(*args: str, cwd: str | Path | None = None) -> tuple[int, str]:
@@ -511,6 +687,135 @@ def _main_worktree(root: Path, worktree_list_output: str) -> str:
     return str(root)
 
 
+#: A worktree the reading never reached, because the aggregate budget expired
+#: before its turn came up. Distinct from `_FAILED`: this one TRUNCATES.
+_NOT_OBSERVED_BUDGET = object()
+
+#: The same, for a caller's `should_stop` predicate.
+_NOT_OBSERVED_STOP = object()
+
+#: A worktree that was reached and raised. Noted and skipped; it does NOT
+#: truncate, because everything after it was still read.
+_FAILED = object()
+
+
+def _observe_one(record: dict, *, root: Path, canonical_root: str,
+                 mainline: str, mainline_ok: bool, mainline_sha: str,
+                 deadline: float | None, should_stop,
+                 include_session_hints: bool = True):
+    """Read ONE worktree. Returns `(outcome, notes)`.
+
+    `outcome` is a `Worktree`, `None` for a record with no path, or one of the
+    `_NOT_OBSERVED_*` sentinels. Notes are RETURNED rather than appended to a
+    shared list, because several of these run at once and the order a shared
+    list ended up in would be the order the pool finished in.
+
+    Everything this touches is either its own argument, an immutable module
+    constant, or `_OBJECT_CACHE` behind `_CACHE_LOCK`. It writes nothing else,
+    which is the property that makes running it concurrently a scheduling change
+    and not a semantic one.
+
+    The budget is checked HERE, at the start of the task, rather than by the
+    submitting loop. A task whose turn comes after the deadline therefore
+    returns without spawning anything, so a pool with a hundred tasks queued
+    drains in microseconds instead of running them all out.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return _NOT_OBSERVED_BUDGET, ()
+    # Called from a pool thread now, and possibly from several at once. A
+    # predicate that reads a flag -- which is what every caller in this
+    # repository passes -- is fine; one that mutates unguarded state is not.
+    if should_stop is not None and should_stop():
+        return _NOT_OBSERVED_STOP, ()
+
+    notes: list[str] = []
+    path = record.get("worktree", "")
+    if not path:
+        return None, ()
+    present = Path(path).is_dir()
+    is_primary = _same_path(path, canonical_root)
+    family, evidence = ((("primary", "the repository's own checkout")
+                         if is_primary else _tool_family(path)))
+    # The primary checkout belongs to whoever is at the keyboard, so reading
+    # a session out of its path would attribute the owner's own tree to
+    # whichever agent happened to observe it.
+    if is_primary:
+        session, session_evidence = (
+            UNATTRIBUTED,
+            "the repository's own checkout belongs to no session",
+        )
+    elif include_session_hints:
+        session, session_evidence = _session_hint(path)
+    else:
+        # The content-free observation boundary. It has to be honoured HERE:
+        # the pool replaced the loop this branch used to live in, and a flag
+        # that still type-checks in `observe` while reaching no reader is a
+        # privacy seam that reports itself as enforced.
+        session, session_evidence = (
+            UNATTRIBUTED,
+            "session hints disabled; structural worktree observation only",
+        )
+    head = record.get("HEAD", "")
+
+    # A commit's timestamp is a property of the commit, so this is asked once
+    # per SHA for the life of the process rather than once per observation.
+    committed_at = None
+    if head:
+        def _committed_at(sha=head):
+            code, when = _git("show", "-s", "--format=%ct", sha, cwd=root)
+            resolved = (code == 0 and when.strip().isdigit())
+            return (int(when.strip()) if resolved else None), resolved
+        committed_at = _memoised(("committed-at", head), _committed_at)
+
+    # Ancestry and the ahead-diff are properties of the PAIR, so the key
+    # names both hashes. A commit, a fetch or a rebase moves one of them and
+    # the next pass simply misses.
+    on_mainline = None
+    ahead: tuple[str, ...] = ()
+    if head and mainline_ok:
+        def _ancestry(sha=head):
+            landed = _git("merge-base", "--is-ancestor", sha, mainline,
+                          cwd=root)[0] == 0
+            if landed:
+                return (True, (), None), True
+            paths, note = _changed_paths(
+                str(root), "diff", "--name-only", f"{mainline}...{sha}")
+            # A truncated or failed diff is not cached: it would freeze a
+            # partial answer against a key that can never miss again.
+            return (False, paths, note), note is None
+        on_mainline, ahead, note = _memoised(
+            ("ancestry", head, mainline_sha), _ancestry)
+        if note:
+            notes.append(note)
+
+    dirty: tuple[str, ...] = ()
+    if present:
+        dirty, note = _status_paths(path)
+        if note:
+            notes.append(note)
+    else:
+        notes.append(f"{path} is listed by git but its directory is missing; "
+                     f"its uncommitted work is UNMEASURED")
+
+    return Worktree(
+        path=path,
+        head=head,
+        branch=_short_branch(record.get("branch")),
+        detached=bool(record.get("detached")),
+        is_primary=is_primary,
+        label=PurePosixPath(path.replace("\\", "/")).name,
+        tool_family=family,
+        tool_evidence=evidence,
+        session=session,
+        session_evidence=session_evidence,
+        present=present,
+        head_committed_at=committed_at,
+        on_mainline=on_mainline,
+        dirty_paths=dirty,
+        ahead_paths=ahead,
+    ), tuple(notes)
+
+
 def observe(repo_root: str | Path | None = None, *,
             mainline: str = "origin/main",
             now: float | None = None,
@@ -522,21 +827,48 @@ def observe(repo_root: str | Path | None = None, *,
     than a constant because a repository whose default branch is named otherwise
     would otherwise have every worktree reported as ahead of nothing.
 
-    ``should_stop`` is an optional predicate polled between worktrees. It exists
-    because this function is slow in a way callers cannot bound: it is a few git
-    subprocesses per worktree, this repository has around fifty, and each query
-    may sit for ``_GIT_TIMEOUT`` seconds. A GUI running it on a worker thread had
-    no way to abandon it, so a window close had to wait the whole reading out --
-    which Windows records as an application hang and ends the process for.
+    The worktrees are read on a bounded thread pool -- see ``observe_pool_width``
+    for the width and where it comes from. The commands, their arguments and
+    their number are exactly those the serial reading issued; only the wall
+    clock moves, because ``subprocess.run`` releases the GIL for the whole life
+    of the git process it is waiting on. Tasks are submitted in the order git
+    listed the worktrees and collected in that same order, so **the result does
+    not depend on which worker finished first** -- asserted, not assumed, in
+    ``tests/runtime/test_mesh_read_cost.py``.
 
-    Between worktrees is the honest granularity and the docstring says so rather
-    than promising better: a ``subprocess.run`` already in flight is not
-    interruptible, so the tail of one worktree's queries is still owed. That
-    bounds the wait at one worktree instead of all of them.
+    ``should_stop`` is an optional predicate that decides whether each worktree
+    is read. It exists because this function is slow in a way callers cannot
+    bound: it is a few git subprocesses per worktree, this repository has 163 of
+    them, and each query may sit for ``_GIT_TIMEOUT`` seconds. A GUI running it
+    on a worker thread had no way to abandon it, so a window close had to wait
+    the whole reading out -- which Windows records as an application hang and
+    ends the process for.
+
+    **It is now called from the pool's threads**, and from several of them at
+    once. Every caller in this repository passes a predicate that reads a flag,
+    which is safe; one that mutates unguarded state is the caller's problem and
+    this sentence is the notice.
+
+    One worktree is still the honest granularity and the docstring says so
+    rather than promising better: a ``subprocess.run`` already in flight is not
+    interruptible, so the tail of the worktrees in flight is still owed. There
+    are up to ``observe_pool_width()`` of those rather than one -- but they are
+    owed CONCURRENTLY, so the wall-clock tail is unchanged.
+
+    An exception reading one worktree costs that worktree and no other: it is
+    reported as a note and the reading continues. It does not set ``stopped``,
+    because everything after it was read.
 
     A stopped reading returns what it had, with ``stopped`` set and a note. It is
     a **prefix** of an observation and not a small one, so contention computed
     from it can only under-report; do not draw it.
+
+    The pool does not weaken that word. Truncation happens at the FIRST worktree
+    that was not read, and any later one a worker had already finished is
+    discarded rather than reported. That costs at most a pool's width of
+    completed readings at the boundary, and it buys the two properties the
+    contract is made of: it is still literally a prefix, and it is still the
+    same prefix whichever order the pool ran in.
 
     ``OBSERVE_BUDGET_SECONDS`` is the aggregate ceiling and it ends a reading the
     same way, with the same prefix contract. ``_GIT_TIMEOUT`` bounds one query;
@@ -592,104 +924,62 @@ def observe(repo_root: str | Path | None = None, *,
     _prefetch_commit_times(root, [record.get("HEAD", "") for record in records])
     budget = OBSERVE_BUDGET_SECONDS
     deadline = (time.monotonic() + budget) if budget and budget > 0 else None
-    for record in records:
-        if deadline is not None and time.monotonic() >= deadline:
+    width = max(1, min(observe_pool_width(), len(records) or 1))
+
+    # Submitted in record order and COLLECTED in record order, so nothing below
+    # can observe the order the pool happened to finish in.
+    outcomes: list[tuple[object, tuple[str, ...]]] = []
+    with futures.ThreadPoolExecutor(
+            max_workers=width, thread_name_prefix="mesh-observe") as pool:
+        pending = [
+            pool.submit(
+                _observe_one, record,
+                root=root, canonical_root=canonical_root, mainline=mainline,
+                mainline_ok=mainline_ok, mainline_sha=mainline_sha,
+                deadline=deadline, should_stop=should_stop,
+                include_session_hints=include_session_hints)
+            for record in records
+        ]
+        for index, pledge in enumerate(pending):
+            try:
+                outcomes.append(pledge.result())
+            except BaseException as exc:  # noqa: BLE001 - see below
+                # One worktree must not cost the other 162. A worker already
+                # swallows every failure git can produce -- `_git` never raises
+                # -- so reaching here means something genuinely unexpected, and
+                # the honest report is to lose that ONE record loudly rather
+                # than to emit a record whose empty `dirty_paths` would read as
+                # a clean worktree.
+                outcomes.append((
+                    _FAILED,
+                    (f"reading {records[index].get('worktree', '')!r} raised "
+                     f"{type(exc).__name__}: {exc}; it is absent from this "
+                     f"mesh and its uncommitted work is UNMEASURED",),
+                ))
+
+    for index, (produced, produced_notes) in enumerate(outcomes):
+        if produced is _NOT_OBSERVED_BUDGET or produced is _NOT_OBSERVED_STOP:
+            # Truncate at the FIRST worktree that was not read, discarding any
+            # later one the pool had already finished. That is what keeps this a
+            # prefix rather than a completion-order-dependent subset, and it is
+            # the reason the result does not depend on how the pool scheduled.
             stopped = True
-            notes.append(
-                f"the observation ran out of its {budget:.0f}s budget after "
-                f"{len(worktrees)} of {len(records)} worktree(s); what is here "
-                f"is a prefix of an observation, not a complete small one, and "
-                f"its contention is an under-count")
+            if produced is _NOT_OBSERVED_BUDGET:
+                notes.append(
+                    f"the observation ran out of its {budget:.0f}s budget after "
+                    f"{len(worktrees)} of {len(records)} worktree(s); what is "
+                    f"here is a prefix of an observation, not a complete small "
+                    f"one, and its contention is an under-count")
+            else:
+                notes.append(
+                    f"the observation was stopped after {len(worktrees)} of "
+                    f"{len(records)} worktree(s); what is here is a prefix of "
+                    f"an observation, not a complete small one, and its "
+                    f"contention is an under-count")
             break
-        if should_stop is not None and should_stop():
-            stopped = True
-            notes.append(
-                f"the observation was stopped after {len(worktrees)} of "
-                f"{len(records)} worktree(s); what is here is a prefix of an "
-                f"observation, not a complete small one, and its contention is "
-                f"an under-count")
-            break
-        path = record.get("worktree", "")
-        if not path:
-            continue
-        present = Path(path).is_dir()
-        is_primary = _same_path(path, canonical_root)
-        family, evidence = ((("primary", "the repository's own checkout")
-                             if is_primary else _tool_family(path)))
-        # The primary checkout belongs to whoever is at the keyboard, so reading
-        # a session out of its path would attribute the owner's own tree to
-        # whichever agent happened to observe it.
-        if is_primary:
-            session, session_evidence = (
-                UNATTRIBUTED,
-                "the repository's own checkout belongs to no session",
-            )
-        elif include_session_hints:
-            session, session_evidence = _session_hint(path)
-        else:
-            session, session_evidence = (
-                UNATTRIBUTED,
-                "session hints disabled; structural worktree observation only",
-            )
-        head = record.get("HEAD", "")
-
-        # A commit's timestamp is a property of the commit, so this is asked once
-        # per SHA for the life of the process rather than once per observation.
-        committed_at = None
-        if head:
-            def _committed_at(sha=head):
-                code, when = _git("show", "-s", "--format=%ct", sha, cwd=root)
-                resolved = (code == 0 and when.strip().isdigit())
-                return (int(when.strip()) if resolved else None), resolved
-            committed_at = _memoised(("committed-at", head), _committed_at)
-
-        # Ancestry and the ahead-diff are properties of the PAIR, so the key
-        # names both hashes. A commit, a fetch or a rebase moves one of them and
-        # the next pass simply misses.
-        on_mainline = None
-        ahead: tuple[str, ...] = ()
-        if head and mainline_ok:
-            def _ancestry(sha=head):
-                landed = _git("merge-base", "--is-ancestor", sha, mainline,
-                              cwd=root)[0] == 0
-                if landed:
-                    return (True, (), None), True
-                paths, note = _changed_paths(
-                    str(root), "diff", "--name-only", f"{mainline}...{sha}")
-                # A truncated or failed diff is not cached: it would freeze a
-                # partial answer against a key that can never miss again.
-                return (False, paths, note), note is None
-            on_mainline, ahead, note = _memoised(
-                ("ancestry", head, mainline_sha), _ancestry)
-            if note:
-                notes.append(note)
-
-        dirty: tuple[str, ...] = ()
-        if present:
-            dirty, note = _status_paths(path)
-            if note:
-                notes.append(note)
-        else:
-            notes.append(f"{path} is listed by git but its directory is missing; "
-                         f"its uncommitted work is UNMEASURED")
-
-        worktrees.append(Worktree(
-            path=path,
-            head=head,
-            branch=_short_branch(record.get("branch")),
-            detached=bool(record.get("detached")),
-            is_primary=is_primary,
-            label=PurePosixPath(path.replace("\\", "/")).name,
-            tool_family=family,
-            tool_evidence=evidence,
-            session=session,
-            session_evidence=session_evidence,
-            present=present,
-            head_committed_at=committed_at,
-            on_mainline=on_mainline,
-            dirty_paths=dirty,
-            ahead_paths=ahead,
-        ))
+        notes.extend(produced_notes)
+        if produced is not None and produced is not _FAILED:
+            worktrees.append(produced)
 
     return WorktreeMesh(
         repo_root=canonical_root,
