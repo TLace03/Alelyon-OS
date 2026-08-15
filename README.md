@@ -12,17 +12,9 @@
 <b>The Open/Closed Beta experience is live! To download the UI go to: https://www.alelyon.com/
 Please continue reading for further details.</b>
 
-The Alelyon Terminal Open/Closed Beta is live! Get access here: https://www.alelyon.com/ -- please continue reading for important details.
-
-
-
 To unlock the full capabilities of the Alelyon Ecosystem on your machine, follow these steps:
 
-
-
 1. Clone the repository and set up the skills
-
-
 
 In your terminal, run: 
 
@@ -30,52 +22,29 @@ git clone https://www.github.com/TLace03/Alelyon-OS
 
 mkdir -p .agents/skills && cp -r Alelyon-OS/skills/alelyon .agents/skills/
 
-
-
 2. Install the package
-
-
 
 Make sure you’re in a Python 3.10–3.13 environment, then run: 
 
 pip install alelyon-os
 
-
-
 3. Create an account and verify
-
-
 
 Register an account and log in at the site above, then verify with LinkedIn. 
 
-
-
 Once verified, an access key (generated and encrypted with leading cryptography algorithms) will appear on the account page. Copy it and paste it into the dedicated space which will appear on the sign-in screen when you launch the application the first time.
-
-
 
 For those who prefer not to go through LinkedIn verification but still want to try the product, a limited/demo experience is available after registration. Full OS functionality, however, require verification. 
 
-
-
 Why LinkedIn verification? There's a few reasons, before I list them it's important to note we are not scraping any data from LinkedIn, it's a QoL decision.
-
-
 
 1) People are less likely to have a fake/botted LinkedIn and it not be obvious. As such, there is less chance a person will have impersonators with their profile information and it not be obvious who the fake is. You will have a chance to collaborate with other users, this should influence teams to work together using the application. Preventing impersonators from getting invited is incredibly important.
 
-
-
 2) It allows for us to make sure no one is putting on the wrong company tag which is a social networking feature. I guess it can still happen if people put a fabricated employer on their LinkedIn profile.
-
-
 
 3) It allows us to have a database where we will keep only the necessary information of verified users, enabling us to provide better help in the case a user needs to contact us for any reason at all.
 
-
-
 We’re excited to have early users testing the system and helping shape what’s next. Feedback is welcome — jump in and let us know what you think!
-
 
 <b>The open part of the Alelyon Deterministic Quantitative Computational Operating System.</b>
 
