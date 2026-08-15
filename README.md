@@ -18,21 +18,24 @@ To unlock the full capabilities of the Alelyon Ecosystem on your machine, follow
 
 In your terminal, run: 
 
-git clone https://www.github.com/TLace03/Alelyon-OS
-
+```bash
+git clone https://github.com/TLace03/Alelyon-OS
 mkdir -p .agents/skills && cp -r Alelyon-OS/skills/alelyon .agents/skills/
+```
 
 2. Install the package
 
 Make sure you’re in a Python 3.10–3.13 environment, then run: 
 
+```bash
 pip install alelyon-os
+```
 
 3. Create an account and verify
 
-Register an account and log in at the site above, then verify with LinkedIn. 
+Register an account and log in at https://www.alelyon.com/account/ then verify with LinkedIn. 
 
-Once verified, an access key (generated and encrypted with leading cryptography algorithms) will appear on the account page. Copy it and paste it into the dedicated space which will appear on the sign-in screen when you launch the application the first time.
+Once verified, an access key (generated and encrypted with leading cryptography algorithms) will appear on the account page: https://www.alelyon.com/account/. Copy it and paste it into the dedicated space which will appear on the sign-in screen when you launch the application the first time.
 
 For those who prefer not to go through LinkedIn verification but still want to try the product, a limited/demo experience is available after registration. Full OS functionality, however, require verification. 
 
