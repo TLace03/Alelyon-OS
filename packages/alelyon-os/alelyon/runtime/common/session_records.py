@@ -128,12 +128,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 import json
 import ntpath
 import os
 from pathlib import Path
 import re
+import stat as stat_module
 import time
+from typing import Callable
 
 #: Returned wherever a session could not be derived. A value, never a blank —
 #: the same contract `worktree.UNATTRIBUTED` carries, and deliberately the same
@@ -178,6 +181,14 @@ MAX_HEAD_LINES = 50
 #: whole would pull an arbitrary amount of conversation into memory. Skipped.
 MAX_LINE_BYTES = 1 << 20
 
+#: A head observation is bounded across lines as well as per line.  This is a
+#: privacy and availability boundary: finding structural fields never licenses
+#: reading an unbounded prefix of a conversation transcript.
+MAX_HEAD_BYTES = 2 << 20
+
+_SQLITE_INT_MAX = (1 << 63) - 1
+_REPARSE_POINT = 0x0400
+
 #: Every character Claude Code replaces with a dash when it names the project
 #: directory a transcript is filed in. Deliberately the whole complement of
 #: `[A-Za-z0-9]` rather than a list of separators: the drive colon, the path
@@ -185,6 +196,8 @@ MAX_LINE_BYTES = 1 << 20
 #: are all mapped the same way, which is exactly why the result cannot be
 #: decoded back into a path.
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
+_CANONICAL_SESSION_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 #: Minutes since a transcript was last written, within which its session is
 #: treated as live. Not a proof of liveness and not presented as one — see
@@ -219,6 +232,155 @@ LIMITS: tuple[str, ...] = (
     "The candidate set is returned instead, because choosing the most recently "
     "written one is a coin flip between two sessions working at the same moment.",
 )
+
+
+class SessionObservationIssue(str, Enum):
+    """Closed reasons a structural activity observation is not complete."""
+
+    RECORDS_ROOT_UNAVAILABLE = "records-root-unavailable"
+    RECORDS_ROOT_LINK = "records-root-link"
+    PROJECT_UNAVAILABLE = "project-unavailable"
+    PROJECT_LINK = "project-link"
+    PROJECT_CHANGED = "project-changed-during-scan"
+    TOO_MANY_ENTRIES = "too-many-directory-entries"
+    TOO_MANY_TRANSCRIPTS = "too-many-transcripts"
+    INVALID_FILENAME = "invalid-transcript-filename"
+    TRANSCRIPT_UNAVAILABLE = "transcript-unavailable"
+    TRANSCRIPT_LINK = "transcript-link"
+    TRANSCRIPT_NOT_REGULAR = "transcript-not-regular"
+    DUPLICATE_SESSION = "duplicate-session"
+    DUPLICATE_FILE = "duplicate-transcript-file"
+    TRANSCRIPT_CHANGED = "transcript-changed-during-scan"
+    FUTURE_TIMESTAMP = "future-transcript-timestamp"
+    HEAD_OVERSIZED = "structural-head-oversized"
+    HEAD_MALFORMED = "structural-head-malformed"
+    STRUCTURAL_FIELDS_MISSING = "structural-fields-missing"
+    SESSION_ID_MISMATCH = "session-id-mismatch"
+    ORIGINAL_TIMESTAMP_MISSING = "original-timestamp-missing"
+    SOURCE_INCOMPLETE = "structural-source-incomplete"
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class SessionObservationIssueCount:
+    code: SessionObservationIssue
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not SessionObservationIssue:
+            raise TypeError("issue code must be an exact SessionObservationIssue")
+        if type(self.count) is not int or not 1 <= self.count <= _SQLITE_INT_MAX:
+            raise ValueError("issue count must be a positive bounded integer")
+
+
+class SessionPlacement(str, Enum):
+    """Structural rule that places a transcript in the selected directory."""
+
+    FILED = "filed-under-selected-directory"
+    STATED = "structural-cwd-matches-selected-directory"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionWatermark:
+    """One path-scoped Claude activity watermark, with no transcript content."""
+
+    session_id: str
+    last_written_at: int
+    original_at: int | None
+    placement: SessionPlacement
+    moved: bool
+
+    def __post_init__(self) -> None:
+        if (type(self.session_id) is not str
+                or not _CANONICAL_SESSION_ID.fullmatch(self.session_id)):
+            raise ValueError("session_id must be a canonical lowercase UUID")
+        if type(self.last_written_at) is not int or not (
+                0 <= self.last_written_at <= _SQLITE_INT_MAX):
+            raise ValueError("last_written_at must be a bounded nonnegative integer")
+        if self.original_at is not None and (
+                type(self.original_at) is not int
+                or not 0 <= self.original_at <= _SQLITE_INT_MAX):
+            raise ValueError("original_at must be a bounded nonnegative integer or None")
+        if type(self.placement) is not SessionPlacement:
+            raise TypeError("placement must be an exact SessionPlacement")
+        if type(self.moved) is not bool:
+            raise TypeError("moved must be an exact bool")
+
+    def __repr__(self) -> str:
+        # Session ids are addressable harness metadata, not secrets, but they
+        # make reports unnecessarily identifying.  The value remains available
+        # as a typed field to a caller that actually needs the closed vocabulary.
+        return (
+            "SessionWatermark(session_id=<redacted>, "
+            f"last_written_at={self.last_written_at!r}, "
+            f"original_at={self.original_at!r}, placement={self.placement!r}, "
+            f"moved={self.moved!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionObservation:
+    """Complete structural activity snapshot, or a typed refusal to claim one."""
+
+    observed_at: int
+    records: tuple[SessionWatermark, ...]
+    available: bool
+    complete: bool
+    path_last_written_at: int | None
+    issues: tuple[SessionObservationIssueCount, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.observed_at) is not int or not (
+                0 <= self.observed_at <= _SQLITE_INT_MAX):
+            raise ValueError("observed_at must be a bounded nonnegative integer")
+        if type(self.records) is not tuple or any(
+                type(item) is not SessionWatermark for item in self.records):
+            raise TypeError("records must be a tuple of exact SessionWatermark values")
+        if type(self.available) is not bool or type(self.complete) is not bool:
+            raise TypeError("availability and completeness must be exact bool values")
+        if self.complete and not self.available:
+            raise ValueError("an unavailable observation cannot be complete")
+        if self.complete and self.issues:
+            raise ValueError("a complete observation cannot carry issues")
+        if type(self.issues) is not tuple or any(
+                type(item) is not SessionObservationIssueCount for item in self.issues):
+            raise TypeError("issues must be typed issue counts")
+        if self.path_last_written_at is not None and (
+                type(self.path_last_written_at) is not int
+                or not 0 <= self.path_last_written_at <= self.observed_at):
+            raise ValueError("path watermark must be bounded by the observation")
+        ordered_issues = tuple(
+            sorted(self.issues, key=lambda item: item.code.value))
+        unique_issue_codes = {item.code for item in self.issues}
+        if (self.issues != ordered_issues
+                or len(unique_issue_codes) != len(self.issues)):
+            raise ValueError("issues must be unique and canonical-order sorted")
+        if not self.available and self.records:
+            raise ValueError("an unavailable observation cannot carry records")
+        ordered = tuple(sorted(
+            self.records,
+            key=lambda item: (item.session_id, item.last_written_at,
+                              item.placement.value),
+        ))
+        if self.records != ordered:
+            raise ValueError("session watermarks must be canonical-order sorted")
+        if len({item.session_id for item in self.records}) != len(self.records):
+            raise ValueError("session watermarks must have unique session ids")
+        expected = (max((item.last_written_at for item in self.records), default=None)
+                    if self.complete else None)
+        if self.path_last_written_at != expected:
+            raise ValueError(
+                "path watermark is established only by a complete observation")
+
+    def __repr__(self) -> str:
+        # No selected directory, project-store path, or raw session id is
+        # represented.  Counts and watermarks are enough for diagnostics.
+        return (
+            f"SessionObservation(observed_at={self.observed_at!r}, "
+            f"record_count={len(self.records)!r}, available={self.available!r}, "
+            f"complete={self.complete!r}, "
+            f"path_last_written_at={self.path_last_written_at!r}, "
+            f"issues={self.issues!r})"
+        )
 
 
 @dataclass(frozen=True)
@@ -515,8 +677,13 @@ def _decode_scalar(raw: bytes) -> object | None:
         return None
 
 
-def _structural_record(raw: bytes) -> dict:
-    """Extract one record's top-level structural prefix only.
+def _structural_prefix(raw: bytes) -> tuple[dict, bool]:
+    """Extract wanted scalars and say whether the row was structurally valid.
+
+    A valid row may omit the fields needed to place a session.  Claude's queue
+    bookkeeping rows do exactly that, and treating them as malformed would make
+    every ordinary transcript observation partial.  The boolean keeps that
+    case distinct from invalid JSON without decoding any unrelated value.
 
     An object/array belonging to an unrelated key is STEPPED OVER lexically by
     `_composite_end` and never traversed: no byte inside it is decoded or
@@ -545,22 +712,22 @@ def _structural_record(raw: bytes) -> dict:
     """
     position = _space(raw, 0)
     if position >= len(raw) or raw[position] != ord("{"):
-        return {}
+        return {}, False
     position += 1
     found: dict = {}
     while position < len(raw):
         position = _space(raw, position)
         if position < len(raw) and raw[position] == ord("}"):
-            return found if _REQUIRED_KEYS.issubset(found) else {}
+            return found, True
         key_end = _string_end(raw, position)
         if key_end is None or key_end - position > 256:
-            return {}
+            return {}, False
         key = _decode_scalar(raw[position:key_end])
         if not isinstance(key, str):
-            return {}
+            return {}, False
         position = _space(raw, key_end)
         if position >= len(raw) or raw[position] != ord(":"):
-            return {}
+            return {}, False
         position = _space(raw, position + 1)
         if key not in _WANTED_KEY_SET and position < len(raw) \
                 and raw[position] in b"{[":
@@ -571,23 +738,36 @@ def _structural_record(raw: bytes) -> dict:
         else:
             value_end = _scalar_end(raw, position)
         if value_end is None:
-            return {}
+            return {}, False
         if key in _WANTED_KEY_SET and key not in found:
             value = _decode_scalar(raw[position:value_end])
             if value is None:
-                return {}
+                return {}, False
             found[key] = value
             if _WANTED_KEY_SET.issubset(found):
-                return found
+                return found, True
         position = _space(raw, value_end)
         if position >= len(raw):
-            return {}
+            return {}, False
         if raw[position] == ord(","):
             position += 1
             continue
         if raw[position] == ord("}"):
-            return found if _REQUIRED_KEYS.issubset(found) else {}
-        return {}
+            return found, True
+        return {}, False
+    return {}, False
+
+
+def _structural_record(raw: bytes) -> dict:
+    """Extract one usable record's top-level structural prefix only.
+
+    This compatibility wrapper preserves the original ``dict``/empty-dict
+    contract.  The typed observer uses :func:`_structural_prefix` so a valid
+    queue row and a malformed row do not collapse to the same empty value.
+    """
+    found, valid = _structural_prefix(raw)
+    if valid and _REQUIRED_KEYS.issubset(found):
+        return found
     return {}
 
 
@@ -634,6 +814,102 @@ def _timestamp_seconds(value) -> int | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return int(parsed.timestamp())
+
+
+@dataclass(frozen=True, slots=True)
+class _HeadObservation:
+    fields: dict
+    issues: tuple[SessionObservationIssue, ...] = ()
+
+
+def _is_link_or_reparse(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0) or 0)
+    return stat_module.S_ISLNK(value.st_mode) or bool(attributes & _REPARSE_POINT)
+
+
+def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
+    """Identity and mutation fields used around one bounded head read."""
+    # Windows reports a different ``st_ctime_ns`` for ``lstat`` and ``fstat``
+    # of the same file, so creation/change time cannot participate in this
+    # cross-handle identity check. Size, write time and file identity can.
+    fields = ("st_mode", "st_size", "st_mtime_ns", "st_dev", "st_ino")
+    return all(getattr(left, name, None) == getattr(right, name, None)
+               for name in fields) and (
+        int(getattr(left, "st_file_attributes", 0) or 0)
+        == int(getattr(right, "st_file_attributes", 0) or 0)
+    )
+
+
+def _read_structural_head(
+    path: Path,
+    *,
+    _lstat: Callable[[os.PathLike[str] | str], os.stat_result] = os.lstat,
+) -> _HeadObservation:
+    """Read a bounded structural prefix and refuse unstable or private excess.
+
+    Only the four scalars in ``_WANTED_KEYS`` are decoded or returned.
+    Unrelated composites are skipped lexically, and both the per-line and total
+    byte budgets are hard limits.  The transcript is stated before, through the
+    opened handle, and after the read so a replacement or concurrent append is
+    an incomplete observation rather than a stale watermark.
+    """
+    try:
+        before = _lstat(path)
+    except (OSError, ValueError, TypeError):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_UNAVAILABLE,))
+    if _is_link_or_reparse(before):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_LINK,))
+    if not stat_module.S_ISREG(before.st_mode):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_NOT_REGULAR,))
+
+    malformed = False
+    total = 0
+    found: dict = {}
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if _is_link_or_reparse(opened) or not _same_stat(before, opened):
+                return _HeadObservation(
+                    {}, (SessionObservationIssue.TRANSCRIPT_CHANGED,))
+            for _index in range(MAX_HEAD_LINES):
+                line = handle.readline(MAX_LINE_BYTES + 1)
+                if not line:
+                    break
+                total += len(line)
+                if len(line) > MAX_LINE_BYTES or total > MAX_HEAD_BYTES:
+                    return _HeadObservation(
+                        {}, (SessionObservationIssue.HEAD_OVERSIZED,))
+                if not line.strip():
+                    continue
+                prefix, valid = _structural_prefix(line)
+                if not valid:
+                    malformed = True
+                    continue
+                if _REQUIRED_KEYS.issubset(prefix):
+                    found = prefix
+                    break
+            opened_after = os.fstat(handle.fileno())
+    except (OSError, ValueError, TypeError):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_UNAVAILABLE,))
+
+    try:
+        after = _lstat(path)
+    except (OSError, ValueError, TypeError):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_UNAVAILABLE,))
+    if (_is_link_or_reparse(after) or not _same_stat(before, opened_after)
+            or not _same_stat(before, after)):
+        return _HeadObservation({}, (SessionObservationIssue.TRANSCRIPT_CHANGED,))
+    if not found:
+        missing_issues = (
+            [SessionObservationIssue.HEAD_MALFORMED] if malformed else [])
+        missing_issues.append(SessionObservationIssue.STRUCTURAL_FIELDS_MISSING)
+        return _HeadObservation({}, tuple(missing_issues))
+
+    # A malformed bookkeeping line still means the enumerated transcript was
+    # not completely understood.  The safe structural row is retained as
+    # lower-bound evidence, while the report remains non-actionable.
+    head_issues = ((SessionObservationIssue.HEAD_MALFORMED,) if malformed else ())
+    return _HeadObservation(found, head_issues)
 
 
 def _records_in_dir(directory: Path) -> list[SessionRecord]:
@@ -797,3 +1073,303 @@ def candidates(directory: str | Path, *,
         directory, records_root=records_root,
         active_within_minutes=active_within_minutes, now=now,
         not_before=not_before, exact_cwd=exact_cwd))
+
+
+_STAT_ISSUES: dict[str, SessionObservationIssue] = {
+    "project-unavailable":
+        SessionObservationIssue.PROJECT_UNAVAILABLE,
+    "project-link":
+        SessionObservationIssue.PROJECT_LINK,
+    "too-many-entries":
+        SessionObservationIssue.TOO_MANY_ENTRIES,
+    "too-many-records":
+        SessionObservationIssue.TOO_MANY_TRANSCRIPTS,
+    "invalid-filename":
+        SessionObservationIssue.INVALID_FILENAME,
+    "entry-unavailable":
+        SessionObservationIssue.TRANSCRIPT_UNAVAILABLE,
+    "entry-link":
+        SessionObservationIssue.TRANSCRIPT_LINK,
+    "entry-not-regular":
+        SessionObservationIssue.TRANSCRIPT_NOT_REGULAR,
+    "duplicate-session":
+        SessionObservationIssue.DUPLICATE_SESSION,
+    "duplicate-file":
+        SessionObservationIssue.DUPLICATE_FILE,
+    "changed-during-scan":
+        SessionObservationIssue.PROJECT_CHANGED,
+    "future-timestamp":
+        SessionObservationIssue.FUTURE_TIMESTAMP,
+}
+
+
+def _increment_observation_issue(
+    counts: dict[SessionObservationIssue, int],
+    code: SessionObservationIssue,
+    count: int = 1,
+) -> None:
+    counts[code] = counts.get(code, 0) + count
+
+
+def _observation_issues(
+    counts: dict[SessionObservationIssue, int],
+) -> tuple[SessionObservationIssueCount, ...]:
+    return tuple(
+        SessionObservationIssueCount(code, count)
+        for code, count in sorted(counts.items(), key=lambda item: item[0].value)
+        if count
+    )
+
+
+def _unavailable_observation(
+    observed_at: int,
+    code: SessionObservationIssue,
+) -> SessionObservation:
+    return SessionObservation(
+        observed_at=observed_at,
+        records=(),
+        available=False,
+        complete=False,
+        path_last_written_at=None,
+        issues=(SessionObservationIssueCount(code),),
+    )
+
+
+def observe(
+    directory: str | Path,
+    *,
+    records_root: str | Path | None = None,
+    now: int | None = None,
+    not_before: int | None = None,
+    _lstat: Callable[[os.PathLike[str] | str], os.stat_result] = os.lstat,
+) -> SessionObservation:
+    """Observe Claude activity for one directory, or return a typed refusal.
+
+    This is the acting-safe companion to :func:`sessions_in`.  The legacy API
+    deliberately turns unreadable and unsupported inputs into an empty tuple so
+    interactive identity lookup remains best-effort.  Here absence and failed
+    observation are different states: ``complete`` is false on an unavailable
+    project, an unreadable/malformed/oversized transcript, any link or reparse
+    point, an enumeration bound, or a concurrent namespace change.
+
+    Enumeration is delegated to :mod:`claude_session_index`, whose records are
+    filename/stat-only and complete-or-partial typed.  A transcript is opened
+    only after that pass, and only its bounded structural head is inspected to
+    apply the existing filing-wins move rule and the repository-incarnation
+    ``not_before`` boundary.  No prompt, response, tool input, or tool result is
+    decoded, retained, returned, or represented.
+    """
+    if now is not None and (
+            type(now) is not int or not 0 <= now <= _SQLITE_INT_MAX):
+        raise ValueError("now must be a bounded nonnegative integer or None")
+    observed_at = int(time.time()) if now is None else now
+    if not_before is not None and (
+            type(not_before) is not int
+            or not 0 <= not_before <= observed_at):
+        raise ValueError("not_before must be a bounded integer no later than now")
+    target = str(directory)
+    if not target or "\x00" in target or "\n" in target or "\r" in target:
+        raise ValueError("directory must be a nonempty path without control characters")
+
+    # ``session_records`` is part of the public Fleet subsystem; the strict
+    # stat-only producer is source-custody infrastructure and deliberately is
+    # not. Keep the public module importable without that private dependency,
+    # while an acting caller receives a typed incomplete observation instead
+    # of silently treating the missing adapter as no activity.
+    try:
+        from . import claude_session_index as stat_index  # noqa: PLC0415
+    except ImportError:
+        return _unavailable_observation(
+            observed_at, SessionObservationIssue.SOURCE_INCOMPLETE)
+
+    selected_root = (Path(records_root) if records_root is not None
+                     else DEFAULT_RECORDS_ROOT)
+    # Absolute but unresolved: resolving would follow the exact link this
+    # boundary must classify rather than trust.
+    root = Path(os.path.abspath(os.fspath(selected_root)))
+    try:
+        root_before = _lstat(root)
+    except (OSError, ValueError, TypeError):
+        return _unavailable_observation(
+            observed_at, SessionObservationIssue.RECORDS_ROOT_UNAVAILABLE)
+    if _is_link_or_reparse(root_before):
+        return _unavailable_observation(
+            observed_at, SessionObservationIssue.RECORDS_ROOT_LINK)
+    if not stat_module.S_ISDIR(root_before.st_mode):
+        return _unavailable_observation(
+            observed_at, SessionObservationIssue.RECORDS_ROOT_UNAVAILABLE)
+
+    counts: dict[SessionObservationIssue, int] = {}
+    projects: list[Path] = []
+    seen_projects: set[str] = set()
+    for slug in project_slug_spellings(target):
+        candidate = root / slug
+        try:
+            value = _lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError):
+            _increment_observation_issue(
+                counts, SessionObservationIssue.PROJECT_UNAVAILABLE)
+            continue
+        if _is_link_or_reparse(value):
+            _increment_observation_issue(counts, SessionObservationIssue.PROJECT_LINK)
+            continue
+        if not stat_module.S_ISDIR(value.st_mode):
+            _increment_observation_issue(
+                counts, SessionObservationIssue.PROJECT_UNAVAILABLE)
+            continue
+        key = os.path.normcase(os.path.abspath(os.fspath(candidate)))
+        if key not in seen_projects:
+            seen_projects.add(key)
+            projects.append(candidate)
+
+    if not projects:
+        if not counts:
+            _increment_observation_issue(
+                counts, SessionObservationIssue.PROJECT_UNAVAILABLE)
+        return SessionObservation(
+            observed_at=observed_at,
+            records=(),
+            available=False,
+            complete=False,
+            path_last_written_at=None,
+            issues=_observation_issues(counts),
+        )
+
+    watermarks: list[SessionWatermark] = []
+    for project in sorted(projects, key=lambda value: os.path.normcase(str(value))):
+        stat_report = stat_index.observe(
+            project, now=observed_at, _lstat=_lstat)
+        for issue in stat_report.issues:
+            _increment_observation_issue(
+                counts,
+                _STAT_ISSUES.get(
+                    issue.code.value, SessionObservationIssue.SOURCE_INCOMPLETE),
+                issue.count,
+            )
+        if not stat_report.complete:
+            if not stat_report.issues:
+                _increment_observation_issue(
+                    counts, SessionObservationIssue.SOURCE_INCOMPLETE)
+            # Do not open content-bearing files after the filename/stat producer
+            # has already established that its enumeration is incomplete.
+            continue
+
+        project_records: list[SessionWatermark] = []
+        for stat_record in stat_report.records:
+            path = project / f"{stat_record.session_id}.jsonl"
+            head_read = _read_structural_head(path, _lstat=_lstat)
+            for issue in head_read.issues:
+                _increment_observation_issue(counts, issue)
+            head = head_read.fields
+            if not head:
+                continue
+            declared = head.get("sessionId")
+            cwd = head.get("cwd")
+            record_type = head.get("type")
+            if (not isinstance(declared, str)
+                    or not isinstance(cwd, str) or not cwd
+                    or "\x00" in cwd or "\n" in cwd or "\r" in cwd
+                    or not isinstance(record_type, str) or not record_type):
+                _increment_observation_issue(
+                    counts, SessionObservationIssue.HEAD_MALFORMED)
+                continue
+            if declared != stat_record.session_id:
+                _increment_observation_issue(
+                    counts, SessionObservationIssue.SESSION_ID_MISMATCH)
+                continue
+
+            timestamp_present = "timestamp" in head
+            original_at = _timestamp_seconds(head.get("timestamp"))
+            if timestamp_present and original_at is None:
+                _increment_observation_issue(
+                    counts, SessionObservationIssue.HEAD_MALFORMED)
+                continue
+            if original_at is not None and original_at > observed_at:
+                _increment_observation_issue(
+                    counts, SessionObservationIssue.FUTURE_TIMESTAMP)
+                continue
+            if not_before is not None:
+                if original_at is None:
+                    _increment_observation_issue(
+                        counts, SessionObservationIssue.ORIGINAL_TIMESTAMP_MISSING)
+                    continue
+                if original_at < not_before:
+                    continue
+
+            legacy = SessionRecord(
+                session_id=stat_record.session_id,
+                cwd=cwd,
+                tool_family="claude-code",
+                last_written_at=stat_record.updated_at,
+                evidence="bounded Claude structural index",
+                filed_under=project.name,
+                original_at=original_at,
+            )
+            counts_for_target, _rule = _member(legacy, target)
+            if not counts_for_target:
+                # This can occur only for a lossy slug spelling that does not
+                # place the structural cwd either.  It is an addressed slug
+                # collision, not activity for the selected directory.
+                continue
+            placement = (SessionPlacement.FILED
+                         if filed_under(target, project.name)
+                         else SessionPlacement.STATED)
+            project_records.append(SessionWatermark(
+                session_id=legacy.session_id,
+                last_written_at=stat_record.updated_at,
+                original_at=legacy.original_at,
+                placement=placement,
+                moved=legacy.moved,
+            ))
+
+        # A second filename/stat observation closes the namespace around the
+        # structural reads.  A transcript added, removed, replaced, or appended
+        # during this interval makes the whole project non-actionable.
+        after_report = stat_index.observe(
+            project, now=observed_at, _lstat=_lstat)
+        if after_report != stat_report:
+            _increment_observation_issue(
+                counts, SessionObservationIssue.PROJECT_CHANGED)
+            continue
+        watermarks.extend(project_records)
+
+    grouped: dict[str, list[SessionWatermark]] = {}
+    for watermark in watermarks:
+        grouped.setdefault(watermark.session_id, []).append(watermark)
+    unique: list[SessionWatermark] = []
+    for group in grouped.values():
+        if len(group) != 1:
+            _increment_observation_issue(
+                counts, SessionObservationIssue.DUPLICATE_SESSION)
+            continue
+        unique.append(group[0])
+
+    try:
+        root_after = _lstat(root)
+    except (OSError, ValueError, TypeError):
+        _increment_observation_issue(
+            counts, SessionObservationIssue.PROJECT_CHANGED)
+    else:
+        if _is_link_or_reparse(root_after) or not _same_stat(root_before, root_after):
+            _increment_observation_issue(
+                counts, SessionObservationIssue.PROJECT_CHANGED)
+
+    issues = _observation_issues(counts)
+    complete = not issues
+    records = tuple(sorted(
+        unique,
+        key=lambda item: (item.session_id, item.last_written_at,
+                          item.placement.value),
+    ))
+    path_watermark = (max((item.last_written_at for item in records), default=None)
+                      if complete else None)
+    return SessionObservation(
+        observed_at=observed_at,
+        records=records,
+        available=True,
+        complete=complete,
+        path_last_written_at=path_watermark,
+        issues=issues,
+    )

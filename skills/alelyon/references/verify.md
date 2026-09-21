@@ -1,114 +1,64 @@
-# Verifying a Certified Number Envelope
+# Verify a number receipt
 
-Load this when checking someone else's receipt, or when a verdict needs explaining.
-
-## The verdict object
-
-`verify_envelope(...)` returns a dict. Read it in this order:
-
-```python
-{
-  "ok": bool,                  # every applicable check passed
-  "checks": {                  # per-check tri-state
-      "authenticity": True,    #   True  = established
-      "width": None,           #   None  = NOT ESTABLISHED (not "passed", not "failed")
-      "witness": None,         #   False = failed
-      ...
-  },
-  "reasons": [...],            # human-readable
-  "reason_classes": [...],     # machine-stable vocabulary -- key on THESE
-  "width_trust": "authenticated" | "refusal" | ...,
-  "provider_trust": "signer-attested" | ...,
-}
-```
-
-**`None` is a third state.** Do not collapse it into pass or fail. A `null` width means
-the width was not re-derived on this build — which on a fallback install is the honest
-outcome, not a defect.
-
-Key on `reason_classes`, never on `reasons`. The prose can be reworded; the classes are
-frozen in two places (the `REASON_CLASSES` / `ADVISORY_REASON_CLASSES` frozensets and
-machine-parsed blocks in the spec) and CI-diffed, so adding one means editing both.
-
-## Advisory versus disqualifying
-
-There are 67 reason classes. Six are **advisory** — they appear without forcing
-`ok=false`:
-
-```
-scalar-tolerance-window     transparency-partial       unspecified-substrate
-width-substrate-independent witness-partial            witness-unpinned
-```
-
-The other 61 are disqualifying. When you report a verdict, quote the classes; an
-advisory class in the list is not a failure, and reporting it as one is its own error.
-
-The classes cluster by what they indict:
-
-| Prefix | What went wrong |
-|---|---|
-| `input-`, `scalar-`, `width-`, `budget-`, `program-` | The replay disagrees with the receipt. |
-| `key-`, `unsigned`, `bad-signature`, `no-pinned-key` | Signature or key-lifecycle problem. |
-| `anchor-` | Transparency anchoring: the per-row Δ is not backed by capture-time commitments. |
-| `provider-` | Provider-attempt evidence is missing, partial, or inconsistent. |
-| `witness-` | Co-signature over the STH is absent, unpinned, or invalid. |
-| `substrate-`, `unspecified-substrate` | The width cannot be re-derived on this build. |
-
-## Keys must arrive out of band
+Inspect the installed verifier and its input requirements before interpreting
+a receipt:
 
 ```bash
-alelyon-verify verify --envelope receipt.json --data extract.json --key <hex>
+alelyon-verify version
+alelyon-verify verify --help
+alelyon-verify verify --envelope receipt.json --data extract.json --key <pinned-public-key-hex>
 ```
 
-`--key` is 64 hex characters obtained by a path the receipt did not travel. This is not
-ceremony: an envelope carrying its own key authenticates the envelope to itself.
+The public distribution is `alelyon-os`; the verifier name is its console
+command. Obtain the issuer's public key independently of the receipt and retain
+your own copy of the inputs. A receipt that supplies its own trusted key does
+not establish issuer authenticity.
 
-Never write "anyone can verify" about this. Anyone holding the key, out of band, can.
+## Read the complete verdict
+
+`verify_envelope` returns `ok`, individual `checks`, human-readable
+`reasons`, machine-readable `reason_classes`, and trust qualifiers such as
+`width_trust` and `provider_trust`.
+
+A check can be true, false or null. Null means the check did not establish its
+property. Preserve it in interfaces and reports. An overall failure may be the
+correct result for a malformed receipt or an unavailable replay substrate.
+
+Use reason classes for branching and human-readable reasons for explanation.
+`REASON_CLASSES` and `ADVISORY_REASON_CLASSES` are defined in the verifier
+and mirrored by the specification's parsed vocabulary. Advisory classes can
+appear in a successful verdict. Do not freeze their number in application prose.
+
+## Width and provenance
+
+Nonzero-width replay can require the specified deterministic kernel. A fallback
+must leave a width unverified when it cannot reproduce it. Exact-zero width
+under the applicable capture law avoids that substrate sensitivity.
+
+Input digest agreement detects revision of committed inputs. It cannot discover
+fabrication at capture. Provider-attempt evidence establishes recorded requests
+and outcomes, not independence of upstream providers or truth of the observations.
 
 ## Key lifecycle
 
-An issuer who rotates keys publishes a manifest. Checking a signature without checking
-whether the key was in service at signing time leaves a revoked key working forever.
+Use the manifest command when checking lifecycle records:
 
 ```bash
-alelyon-verify manifest \
-  --manifest keys.json \
-  --root <ROOT key, out of band> \
-  --checkpoint ckpt.json --checkpoint-key <hex, out of band> \
-  --trusted-checkpoint previously-retained.json \
-  [--at <epoch seconds>]
+alelyon-verify manifest --help
+alelyon-verify manifest --manifest keys.json --root <pinned-root-hex> --checkpoint checkpoint.json --checkpoint-key <pinned-checkpoint-key-hex> --trusted-checkpoint retained.json
 ```
 
-Every one of `--root`, `--checkpoint`, `--checkpoint-key` and `--trusted-checkpoint` is
-**required**. A chain checked against nothing vouches for nothing, and a checkpoint with
-no retained predecessor cannot detect a rewind.
+Root, checkpoint key and retained checkpoint are separate trust inputs.
+Do not remove one to make an incomplete chain pass. Receipt verification can
+also receive `--key-manifest` and `--manifest-root`; inspect the command's
+requirements for the installed version.
 
-To fold the key check into a receipt check, pass `--key-manifest` plus `--manifest-root`
-to `alelyon-verify verify`. A revoked signing key is then refused rather than reported.
+## Local acceptance
 
-## Conformance
+Run `alelyon-verify selftest` and inspect the golden and forgery outcomes.
+Every bundled forgery must reject for its specified reason. A fallback can
+honestly leave substrate-sensitive goldens incompletely verified; a specified
+deterministic substrate must fully verify its goldens.
 
-```bash
-alelyon-verify version    # verifier version, spec version, substrate, envelope types
-alelyon-verify selftest   # installed suite totals and results, no network
-alelyon-verify vectors    # list the bundled vectors
-```
-
-The suite grows as adversarial cases are added, so its exact totals belong to the
-installed `selftest` output rather than this reference. Every bundled forgery must
-reject for its declared reason. A fallback build must leave substrate-sensitive
-nonzero-width goldens not fully verified, while exact-zero goldens may verify fully. A
-specified deterministic substrate must fully verify every bundled golden.
-
-## What a pass is worth
-
-It establishes: the committed inputs were not revised after the fact, and the scalar
-replays from them under the pinned key.
-
-It does not establish: that the inputs were true at capture. A producer who fabricates at
-capture time signs a receipt that verifies perfectly. This is a design truth, not a gap
-to be closed by the verifier — the verifier sits downstream of capture and cannot see
-behind it.
-
-Report both halves. Reporting only the first is the misreading the claim discipline
-exists to prevent.
+This is evidence about the installation and inputs used in that run. External
+verification requires an actual external recipient and a recorded exercise.

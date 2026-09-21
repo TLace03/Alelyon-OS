@@ -6,8 +6,85 @@ refuses rather than crashing."""
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from typing import Callable
+from urllib.parse import urljoin, urlsplit
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_CREDENTIAL_HEADER_NAMES = frozenset({"authorization", "x-api-key"})
+
+
+def _request_has_credentials(request: urllib.request.Request) -> bool:
+    """Whether this request carries one of Oracle's credential headers.
+
+    The vocabulary is deliberately closed.  Adding another provider-specific
+    secret header requires adding it here and exercising the redirect policy.
+    """
+    return any(
+        str(name).casefold() in _CREDENTIAL_HEADER_NAMES
+        for name, _value in request.header_items()
+    )
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """A URL origin with default ports made explicit.
+
+    Redirect policy is an origin boundary, not merely a host boundary: an
+    HTTPS downgrade or a move to another port must not inherit a secret header.
+    """
+    parts = urlsplit(str(url or ""))
+    scheme = parts.scheme.casefold()
+    host = (parts.hostname or "").casefold().rstrip(".")
+    if not scheme or not host:
+        raise ValueError("request URL has no origin")
+    port = parts.port
+    if port is None:
+        port = _DEFAULT_PORTS.get(scheme)
+    return scheme, host, port
+
+
+class _CredentialRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects unless one would move a credential header.
+
+    Python's default redirect handler copies ordinary request headers,
+    including ``Authorization`` and ``x-api-key``.  That is safe only while
+    the origin remains the same.  Refusal happens before the redirected
+    request is constructed, so the second origin never receives the secret.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        if _request_has_credentials(req):
+            try:
+                same_origin = _origin(req.full_url) == _origin(target)
+            except (TypeError, ValueError):
+                same_origin = False
+            if not same_origin:
+                if fp is not None:
+                    fp.close()
+                raise urllib.error.HTTPError(
+                    target,
+                    code,
+                    "credential-bearing cross-origin redirect refused",
+                    headers,
+                    None,
+                )
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+def oracle_urlopen(request: urllib.request.Request, *, timeout: float):
+    """Open one Oracle request without forwarding credentials cross-origin.
+
+    Keyless requests retain urllib's existing behavior.  Credential-bearing
+    requests get a request-local opener whose redirect handler refuses before
+    a secret header could cross an origin boundary.
+    """
+    if not _request_has_credentials(request):
+        return urllib.request.urlopen(request, timeout=timeout)
+    opener = urllib.request.build_opener(_CredentialRedirectHandler())
+    return opener.open(request, timeout=timeout)
 
 
 def normalize_ollama_chat_url(base_url: str) -> str:
@@ -62,7 +139,7 @@ _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
-def anthropic_llm(model: str = "claude-sonnet-4-5-20250929", *,
+def anthropic_llm(model: str = "claude-sonnet-5", *,
                   max_tokens: int = 1200, temperature: float = 0.1,
                   timeout: float = 90.0) -> Callable[[str], str]:
     """The cloud drop-in, used when `ANTHROPIC_API_KEY` is present. Same
@@ -93,7 +170,7 @@ def anthropic_llm(model: str = "claude-sonnet-4-5-20250929", *,
                 _ANTHROPIC_URL, data=body,
                 headers={"Content-Type": "application/json", "x-api-key": key,
                          "anthropic-version": _ANTHROPIC_VERSION})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with oracle_urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             parts = data.get("content") or []
             return "".join(p.get("text", "") for p in parts
@@ -200,7 +277,7 @@ def openai_compatible_llm(
         try:
             req = urllib.request.Request(
                 endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with oracle_urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             choices = data.get("choices") or []
             if not choices:

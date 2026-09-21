@@ -255,6 +255,46 @@ def _open_rules(vocab: Vocabulary) -> str:
     )
 
 
+def conversation_messages(question: str, results: Sequence[T.ToolResult],
+                          history: Sequence = (), *, note: str = "",
+                          persona: str = "",
+                          domain: Optional[Domain] = None):
+    """The open-mode narration as a NATIVE conversation.
+
+    The same content `open_answer_prompt` renders into one string, placed
+    where the wire actually has slots for it: the persona and the open-mode
+    rules as the SYSTEM message — instruction, not something the user said —
+    the history as real user/assistant turns, and the fact sheet beside the
+    question it was retrieved for, in the final user turn.
+
+    Two deliberate differences from the flattened form, because a native
+    conversation can afford them: each history turn carries up to 4,000
+    characters rather than 400 — a pasted stack trace survives — and the roles
+    are the wire's own, so a model trained on conversations reads a
+    conversation instead of a transcript pasted into a monologue.
+    """
+    from alelyon.runtime.oracle.answer.chat import ChatMessage
+
+    vocab = _vocab(domain)
+    who = persona or vocab.persona
+    messages = [ChatMessage("system", f"{who}\n\n{_open_rules(vocab)}")]
+    for h in history[-8:]:
+        role = ("assistant" if getattr(h, "role", "user") == "assistant"
+                else "user")
+        text = str(getattr(h, "text", ""))[:4000]
+        if text.strip():
+            messages.append(ChatMessage(role, text))
+    if results:
+        sheet = "\n".join(r.as_prompt_block() for r in results)
+        data = (f"The {vocab.data_noun} retrieved for this question "
+                f"(deterministic, computed just now):\n{sheet}\n\n")
+    else:
+        data = f"No {vocab.tool_noun} was queried for this question.\n\n"
+    aside = f"Router note: {note}\n\n" if note else ""
+    messages.append(ChatMessage("user", f"{data}{aside}{question}"))
+    return messages
+
+
 def open_answer_prompt(question: str, results: Sequence[T.ToolResult],
                        history: Sequence = (), *, note: str = "",
                        persona: str = "",
@@ -343,6 +383,15 @@ class AnalystAnswer:
     #: mention means "this number is the model's, not a desk's" â€” which is worth
     #: showing and is not a defect.
     advisory: bool = False
+    #: The backend saw the conversation as a native message array — system
+    #: prompt in its own slot, history as real turns — rather than a
+    #: flattening. Recorded because "what did the model actually read" is a
+    #: question a transcript must be able to answer.
+    native: bool = False
+    #: Token accounting, exactly as the wire reported it. `None` is UNMEASURED
+    #: — a backend that reported nothing must not appear to have cost nothing.
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
     #: The generation stopped before the model finished â€” a dropped connection
     #: or a size ceiling. The text is real as far as it goes, and a half answer
     #: presented as a whole one is the model's first thought published as its
@@ -425,6 +474,57 @@ def _stage(on_stage, key: str, detail: str = "") -> None:
         on_stage(key, detail)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _chatter(llm) -> Optional[Callable[..., Any]]:
+    """The provider chain's conversation-native seam, if this `llm` has one.
+
+    Discovered exactly as `_streamer` discovers streaming: `llm` is documented
+    as any `Callable[[str], str]`, and a plain lambda simply does not have the
+    seam. When it exists, open-mode narration sends a real message array —
+    system prompt in its slot, history as turns — instead of one flattening.
+    """
+    fn = getattr(llm, "chat", None)
+    return fn if callable(fn) else None
+
+
+def _chat_narration(chat, messages, on_text, cancel):
+    """One conversation-native narration, scratchpad filtered on the way past.
+
+    The streaming twin of `_stream_narration`, over the chat seam: the sink
+    sees what the transcript will keep. Without a sink the reply comes back
+    whole; the ThinkFilter is only needed on the incremental path, because the
+    whole-reply path already goes through `_strip_think`.
+    """
+    from alelyon.runtime.oracle.answer.chat import ChatReply
+    from alelyon.runtime.oracle.answer.streaming import ThinkFilter
+
+    if on_text is None:
+        try:
+            return chat(messages, None, cancel)
+        except Exception as exc:  # noqa: BLE001 — a dead model must not eat the facts
+            return ChatReply("", False,
+                             error=f"narration failed: {type(exc).__name__}")
+
+    scratchpad = ThinkFilter()
+
+    def _sink(fragment: str) -> None:
+        visible = scratchpad.feed(fragment)
+        if visible:
+            on_text(visible)
+
+    try:
+        reply = chat(messages, _sink, cancel)
+    except Exception as exc:  # noqa: BLE001
+        return ChatReply("", False,
+                         error=f"narration failed: {type(exc).__name__}")
+    tail = scratchpad.flush()
+    if tail:
+        try:
+            on_text(tail)
+        except Exception:  # noqa: BLE001
+            pass
+    return reply
 
 
 def _streamer(llm) -> Optional[Callable[..., Any]]:
@@ -621,7 +721,34 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
     truncated = False
     cancelled = False
     streamed = False
-    if not prose:
+    native = False
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    chat = _chatter(llm) if is_open else None
+    if not prose and chat is not None:
+        # The conversation-native seam, open-mode only — the same boundary as
+        # streaming, and for the same reason: the grounded contract's prompt
+        # IS its cage, and rendering it as a chatty system message would be a
+        # different contract wearing the same badge.
+        _stage(on_stage, STAGE_WRITING, "writing the answer")
+        reply = _chat_narration(
+            chat,
+            conversation_messages(question, results, history,
+                                  note=router_note, persona=persona,
+                                  domain=domain),
+            on_text, cancel)
+        prose = _strip_think((reply.text or "").strip())
+        streamed = on_text is not None
+        cancelled = bool(reply.cancelled)
+        truncated = bool(prose) and not reply.complete and not cancelled
+        native = bool(getattr(reply, "native", False))
+        usage = getattr(reply, "usage", None)
+        if usage is not None:
+            prompt_tokens = usage.prompt_tokens
+            completion_tokens = usage.completion_tokens
+        if not prose and reply.error:
+            note = f"{note} · {reply.error}".strip(" ·")
+    elif not prose:
         narration = (open_answer_prompt(question, results, history,
                                         note=router_note, persona=persona,
                                         domain=domain)
@@ -667,6 +794,8 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
                              provider=provider_name, plan_note=note, mode=mode,
                              domain=domain.key,
                              cancelled=cancelled, streamed=streamed,
+                             native=native, prompt_tokens=prompt_tokens,
+                             completion_tokens=completion_tokens,
                              error=("stopped before the model had written "
                                     "anything" if cancelled else
                                     "the model returned an empty answer"))
@@ -700,7 +829,9 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
                          deterministic=det is not None, facts_only=facts_only,
                          mode=mode, domain=domain.key, advisory=is_open,
                          truncated=truncated, cancelled=cancelled,
-                         streamed=streamed)
+                         streamed=streamed, native=native,
+                         prompt_tokens=prompt_tokens,
+                         completion_tokens=completion_tokens)
 
 
 def _stream_narration(stream, prompt: str, on_text, cancel):

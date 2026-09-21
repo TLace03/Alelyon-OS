@@ -64,6 +64,8 @@ _TOOL_CONVENTIONS: tuple[tuple[str, str], ...] = (
     (".cursor/worktrees/", "cursor"),
     (".copilot/worktrees/", "copilot"),
     (".antigravity/worktrees/", "antigravity"),
+    # Agents the Lattice desktop app starts (lattice_service.agents).
+    (".lattice/worktrees/", "lattice"),
     (".git/worktrees/", "git-native"),
 )
 

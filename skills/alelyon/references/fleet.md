@@ -1,107 +1,74 @@
-# Fleet — several agent sessions in one repository
+# Coordinate repository work
 
-Load this when more than one agent session is working in the same checkout, or when you
-need to know whether an area is already taken before you start editing.
+The fleet tools expose shared findings, claims and conversations. They help
+sessions avoid duplicated work; they do not grant authority or lock files.
 
-```bash
-alelyon-fleet <command>      # who is where, what they found
-alelyon-chat  <command>      # channels, threads, mentions
-alelyon-ledger <command>     # the ledger's own store
-```
-
-Three CLIs rather than one because they answer different questions and write different
-stores. Folding `post` in beside `claim` would make a routine message read as an
-operational act; overloading one `--database` flag would point it at two different files
-depending on the subcommand.
-
-## Orient before you edit
+## Inspect before editing
 
 ```bash
-alelyon-fleet status         # who is working where
-alelyon-fleet areas          # the coordinate space in force, AND ITS SOURCE
-alelyon-fleet open-areas     # areas with no session on them
-alelyon-fleet whoami         # who you would publish as, and whether that is enough
-alelyon-fleet inbox          # findings addressed to this session
+alelyon-fleet whoami
+alelyon-fleet status
+alelyon-fleet inbox
+alelyon-fleet areas
+alelyon-fleet open-areas
 ```
 
-`areas` reporting its source matters: the coordinate space is declared by the repository
-under observation, in its own `.alelyon/fleet.toml`, or discovered from tracked
-directories, or **empty**. An empty space means everything is `UNMAPPED`, and that is
-said out loud rather than papered over with a default.
+In the private source checkout, also run `tools/preflight.py` with a task
+intent, stable session name and bounded paths. Read its verdict and any overlapping
+work before editing. A refused intent registration must not be described as recorded.
 
-## Claims are advisory
+## Claims and findings
 
 ```bash
-alelyon-fleet claim <area> --note "..."
-alelyon-fleet release <area>
+alelyon-fleet --session <stable-name> claim <area> --note "<bounded task>"
+alelyon-fleet --session <stable-name> publish --kind defect-found --body "<finding>" --about <path>
+alelyon-fleet --session <stable-name> ack <finding-id>
+alelyon-fleet --session <stable-name> release <area>
 ```
 
-A claim is an **advisory hold**. It does not lock anything. Its value is that another
-session can see it before starting work in the same place, which is worth more than a
-lock nobody can override.
+Read each result. A claim is advisory; another session can claim the same area.
+A finding's body is declared evidence. Its routing can derive from observed paths
+or from declared claims, membership and explicit addressing. Preserve those labels.
+An empty inbox does not establish that nobody is working nearby.
 
-**Read the claim command's output in full.** A claim can be refused or contested, and a
-session that assumes success because the command returned is exactly the failure this
-tool exists to prevent.
+Use operational finding kinds for interfaces, defects, blockers and landed work.
+Reserve chat for conversation. A publication that reaches nobody has not warned
+the fleet.
 
-## Publishing findings
+## Conversation
 
 ```bash
-alelyon-fleet publish --kind <kind> --body "..." \
-    --about path/to/file.py            # repeatable; ROUTING DERIVES FROM THESE
-    [--to-area A | --to-session S | --broadcast]
-    [--severity info|warn|urgent]
+alelyon-chat --session <stable-name> channels
+alelyon-chat --session <stable-name> read fleet
+alelyon-chat --session <stable-name> post fleet "<message>" --about <path>
+alelyon-chat --session <stable-name> reply <message-id> "<reply>"
+alelyon-chat --session <stable-name> unread
 ```
 
-`--about` paths decide who hears it. A finding published with no paths and no address
-reaches nobody in particular. `--broadcast` reaches every live session — use it sparingly;
-it is the option that trains people to ignore the channel.
+Unread exit 1 means messages are waiting. A channel is not access-controlled;
+keep secrets and private user data out of the coordination store. Acknowledgement
+does not mean agreement.
 
-`--to-session` is recorded as **DECLARED**, not established. You are asserting who you
-addressed, and the record says so.
+## Attribution and state
 
-Acknowledge what you read: `alelyon-fleet ack <finding_id>`.
+Use `whoami --at-least CORROBORATED` when an operation requires corroborated
+identity. Passing a session name is a declaration until independent metadata
+supports it. Never borrow another session's identity to satisfy a write gate.
 
-## Assurance levels
+The CLI's default bus uses the primary repository's shared Git anchor where
+available and falls back to its resolved local state directory. An explicit
+`--database` chooses the store. The desktop's selected-repository lookup
+separately adopts an eligible existing bus or uses a repository-scoped local
+namespace. Linked worktrees can share a bus; separate clones do not automatically
+share one.
 
-`alelyon-fleet whoami --at-least CORROBORATED` exits non-zero when the current
-attribution does not reach the named level. Use it as a gate before a durable write: a
-session that cannot establish who it is should not be publishing as anyone.
+## Agent lifecycle and finishing
 
-## Where work is stuck
+A launcher command such as `resume --wake` requires explicit owner authority
+and a selected model. It is not equivalent to sending an existing teammate a
+message. Follow the current harness's documented resume/follow-up behavior.
 
-```bash
-alelyon-fleet waiting           # sessions that stopped and are waiting for you
-alelyon-fleet resume            # what is dormant, and what waking it would involve
-alelyon-fleet disciplines       # which specialist rules govern what you touched
-```
-
-In a full source checkout, where the complete work-supply planning graph is present,
-`alelyon-fleet supply` adds the fleet-as-production-line view. The public wheel omits
-that source-only graph, so its CLI does not advertise the command. Do not infer a broken
-installation from its absence.
-
-Where `supply` is available, `supply --no-corpus` is much faster and the line is then
-**empty** — which is a missing reading, not an idle fleet. The tool says so rather than
-showing you a clean board. Same for `waiting --max-sessions`: anything the cap hides is
-reported as hidden.
-
-That pattern is the whole design. A tool that cannot see something reports that it cannot
-see it, because a blank panel and a clean panel look identical and mean opposite things.
-
-## Starting agents is Tier 3
-
-`alelyon-fleet resume --wake <label>` starts nothing without `--authorise`. Without it
-the answer is always `no-owner-authority`, which is the safe default rather than a fault.
-`--model` is never defaulted: the layer space says what *rank* work is, never which model
-should do it.
-
-## State locations
-
-`$ALELYON_HOME` → repository root → per-user platform directory, with `paths.INSTALLED`
-recording which resolution was used. An installed wheel has no `pyproject.toml` above it,
-so the repo-root branch does not apply and state goes to the platform directory rather
-than into `site-packages`.
-
-Findings do not cross checkouts. A separate worktree has a separate bus, so a finding
-published in one is not visible in another.
+The private source checkout uses `tools/relay.py` to reconcile overlapping
+proposals and record verification receipts. Follow AGENTS.md §18. The public
+wheel may omit source-only planning commands such as `supply`; inspect the
+installed command's help before assuming that capability exists.

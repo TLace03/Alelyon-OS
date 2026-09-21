@@ -1,167 +1,97 @@
 # alelyon-os
 
-The open part of the Alelyon Deterministic Quantitative Computational Operating System,
-as one installable distribution.
+This distribution contains Alelyon's reviewed public Python surface. The exact
+module set is declared in `subsystems.py` and checked by `build_wheel.py`.
+The private monorepo contains additional products and runtime components that
+are not part of this package.
 
-```bash
-pip install alelyon-os
-pip install "alelyon-os[sdk]"     # additionally installs httpx, for the API client
+## Install
+
+```sh
+python -m pip install alelyon-os
+alelyon-verify selftest
 ```
 
-Source: <https://github.com/TLace03/Alelyon-OS>
+The package manifest requires Python 3.10 or newer. The source version in
+`pyproject.toml` is a build input, not proof that version is on an index. Read
+the installed version and conformance result for the artifact you use.
 
-## Stability: this is an unstable surface at 0.x
+This wheel is not minimal: every installation receives the full reviewed file
+set. Extras gate dependencies, not files.
 
-**No API or behaviour here carries a compatibility promise yet.** Names,
-signatures, return values and refusal conditions may change in any release
-before 1.0, without a deprecation period. `Development Status :: 3 - Alpha` in
-the package metadata says the same thing; this says it where a reader will
-actually see it.
+The API is unstable and carries no compatibility promise before 1.0. Pin the
+exact artifact and test upgrades against the operations you depend on.
 
-That is a decision, not an oversight, and the honest reason is worth stating: a
-release in this series changed `alelyon.runtime.vector.compute.propagate` to
-**refuse** a source with non-finite uncertainty, where it had previously
-returned statistics that were silently `nan`. The old behaviour hid the input
-carrying the most uncertainty from the variance attribution that exists to name
-it. That fix was correct and it broke behaviour a caller could have depended on.
-A stability promise at 0.x would have forbidden it, or made it a major
-version — and this surface is not finished making corrections of that kind.
-
-If you need to pin against change, pin the exact version and read the changelog
-before moving. If you depend on this and want a stability commitment, say so —
-the promise is cheap to make once the corrections stop, and dishonest before.
-
----
-
-## What is in here
-
-| Import | What it does |
+| Extra | Dependencies from the package manifest |
 |---|---|
-| `alelyon.verify` | Verify a Certified Number Envelope by replay against your own copy of the inputs, under a key you pin out of band. Ships the `alelyon-verify` CLI, the normative spec, and the conformance vectors. |
-| `alelyon.runtime.vector.lattice` | Exact coordinate registration: immutable coordinate contracts, exact target-to-source transforms with a declared loss/invertibility surface, canonical byte encoding with content commitments, a replay checker, and a signed Registration Certificate. |
-| `alelyon.runtime.vector.lattice.morphometry` | Model Morphometry — a canonical `(block, module)` template for transformer models and an exact registration of a model's native axis order onto it. |
-| `alelyon.runtime.common` fleet modules | Fleet coordination plus read-only organization, desk/team, and model-routing planners. Observed and declared records stay separate; planners expose what they withheld and never spawn work. |
-| `alelyon.runtime.vector.compute` | A typed dependency DAG with Monte-Carlo uncertainty propagation and variance attribution. |
-| `alelyon.platform.sdk` | Python client for the Alelyon read-only HTTP API. Requires the `sdk` extra. |
+| `sdk` | `httpx>=0.27` |
+| `stream` | `pyzmq>=25` |
+| `dev` | `pytest>=7`, `httpx>=0.27` |
 
-## Plan a bounded development fleet
+## Public surfaces
 
-The public fleet surface can place repository paths into caller-declared areas,
-select a desk and team under an explicit concurrency budget, and expose every
-demand it withheld. The planner is pure: it does not spawn an agent, open a
-worktree, reserve a lane, or write a record.
+The allowlist includes CNE production/replay, coordinate registration and model
+metadata morphometry, uncertainty-aware compute, fleet/worktree coordination,
+the workspace conversation surface and the API client. Consult the actual
+allowlist before assuming a private-source API is available in an install.
+The private capture/history services, desktop, broker workflows and identity
+infrastructure do not become public because they share a namespace.
 
-```python
-from alelyon.runtime.common import development_chain as org
-from alelyon.runtime.common import desk_dispatch, worktree_areas
+The package installs these entry points:
 
-snapshot = org.build_snapshot(
-    version=1,
-    desks=(org.DevelopmentDesk(
-        "runtime", "Runtime", 1, areas=("runtime.common",)),),
-    teams=(org.DevelopmentTeam(
-        "core", "Core", "runtime", 1, owned_paths=("src",)),),
-    workers=(),
-)
-space = worktree_areas.AreaSpace(rules=(
-    worktree_areas.Rule("src/", "runtime.common", depth=1),
-)).normalised()
-plan = desk_dispatch.plan(
-    snapshot,
-    (desk_dispatch.Demand(
-        "parser", "Parser", paths=("src/parser/core.py",), weight=10),),
-    budget=desk_dispatch.DispatchBudget(max_desks=1),
-    space=space,
-)
-
-print(plan.activations)
-print(plan.withheld)
-```
-
-Model routing is a separate read-only question. `fleet_dispatch.recommend()`
-combines the hierarchy placement with an existing fleet ledger when one is
-available; it never creates a ledger merely to report that no measurement
-exists. A named model is the best measured candidate, not a claim that it is the
-best possible model. Callers remain responsible for total expected cost,
-capability, risk, and acceptance evidence.
-
-```python
-from alelyon.runtime.common import fleet_dispatch
-
-route = fleet_dispatch.recommend("implement the parser")
-print(route.layer, route.model, route.provenance, route.reason)
-print(fleet_dispatch.limits())
-```
+| Command | Implementation |
+|---|---|
+| `alelyon-verify` | `alelyon.verify.cli:main` |
+| `alelyon-fleet` | `alelyon.runtime.common.fleet_cli:main` |
+| `alelyon-chat` | `alelyon.runtime.common.chat_cli:main` |
+| `alelyon-ledger` | `alelyon.runtime.common.fleet_ledger_cli:main` |
+| `alelyon-workspace` | `alelyon.runtime.oracle.assistant.cli:main` |
 
 ## Verify a receipt
 
-```bash
-alelyon-verify selftest          # the bundled conformance suite; needs no network
-alelyon-verify verify --envelope receipt.json --data your_extract.json \
-    --key <the issuer's public key, obtained OUT OF BAND>
+```sh
+alelyon-verify verify --envelope receipt.json --data inputs.json --key PINNED_PUBLIC_KEY_HEX
 ```
 
-The key must reach you by some path the receipt did not travel. Verifying an envelope
-against a key embedded in that same envelope authenticates nothing.
+Obtain the issuer's public key through a trusted channel independent of the
+receipt. Supply your own input extract. A key embedded in the received receipt
+does not authenticate its issuer. A passing replay checks commitments and the
+computed result; it does not establish that the inputs were true at capture.
 
-**What a passing verification means.** The committed inputs were not revised after the
-fact, and the number replays from them under the pinned key. It does **not** establish
-that the inputs were true when captured: a producer who fabricates an extract at capture
-signs a receipt that verifies perfectly. See `SPEC-cne-v0.md`, shipped inside the wheel.
+Substrate-sensitive nonzero widths need the specified deterministic kernel for
+full replay. The fallback leaves that width unverified. Exact-zero widths can
+fully replay without that requirement. Record the complete verdict and reasons;
+successful JSON parsing or HTTP transport is not verification success.
 
-## Things worth knowing before you rely on this
+## Development and release boundary
 
-**Extras gate dependencies, not files.** Every install receives every module listed
-above. `[sdk]` adds `httpx`; it does not change what code is on disk. There is no way to
-install a subset.
+The public mirror is generated upstream. Edit the source allowlist and code,
+not generated mirror files. Maintainers validate staging, closure and clean
+installation with the dedicated builder; public export and package publication
+are separate authorized actions. Source traceability manifests describe an
+origin but are not authenticated proof of who ran the export.
 
-**`import alelyon.platform.sdk` fails without the `sdk` extra.** `client.py` imports
-`httpx` at module scope. This is the one deliberate sharp edge: someone installing this
-to check a receipt should not also acquire an HTTP client.
+```sh
+python packaging/alelyon-os/build_wheel.py --check-only
+python packaging/alelyon-os/build_wheel.py --check-closure
+python packaging/alelyon-os/build_wheel.py --verify-clean-install
+```
 
-**This wheel is not minimal, and does not claim to be.** Its predecessor `alelyon-verify`
-was a wheel containing only the verifier, and said so. That is not true of `alelyon-os`.
-What remains true, and is checked against the built artifact on every release, is the
-*boundary*: the wheel contains exactly a reviewed allowlist of files and nothing else.
-The capture engine, the history store, the GUI, the HTTP service, identity and auth, and
-every signing key are outside it.
-
-**Model Morphometry reads no weights.** It takes a deterministic inventory from a model
-runtime's *declared* metadata and runs no forward pass, so it measures declared
-architecture and storage precision — and nothing about learned behaviour.
-
-**The fleet modules are observational or advisory.** A claim is not a lock, and a
-finding's body is self-reported. Nothing in them verifies that another session's
-declaration is true. Repository policy requires a commanding layer to consult a
-dispatch plan when a hierarchy snapshot exists; the module cannot mechanically
-enforce that policy. A plan is not a token-cost or quality oracle and not an
-activation.
+These are source-maintainer commands, run from the private repository root.
+They do not substitute for the native, conformance and publication gates for
+the exact release.
 
 ## Migrating from the old packages
 
-`alelyon-sdk`, `alelyon-verify` and `alelyon-mock` were separate distributions and have
-been withdrawn from PyPI. Those project names are **no longer registered to Alelyon** and
-may be claimed by anyone; do not install them.
-
-| Was | Now |
-|---|---|
-| `pip install alelyon-verify` | `pip install alelyon-os` |
-| `from alelyon_sdk import AlelyonClient` | `from alelyon.platform.sdk import AlelyonClient` |
-| `alelyon-verify verify …` | unchanged — same console script |
-
-The SDK's import path changed because the public copy had drifted from the source it was
-generated from. It is now generated, so the two cannot diverge again.
+Use `alelyon-os` as the distribution. The verifier command remains
+`alelyon-verify`; the SDK import is `alelyon.platform.sdk`. The package's
+migration contract marks the former distribution names `alelyon-sdk`,
+`alelyon-verify` and `alelyon-mock` as no longer registered to Alelyon. Do not
+install from those names or assume that a later index listing belongs to this
+project.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT License ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
-
-at your option. Both texts ship inside the wheel.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this work by you shall be dual licensed as above, without any additional
-terms or conditions.
+The package manifest specifies `Apache-2.0 OR MIT`, at your option. The builder
+includes both `LICENSE-APACHE` and `LICENSE-MIT`; select either license under
+its terms.

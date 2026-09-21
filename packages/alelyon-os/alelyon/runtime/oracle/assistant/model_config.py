@@ -35,7 +35,7 @@ import ipaddress
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -54,6 +54,7 @@ CONFIG_SCHEMA_VERSION = 1
 MAX_CONFIG_BYTES = 1_048_576
 MAX_ENDPOINT_ROWS = 10_000
 MAX_ENDPOINT_FIELD_CHARS = 4_096
+_MAX_BUILTIN_ENDPOINT_ROWS = 64
 _NATIVE_PATH_TYPE = type(Path())
 
 
@@ -152,6 +153,33 @@ class ModelEndpoint:
             raise TypeError("endpoint flags must be exact bool values")
         if self.api_key_name and not _KEY_NAME_RE.fullmatch(self.api_key_name):
             raise ValueError("endpoint key name is invalid")
+        if self.kind == KIND_OPENAI and not self.base_url:
+            raise ValueError("OpenAI-compatible endpoints require a base URL")
+        if self.base_url:
+            raw_url = self.base_url.strip()
+            try:
+                parts = urlsplit(raw_url)
+                scheme = parts.scheme.casefold()
+                host = parts.hostname or ""
+                # Accessing ``port`` is validation: urllib otherwise defers a
+                # malformed port error until the user tries the endpoint.
+                parts.port
+            except ValueError as exc:
+                raise ValueError("endpoint base URL is invalid") from exc
+            if scheme not in {"http", "https"} or not host:
+                raise ValueError("endpoint base URL must use http or https")
+            if parts.username is not None or parts.password is not None:
+                raise ValueError("endpoint base URL must not contain userinfo")
+            if "?" in raw_url:
+                raise ValueError("endpoint base URL must not contain a query string")
+            if "#" in raw_url:
+                raise ValueError("endpoint base URL must not contain a fragment")
+            if self.api_key_name and scheme != "https" and not is_local_url(
+                self.base_url
+            ):
+                raise ValueError(
+                    "keyed non-loopback endpoints must use HTTPS"
+                )
 
     @property
     def local(self) -> bool:
@@ -180,12 +208,15 @@ class ModelEndpoint:
             return False
 
     def ready(self) -> bool:
-        return bool(self.enabled and self.model and self.has_key())
+        has_target = self.kind != KIND_OPENAI or bool(self.base_url.strip())
+        return bool(self.enabled and self.model and has_target and self.has_key())
 
     def status(self) -> str:
         """One sentence a user can act on."""
         if not self.enabled:
             return "disabled"
+        if self.kind == KIND_OPENAI and not self.base_url.strip():
+            return "no server URL set"
         if not self.model:
             return "no model name set"
         if self.needs_key and not self.has_key():
@@ -202,6 +233,22 @@ class LoadIssue(str, Enum):
     UNSUPPORTED_SCHEMA = "unsupported-schema"
     INVALID_ROW = "invalid-row"
     DUPLICATE_ENDPOINT_ID = "duplicate-endpoint-id"
+
+
+class MutationRefusalReason(str, Enum):
+    """Closed, content-free reasons a registry write did not begin."""
+
+    INCOMPLETE_REGISTRY = "incomplete-registry"
+
+
+class ModelConfigMutationRefused(RuntimeError):
+    """A requested mutation could not preserve the observed registry."""
+
+    def __init__(self, reason: MutationRefusalReason) -> None:
+        if type(reason) is not MutationRefusalReason:
+            raise TypeError("reason must be an exact MutationRefusalReason")
+        self.reason = reason
+        super().__init__(f"model endpoint registry mutation refused: {reason.value}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +270,9 @@ class ModelConfigLoadReport:
             type(endpoint) is not ModelEndpoint for endpoint in self.endpoints
         ):
             raise TypeError("endpoints must be a tuple of exact ModelEndpoint values")
-        if len(self.endpoints) > MAX_ENDPOINT_ROWS + len(_builtins()):
+        # Keep diagnostic construction pure. In particular, do not call the
+        # runtime-projected catalogue merely to derive a structural bound.
+        if len(self.endpoints) > MAX_ENDPOINT_ROWS + _MAX_BUILTIN_ENDPOINT_ROWS:
             raise ValueError("endpoint report exceeds its size bound")
         if type(self.complete) is not bool:
             raise TypeError("complete must be an exact bool")
@@ -240,8 +289,14 @@ class ModelConfigLoadReport:
 # ── the built-in catalogue ───────────────────────────────────────────────────
 #
 # Base URLs are stable; MODEL NAMES ARE NOT — vendors rename and retire them.
-# Every model field here is a starting point the user is expected to edit, which
-# is why the UI shows it as a text field rather than a fixed label.
+# Hosted/custom model fields are starting points the user may edit.  The
+# persisted ``ollama-local`` value remains a bounded compatibility row; product
+# composition projects ModelBar's Runtime selection through
+# :func:`runtime_endpoint` below. Keeping that projection out of the loader is
+# important: deployment observers inspect injected registries before Runtime
+# paths are bootstrapped and must not read owner preference state as a side
+# effect.
+
 
 def _builtins() -> List[ModelEndpoint]:
     return [
@@ -258,9 +313,38 @@ def _builtins() -> List[ModelEndpoint]:
                  "set a key name if your server requires one.",
         ),
         ModelEndpoint(
+            id="lmstudio", label="LM Studio (this machine)", kind=KIND_OPENAI,
+            base_url="http://localhost:1234/v1", model="",
+            enabled=False, builtin=True,
+            note="LM Studio's local server, on its default port. Keyless. "
+                 "Leave the model blank and pick from what the server lists.",
+        ),
+        ModelEndpoint(
+            id="llamacpp", label="llama.cpp server (this machine)",
+            kind=KIND_OPENAI, base_url="http://localhost:8080/v1", model="",
+            enabled=False, builtin=True,
+            note="llama-server on its default port. Keyless. Most builds "
+                 "serve one model and ignore the model field.",
+        ),
+        ModelEndpoint(
             id="anthropic", label="Anthropic", kind=KIND_ANTHROPIC,
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-5",
             api_key_name="ANTHROPIC_API_KEY", enabled=False, builtin=True,
+        ),
+        ModelEndpoint(
+            id="huggingface", label="Hugging Face (Inference Providers)",
+            kind=KIND_OPENAI, base_url="https://router.huggingface.co/v1",
+            model="", api_key_name="HF_TOKEN", enabled=False, builtin=True,
+            note="One token in front of the models hosted through Hugging "
+                 "Face's inference partners. Use a full model id such as "
+                 "openai/gpt-oss-120b; an optional :provider suffix pins "
+                 "which partner serves it.",
+        ),
+        ModelEndpoint(
+            id="cohere", label="Cohere", kind=KIND_OPENAI,
+            base_url="https://api.cohere.ai/compatibility/v1",
+            model="command-a-03-2025", api_key_name="COHERE_API_KEY",
+            enabled=False, builtin=True,
         ),
         ModelEndpoint(
             id="openai", label="OpenAI", kind=KIND_OPENAI,
@@ -465,7 +549,11 @@ def save(endpoints: List[ModelEndpoint]) -> Path:
     path = _config_path()
     rows = []
     for e in endpoints:
-        row = asdict(e)
+        # Endpoints are mutable because the settings UI edits built-ins. Re-run
+        # the constructor boundary before persistence so a caller cannot mutate
+        # a previously valid object into an unsafe URL and bypass validation.
+        validated = ModelEndpoint(**asdict(e))
+        row = asdict(validated)
         # Belt and braces. `ModelEndpoint` has no value field, but a future
         # edit adding one must not quietly start persisting secrets.
         for banned in ("api_key", "key", "secret", "token", "password"):
@@ -489,8 +577,43 @@ def get(endpoint_id: str) -> Optional[ModelEndpoint]:
     return None
 
 
+def runtime_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
+    """Project Runtime-owned state onto a persisted endpoint.
+
+    The built-in local Ollama row is a catalogue/configuration record. Its
+    active model belongs to ``local_model`` because ModelBar, headless callers,
+    and the implicit provider fallback all need the same selection. Custom
+    Ollama endpoints remain explicit and are returned unchanged.
+
+    This function is intentionally separate from :func:`load_with_report` so a
+    bounded/injected registry observation never reads owner preference state or
+    binds deployment paths.
+    """
+    if type(endpoint) is not ModelEndpoint:
+        raise TypeError("endpoint must be an exact ModelEndpoint")
+    if (
+        endpoint.id == "ollama-local"
+        and endpoint.kind == KIND_OLLAMA
+        and endpoint.builtin
+    ):
+        from alelyon.runtime.oracle.assistant import local_model as LM  # noqa: PLC0415
+
+        return replace(endpoint, model=LM.selected_model())
+    return endpoint
+
+
+def _entries_for_mutation() -> List[ModelEndpoint]:
+    """Return a complete observation or refuse before any write begins."""
+    report = load_with_report()
+    if not report.complete:
+        raise ModelConfigMutationRefused(
+            MutationRefusalReason.INCOMPLETE_REGISTRY
+        )
+    return list(report.endpoints)
+
+
 def upsert(endpoint: ModelEndpoint) -> Path:
-    entries = [e for e in load() if e.id != endpoint.id]
+    entries = [e for e in _entries_for_mutation() if e.id != endpoint.id]
     entries.append(endpoint)
     return save(entries)
 
@@ -499,7 +622,7 @@ def remove(endpoint_id: str) -> Path:
     """Delete a user entry. A built-in is disabled instead of removed, because
     it would reappear from the catalogue on the next load and look like a bug."""
     entries = []
-    for e in load():
+    for e in _entries_for_mutation():
         if e.id != endpoint_id:
             entries.append(e)
         elif e.builtin:
@@ -515,6 +638,7 @@ def ready_endpoints() -> List[ModelEndpoint]:
     free, private, and the book is on this machine. A cloud model is offered,
     never silently preferred.
     """
-    ready = [e for e in load() if e.ready()]
+    ready = [runtime_endpoint(e) for e in load()]
+    ready = [e for e in ready if e.ready()]
     ready.sort(key=lambda e: (not e.local, e.label.lower()))
     return ready

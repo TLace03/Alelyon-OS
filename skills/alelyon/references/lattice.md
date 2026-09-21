@@ -1,97 +1,58 @@
-# Lattice — exact coordinate registration
+# Coordinate registration and Model Morphometry
 
-Load this when registering one coordinate system onto another, or when auditing a
-transform chain someone else declared.
+The Vector lattice package represents coordinate contracts, exact transforms,
+their declared loss/invertibility properties, canonical encodings and signed
+registration certificates.
 
 ```python
 from alelyon.runtime.vector import lattice
 ```
 
-## What it is
+Use the exported contracts and registration functions for the installed version.
+A transform maps coordinates; it does not validate the underlying payload,
+establish model quality, or prove an optimization is best.
 
-Immutable coordinate contracts, exact target-to-source transforms carrying a declared
-loss/invertibility surface, compatibility refusals, a canonical byte encoding with
-content commitments, a replay checker that recovers a committed chain from those bytes
-and re-executes it, and a signed Registration Certificate for an exact correspondence.
+## Registration and replay
 
-## What it deliberately is not
+The entry points include `issue_registration_certificate`,
+`verify_registration_certificate`, `verify_transform_chain`,
+`read_certificate`, `read_transform_chain`, and `read_coordinate_space`.
 
-It does not read payloads, remap values, propagate uncertainty, or claim optimality.
-A signature binds bytes to a key; it does not establish who holds the key.
+Certificate verification checks more than whether a supplied chain executes:
+the registration procedure must also be able to produce the claimed
+correspondence. Preserve refusal results from contract and compatibility checks.
 
-Do not describe a registration as "validated data" — the payload was never opened.
+Canonical bytes and commitments detect changed records under their stated
+assumptions. A signature authenticates bytes to a pinned key; ownership of that
+key needs an independent trust arrangement.
 
-## Absences are signed content
+## Preserve absent fields
 
-The certificate populates **15** of the specification's **34** fields and carries the
-other **19 as named absences inside its signed bytes**.
+Read field coverage from `SPEC_CERTIFICATE_FIELDS`, `POPULATED_FIELDS` and
+`DECLARED_ABSENCES` in the certificate module. Do not repeat a field total
+from another schema version.
 
-This is the design's central move, and the thing to get right when reporting it: an
-unfilled field is not missing from the certificate. It is present, named, and signed as
-absent. A consumer can tell "this was not established" apart from "nobody thought about
-this", because the certificate commits to the difference.
+An absence has a field name, status and reason and is included in the signed
+record. Display those absences when summarizing a certificate. A blank cell
+would hide which properties were never established.
 
-When summarising a certificate, never render the 19 as blanks or drop them. `FieldStatus`
-and `FieldAbsence` exist to keep the distinction; carry it into your output.
+`inverse_consistency` reports agreement on derived probes, bounded by
+`MAX_PROBES`; it is not a universal invertibility proof.
+`execution_trace_commitment` binds the record to those probe executions.
 
-## The two measured bounds
+## Declared conversions
 
-Everything else in the certificate is structural. Exactly two things are *measured*, and
-both are weaker than the words for them usually suggest:
-
-- **`inverse_consistency`** — a **count over a derived probe sample**, not a proof that
-  the chain inverts everywhere. `derive_probe_coordinates` picks the probes;
-  `measure_inverse_consistency` tallies them, capped at `MAX_PROBES`.
-- **`execution_trace_commitment`** — binds that count to the probe executions it tallies,
-  so the number cannot be swapped for a friendlier one.
-
-Report `inverse_consistency` as "N of M probes inverted", never as "the transform is
-invertible".
-
-## Issuing and verifying
-
-```python
-cert   = lattice.issue_registration_certificate(...)
-report = lattice.verify_registration_certificate(cert, ...)   # -> CertificateReport
-```
-
-Verification **re-runs the registration ladder**, so a chain that registration would
-never have emitted is refused even when it replays cleanly. Replaying is necessary and
-not sufficient — a well-formed chain that could not have been produced legitimately is
-still rejected.
-
-Related: `verify_transform_chain`, `read_certificate`, `read_transform_chain`,
-`read_coordinate_space`, `chain_commitment`.
-
-## Declared transforms and audits
-
-The `Declared*` classes record what someone asserts a transform does:
-`DeclaredUnitConversion`, `DeclaredTimezoneConversion`, `DeclaredOrientationFlip`,
-`DeclaredReferenceShift`, `DeclaredLabelReindex`, `DeclaredCalendarAlias`.
-
-The `audit_*` functions check an assertion against the transform actually present:
-
-```python
-lattice.audit_declared_conversion(...)
-lattice.audit_timezone_transform(...)   # -> TimezoneAuditReport / TimezoneAuditVerdict
-```
-
-This is observed-versus-declared applied to geometry. The audit exists because a declared
-unit conversion that does not match the transform is exactly the class of error nobody
-catches by reading code.
+Declared unit, timezone, orientation, reference, label and calendar mappings
+state what a transform is supposed to do. Use the relevant `audit_*`
+function to compare the declaration with the actual transform. A declaration
+alone is not an observed conversion result.
 
 ## Model Morphometry
 
-A canonical `(block, module)` template for transformer models, and an exact registration
-of a model's native axis order onto it.
+`morphometry_canonical_space`, `register_model_morphometry`,
+`analyze_model_morphometry` and `certify_model_morphometry` apply coordinate
+registration to model structure and axis order. They do not inspect weights or
+establish capability, accuracy, reasoning quality or numerical equivalence.
 
-```python
-lattice.morphometry_canonical_space()
-lattice.register_model_morphometry(...)
-lattice.analyze_model_morphometry(...)
-lattice.certify_model_morphometry(...)
-```
-
-It registers **axis order and structure**. It does not inspect weights, and it makes no
-claim about model behaviour or quality. A morphometry certificate says two models' axes
-correspond exactly — nothing about what they compute.
+Source-checkout reference: `alelyon/runtime/vector/lattice/`.
+Focused certificate checks: `tests/vector/test_lattice_certificate.py`.

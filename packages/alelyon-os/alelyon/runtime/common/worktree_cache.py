@@ -778,6 +778,22 @@ def _selected_repository_state_root() -> Path:
     return Path(paths.user_state_home())
 
 
+def selected_repository_state_root() -> Path:
+    """Return the canonical per-user home for selected-repository state.
+
+    This is the public adapter for repository-scoped consumers outside this
+    module.  It deliberately delegates to the long-standing private seam so
+    existing hermetic tests and compatibility callers keep one state-location
+    policy: an explicit ``ALELYON_HOME`` wins, while a source checkout otherwise
+    uses the platform user-state home instead of writing selected-project state
+    back into that checkout's ``globals/`` directory.
+
+    The returned path is only arithmetic.  Calling this function creates no
+    directory or file.
+    """
+    return _selected_repository_state_root()
+
+
 def _superseded_selected_repository_state_root() -> Path | None:
     """Where this function used to answer, when that is a DIFFERENT directory.
 
@@ -1732,5 +1748,6 @@ __all__ = [
     "WorktreeCache",
     "WorktreeIdentity",
     "database_for", "default_database", "record_now", "repository_context_id",
-    "repository_inception", "stranded_buses", "superseded_selected_state",
+    "repository_inception", "selected_repository_state_root", "stranded_buses",
+    "superseded_selected_state",
 ]

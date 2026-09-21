@@ -1,81 +1,56 @@
-# The compute DAG — uncertainty propagation and variance attribution
+# Compute graph
 
-Load this when a result depends on several uncertain inputs and the point estimate alone
-would be misleading.
+Use the Vector computation graph for a calculation whose inputs carry declared
+uncertainty. It evaluates dependency nodes and can propagate sampled inputs
+through the same functions.
+
+## Example
 
 ```python
-from alelyon.runtime.vector.compute import (
-    ComputationGraph, Constant, Normal, TruncatedNormal, Empirical,
+from alelyon.runtime.vector.compute import ComputationGraph, Normal
+
+graph = (
+    ComputationGraph()
+    .add_input("volume", Normal(100, 5))
+    .add_input("unit_margin", Normal(8, 1))
+    .add("margin", lambda values: values["volume"] * values["unit_margin"],
+         ["volume", "unit_margin"])
 )
+points = graph.evaluate()
+result = graph.propagate(n_samples=4000, seed=17)
+margin = result.results["margin"]
+print(margin.point, margin.mean, margin.std, margin.q05, margin.q95)
+print(result.sensitivities["margin"])
 ```
 
-## Build, evaluate, propagate
+The distribution parameters are example declarations, not measured business data.
+Run the example to obtain output for your installed build.
 
-Construction order is free — node existence is validated lazily at evaluation time, so a
-node may reference dependencies added later.
+## Function contract
 
-```python
-g = (ComputationGraph()
-     .add_input("units", Normal(1000, 50))
-     .add_input("price", Normal(19.99, 0.5))
-     .add_input("cost",  Normal(11.00, 1.20))
-     .add("revenue", lambda i: i["units"] * i["price"], ["units", "price"])
-     .add("margin",  lambda i: i["revenue"] - i["units"] * i["cost"],
-          ["revenue", "units", "cost"]))
+Node functions receive their named dependencies in a mapping. During point
+evaluation values are scalars; during propagation they are sample arrays. Use
+elementwise functions that support both forms. Do not reduce across the sample
+axis inside a node.
 
-g.evaluate()                              # point value of every node
-r = g.propagate(n_samples=20_000, seed=11)
-```
+Dependencies can be registered before their nodes exist, but evaluation checks
+the graph. Inspect failure results instead of hiding missing dependencies or
+invalid inputs behind a default output.
 
-`fn(inputs)` receives a dict mapping each dependency name to its value — a scalar under
-`evaluate`, an `(n,)` array under `propagate`. Write node functions to work with both;
-plain arithmetic and NumPy ufuncs already do.
+`GraphResult` carries `results`, `sensitivities`, `samples` and `n_samples`.
+Each `NodeResult` includes the point estimate and sampled summary statistics.
+Use `keep=` to retain selected sample arrays and `attribute=` to choose
+attribution targets. Retaining arrays has a memory cost.
 
-## Reading the result
+## Interpretation
 
-`GraphResult` has four fields: `results`, `sensitivities`, `samples`, `n_samples`.
+Report the seed, sample count, declared distributions and sampled interval.
+A larger sample can reduce uncertainty in estimated quantiles; it does not
+eliminate uncertainty in the inputs or guarantee a narrower outcome interval.
 
-```python
-m = r.results["margin"]      # NodeResult: name point mean std q05 q50 q95
-r.sensitivities["margin"]    # variance share per source node
-```
+Variance attribution describes the sampled model. It is not a causal effect or
+proof that changing one input in the real world will have the same effect.
+Input distributions remain the caller's responsibility.
 
-Measured output of the graph above:
-
-```
-margin: point 8990  mean 8995  sd 1380  q05 6776  q95 11293
-variance share: {'cost': 0.755, 'price': 0.134, 'units': 0.111}
-```
-
-## Why this matters for how you report
-
-The point estimate is `8990`. The 5th–95th interval is `6776 … 11293`. Reporting the
-point alone implies a precision the inputs do not support — that is the
-observed-versus-declared failure in numeric clothing.
-
-**Attribution is the actionable part.** Cost uncertainty carries 75.5% of the variance in
-margin; tightening the price estimate would move almost nothing. When you present a
-propagated result, lead with the interval and the dominant contributor, not the mean.
-
-## Determinism
-
-`seed=` builds the RNG; pass an existing `MonteCarloSimulator` via `simulator=` to share
-one. Always pass a seed in anything you will report or test — an unseeded run gives a
-different interval each time, and a number that changes when rerun cannot be checked by
-whoever reads it.
-
-`keep=` returns raw `(n,)` sample arrays for named nodes (default: none, to avoid
-carrying large arrays). `attribute=` chooses which targets get variance decomposition
-(default: every sink).
-
-## Honest limits
-
-- These are **Monte-Carlo** estimates. The interval has its own sampling error; raising
-  `n_samples` narrows it. Do not quote propagated quantiles to more precision than the
-  sample size supports.
-- `sensitivities` is a **variance share under the sampled joint distribution**, not a
-  causal claim and not a derivative. It answers "where does the spread come from",
-  not "what happens if I change this".
-- Input distributions are **declared by you**. `Normal(11.00, 1.20)` is an assertion
-  about cost uncertainty. The propagation is exactly as good as that assertion, and the
-  library cannot check it.
+Source-checkout reference: `alelyon/runtime/vector/compute/`.
+Focused checks: `tests/vector/test_compute_graph.py`.

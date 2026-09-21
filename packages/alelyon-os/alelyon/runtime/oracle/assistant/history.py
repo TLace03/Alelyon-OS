@@ -19,6 +19,17 @@ A directory rather than one file, so a torn write in one thread cannot take the
 others down with it, and deleting a thread is an unlink rather than a rewrite of
 everybody's history.
 
+**Superseded turns stay in the record.** Regenerating an answer or editing a
+question replaces what follows it on screen, but the lines are not deleted:
+`supersede` marks them, `load_thread` leaves them out unless asked, and so does
+the model's context. A thread read back later can still show what was said
+before it was replaced.
+
+**More than one process may write a store.** The desktop window and the Lattice
+service can run at once against the same directory, and the index is a
+read-modify-write. Every write therefore holds an operating-system lock on the
+store's `.store.lock` file as well as the in-process lock.
+
 **Named stores.** Every function takes an optional `store` name. The default
 store is the Financial Markets analyst's, at the path above, and is what an
 unqualified call gets — this is the whole compatibility guarantee, and it is why
@@ -30,13 +41,15 @@ figures that have no business appearing in a general assistant's history.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from alelyon.runtime.common.paths import GLOBALS_DIR
 
@@ -83,6 +96,76 @@ def _index_path(store: str = ""):
     return _INDEX if root is _DIR else root / "index.json"
 
 
+#: How long a writer waits for another process's lock before writing anyway.
+#: Losing a reader's message to a stuck peer is worse than the race the lock
+#: exists to close, so the wait is bounded and the write proceeds after it.
+LOCK_WAIT_S = 10.0
+
+
+@contextlib.contextmanager
+def _store_lock(store: str = "") -> Iterator[None]:
+    """Hold the in-process lock and the store's operating-system lock.
+
+    The in-process lock is taken first, so threads in one process queue on it
+    rather than on the file. If the file lock cannot be taken within
+    `LOCK_WAIT_S` the write still happens under the in-process lock alone,
+    which is exactly the protection every write had before this lock existed.
+    """
+    with _LOCK:
+        root = _root(store)
+        handle = None
+        locked = False
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            handle = open(root / ".store.lock", "a+b")
+            locked = _os_lock(handle)
+        except Exception:  # noqa: BLE001 - a lock failure must not lose a write
+            locked = False
+        try:
+            yield
+        finally:
+            if handle is not None:
+                try:
+                    if locked:
+                        _os_unlock(handle)
+                finally:
+                    handle.close()
+
+
+def _os_lock(handle) -> bool:
+    deadline = time.monotonic() + LOCK_WAIT_S
+    if os.name == "nt":
+        import msvcrt
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.02)
+    import fcntl
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+
+def _os_unlock(handle) -> None:
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 
@@ -111,6 +194,15 @@ class Turn:
     # The reader stopped it themselves. Recorded separately from `truncated`: one
     # is a failure and the other is a decision.
     cancelled: bool = False
+    # Token accounting for the exchange that produced this turn, exactly as the
+    # wire reported it. None means the backend reported nothing — UNMEASURED —
+    # and must never be rendered as zero: a reader summing a thread's cost has
+    # to know which turns were counted and which were not.
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    # Replaced by a later version: an answer regenerated, or a question edited
+    # together with everything after it. Kept in the file; see `supersede`.
+    superseded: bool = False
 
     @property
     def grounded(self) -> bool:
@@ -126,6 +218,13 @@ class Thread:
     created: float
     updated: float
     turns: int = 0
+    # The provider this thread reopens with — "auto"/"local"/"cloud"/
+    # "endpoint:<id>", or "" for none. PINNED by the reader's choice, not derived
+    # from the turns: the choice can be made before the first turn exists, and a
+    # thread every turn of which was answered by Auto still deserves to reopen on
+    # what the reader picked. A stale pin (endpoint since removed) is the picker's
+    # problem to fall back from, not this store's to validate.
+    pinned_provider: str = ""
 
 
 def _now() -> float:
@@ -164,7 +263,8 @@ def _read_index_locked(store: str = "") -> List[Thread]:
             out.append(Thread(id=str(d["id"]), title=str(d.get("title", "")),
                               created=float(d.get("created", 0.0)),
                               updated=float(d.get("updated", 0.0)),
-                              turns=int(d.get("turns", 0))))
+                              turns=int(d.get("turns", 0)),
+                              pinned_provider=str(d.get("pinned_provider", ""))))
         except Exception:  # noqa: BLE001
             continue
     return out
@@ -196,7 +296,7 @@ def list_threads(store: str = "") -> List[Thread]:
 def new_thread(title: str = "", store: str = "") -> Thread:
     t = Thread(id=_new_id(), title=title or "New thread",
                created=_now(), updated=_now(), turns=0)
-    with _LOCK:
+    with _store_lock(store):
         rows = _read_index_locked(store)
         rows.append(t)
         _write_index_locked(rows, store)
@@ -207,7 +307,7 @@ def rename(thread_id: str, title: str, store: str = "") -> bool:
     title = " ".join(str(title or "").split())[:80]
     if not title:
         return False
-    with _LOCK:
+    with _store_lock(store):
         rows = _read_index_locked(store)
         for r in rows:
             if r.id == thread_id:
@@ -217,8 +317,27 @@ def rename(thread_id: str, title: str, store: str = "") -> bool:
     return False
 
 
+def pin_provider(thread_id: str, provider: str, store: str = "") -> bool:
+    """Pin the provider a thread reopens with; "" clears the pin.
+
+    Only the index row is touched — not `updated`, because pinning is not a new
+    message and must not reorder the thread list under the reader's hand. Returns
+    False for an unknown thread rather than creating one: a pin with no thread to
+    hold it is a caller bug, not a thread.
+    """
+    provider = str(provider or "").strip()
+    with _store_lock(store):
+        rows = _read_index_locked(store)
+        for r in rows:
+            if r.id == thread_id:
+                r.pinned_provider = provider
+                _write_index_locked(rows, store)
+                return True
+    return False
+
+
 def delete_thread(thread_id: str, store: str = "") -> bool:
-    with _LOCK:
+    with _store_lock(store):
         rows = _read_index_locked(store)
         keep = [r for r in rows if r.id != thread_id]
         if len(keep) == len(rows):
@@ -234,6 +353,14 @@ def delete_thread(thread_id: str, store: str = "") -> bool:
 
 
 # ── turns ────────────────────────────────────────────────────────────────────
+def _count(value) -> Optional[int]:
+    """A token count the record actually stated, or None. Never coerces an
+    absence into a zero — the two are different facts."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
 def _parse_turn(d: dict) -> Optional[Turn]:
     try:
         return Turn(
@@ -251,6 +378,11 @@ def _parse_turn(d: dict) -> Optional[Turn]:
             # exactly right: those answers all arrived whole.
             truncated=bool(d.get("truncated", False)),
             cancelled=bool(d.get("cancelled", False)),
+            prompt_tokens=_count(d.get("prompt_tokens")),
+            completion_tokens=_count(d.get("completion_tokens")),
+            # Only a literal true supersedes. A record of any other shape
+            # keeps the turn visible, so a malformed line cannot hide one.
+            superseded=d.get("superseded") is True,
         )
     except Exception:  # noqa: BLE001
         return None
@@ -287,7 +419,7 @@ def append(thread_id: str, turn: Turn, store: str = "") -> bool:
     if not turn.ts:
         turn.ts = _now()
     try:
-        with _LOCK:
+        with _store_lock(store):
             _root(store).mkdir(parents=True, exist_ok=True)
             _heal_torn_tail(p)
             with p.open("a", encoding="utf-8") as fh:
@@ -314,8 +446,13 @@ def append(thread_id: str, turn: Turn, store: str = "") -> bool:
 
 
 def load_thread(thread_id: str, limit: int = MAX_TURNS,
-                store: str = "") -> List[Turn]:
-    """Oldest first — this is a transcript, and reading it backwards is wrong."""
+                store: str = "", *,
+                include_superseded: bool = False) -> List[Turn]:
+    """Oldest first — this is a transcript, and reading it backwards is wrong.
+
+    Superseded turns are left out unless `include_superseded` is set, so the
+    transcript on screen and the model's context both see the current version.
+    """
     p = _thread_path(thread_id, store)
     if p is None:
         return []
@@ -332,9 +469,72 @@ def load_thread(thread_id: str, limit: int = MAX_TURNS,
             t = _parse_turn(json.loads(line))
         except Exception:  # noqa: BLE001
             continue                 # a torn line must not hide the rest
-        if t is not None:
+        if t is not None and (include_superseded or not t.superseded):
             out.append(t)
     return out[-max(1, int(limit)):]
+
+
+def supersede(thread_id: str, from_turn_id: str, store: str = "") -> int:
+    """Mark one turn and every later turn superseded. Returns how many.
+
+    This is how an answer is regenerated or a question edited: what follows
+    the replaced turn stops being part of the conversation, and stays in the
+    file. Turns already superseded are left as they are, and an unknown or
+    already-superseded `from_turn_id` marks nothing.
+
+    The thread file is rewritten through a temporary sibling and replaced, so
+    a crash leaves the old transcript or the new one, never a mixture. A line
+    that does not parse is written back byte for byte: a rewrite must not
+    destroy the one copy of a damaged record.
+    """
+    p = _thread_path(thread_id, store)
+    wanted = str(from_turn_id or "")
+    if p is None or not wanted:
+        return 0
+    with _store_lock(store):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return 0
+        records: List[tuple] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except Exception:  # noqa: BLE001
+                parsed = None
+            records.append((stripped,
+                            parsed if isinstance(parsed, dict) else None))
+        start = next((
+            index for index, (_line, record) in enumerate(records)
+            if record is not None and str(record.get("id", "")) == wanted
+            and record.get("superseded") is not True), None)
+        if start is None:
+            return 0
+        marked = 0
+        lines: List[str] = []
+        visible = 0
+        for index, (line, record) in enumerate(records):
+            if (record is not None and index >= start
+                    and record.get("superseded") is not True):
+                record = {**record, "superseded": True}
+                line = json.dumps(record)
+                marked += 1
+            lines.append(line)
+            if record is not None and record.get("superseded") is not True:
+                visible += 1
+        temporary = p.with_name(p.name + ".tmp")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.replace(p)
+        rows = _read_index_locked(store)
+        for row in rows:
+            if row.id == thread_id:
+                row.turns = visible
+                break
+        _write_index_locked(rows, store)
+    return marked
 
 
 def recent_exchanges(thread_id: str, pairs: int = 4,
@@ -354,7 +554,7 @@ def clear_all(store: str = "") -> bool:
     """
     root, index = _root(store), _index_path(store)
     try:
-        with _LOCK:
+        with _store_lock(store):
             if root.exists():
                 for p in root.glob("*.jsonl"):
                     try:

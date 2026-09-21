@@ -35,13 +35,18 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from alelyon.runtime.common import toolpath
-from alelyon.runtime.common.paths import GLOBALS_DIR
 
+# One source of truth for the built-in Ollama integration.  Provider and
+# endpoint-registry adapters may alias this constant for compatibility, but
+# runtime selection always goes through ``selected_model()`` below.
 DEFAULT_MODEL = "qwen3-coder:30b"
 DEFAULT_BASE = "http://localhost:11434"
+MAX_MODEL_NAME_CHARS = 4_096
+MAX_MODEL_PREF_BYTES = 8_192
 
 STATE_OFFLINE = "offline"
 STATE_NO_MODEL = "no_model"
@@ -91,34 +96,83 @@ def base_url() -> str:
 
 
 # The chosen model is runtime state, not a GUI preference: the API server and
-# any headless caller need it too, so it cannot live in QSettings.
-_PREF_PATH = GLOBALS_DIR / "analyst_model.json"
+# any headless caller need it too, so it cannot live in QSettings. ``None``
+# keeps Runtime paths unbound until the preference is actually requested;
+# deployment entry points import provider modules before they bootstrap paths.
+_PREF_PATH: Optional[Path] = None
+
+
+def _pref_path() -> Path:
+    if _PREF_PATH is not None:
+        return Path(_PREF_PATH)
+    from alelyon.runtime.common.paths import GLOBALS_DIR  # noqa: PLC0415
+
+    return Path(GLOBALS_DIR) / "analyst_model.json"
+
+
+def _normalise_model_name(value: object) -> str:
+    """Return one bounded UTF-8 model identifier, or an empty refusal."""
+    if type(value) is not str:
+        return ""
+    value = value.strip()
+    if not value or len(value) > MAX_MODEL_NAME_CHARS:
+        return ""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    return value
 
 
 def selected_model() -> str:
     """The model the analyst will use. Env wins, so a machine can override
     without touching stored state."""
-    env = os.environ.get("OLLAMA_MODEL")
+    env = _normalise_model_name(os.environ.get("OLLAMA_MODEL"))
     if env:
         return env
     try:
-        raw = json.loads(_PREF_PATH.read_text(encoding="utf-8"))
-        v = str((raw or {}).get("model", "") or "")
+        with _pref_path().open("rb") as source:
+            encoded = source.read(MAX_MODEL_PREF_BYTES + 1)
+        if len(encoded) > MAX_MODEL_PREF_BYTES:
+            return DEFAULT_MODEL
+        raw = json.loads(encoded)
+        v = _normalise_model_name(
+            raw.get("model", "") if type(raw) is dict else ""
+        )
     except Exception:  # noqa: BLE001
         v = ""
     return v or DEFAULT_MODEL
 
 
 def set_selected_model(name: str) -> bool:
-    name = str(name or "").strip()
+    name = _normalise_model_name(name)
     if not name:
+        return False
+    # A content address is not a model, and persisting one would leave the
+    # analyst pointed at something no server can serve until somebody noticed.
+    # Refused here as well as filtered from the listing, because the listing is
+    # not the only way a name reaches this function.
+    from .catalog import is_content_digest  # noqa: PLC0415
+
+    if is_content_digest(name):
+        return False
+    try:
+        payload = json.dumps(
+            {"model": name}, ensure_ascii=False
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError):
+        return False
+    # Anything accepted for persistence must be readable through the exact
+    # bounded reader used by ``selected_model`` on the next call/start.
+    if len(payload) > MAX_MODEL_PREF_BYTES:
         return False
     try:
         with _LOCK:
-            _PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _PREF_PATH.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"model": name}), encoding="utf-8")
-            tmp.replace(_PREF_PATH)
+            pref = _pref_path()
+            pref.parent.mkdir(parents=True, exist_ok=True)
+            tmp = pref.with_suffix(".tmp")
+            tmp.write_bytes(payload)
+            tmp.replace(pref)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -196,15 +250,28 @@ def installed_models(timeout: float = _PROBE_TIMEOUT) -> Optional[List[str]]:
 
     None and [] are different answers: None is "cannot tell", [] is "the server
     is up and has nothing", and only the second is the user's problem to fix.
+
+    Rows whose name is a content address are not models and are dropped.
+    Measured on this workstation 2026-08-22, ``/api/tags`` published three
+    ``blobs:sha256-<64 hex>`` rows beside the five real models, and every view
+    listing this offered them as models a user could select. The rule lives in
+    `catalog.is_content_digest` rather than here because this endpoint is
+    parsed in two places, and a filter written twice is the second copy that
+    goes stale.
     """
     try:
         data = _get("/api/tags", timeout)
     except Exception:  # noqa: BLE001
         return None
+    # Imported inside the function on purpose: a module-level edge here is on
+    # the pre-bootstrap path that AIRC-RT-RED-01 is about, and this rule is
+    # needed only when a listing is actually being read.
+    from .catalog import is_content_digest  # noqa: PLC0415
+
     out = []
     for m in (data.get("models") or []):
         name = str(m.get("name") or m.get("model") or "").strip()
-        if name:
+        if name and not is_content_digest(name):
             out.append(name)
     return sorted(out)
 

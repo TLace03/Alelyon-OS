@@ -365,12 +365,14 @@ class Registry:
         return "\n".join(f"- {t.signature()} — {t.answers}"
                          for t in self.all_tools())
 
-    def run(self, name: str, args: Dict[str, Any], ctx: Context) -> ToolResult:
-        return _run(self, name, args, ctx)
+    def run(self, name: str, args: Dict[str, Any], ctx: Context,
+            recorder=None) -> ToolResult:
+        return _run(self, name, args, ctx, recorder)
 
     def run_plan(self, calls: Sequence[Tuple[str, Dict[str, Any]]],
-                 ctx: Context, *, limit: int = 4) -> List[ToolResult]:
-        return _run_plan(self, calls, ctx, limit=limit)
+                 ctx: Context, *, limit: int = 4,
+                 recorder=None) -> List[ToolResult]:
+        return _run_plan(self, calls, ctx, limit=limit, recorder=recorder)
 
     def clear(self) -> None:
         self._tools.clear()
@@ -448,54 +450,83 @@ def validate(tool: Tool, args: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 
 
 def _run(registry: Registry, name: str, args: Dict[str, Any],
-         ctx: Context) -> ToolResult:
+         ctx: Context, recorder=None) -> ToolResult:
     """Execute one tool. Never raises: a broken tool becomes a visible failed
     call, which the reader can see and reason about, rather than an exception
-    that silently costs them the answer."""
+    that silently costs them the answer.
+
+    `recorder` is an optional callable handed every `ToolResult`, including the
+    failures — a tool that could not run is evidence about the run, and a
+    recorder that saw only successes would produce a transcript in which the
+    failures never happened.
+
+    Deliberately a bare callable rather than a transcript object: a tool output
+    is an oracle (TR-04) and the receipts layer wants to commit it, but this
+    module is in the public wheel's allowlist and the receipts layer is not.
+    An import here would widen the published closure to instrument something.
+    """
+    def _record(result: ToolResult) -> ToolResult:
+        """One exit point for the recorder, so no return path can skip it.
+
+        Threading the call through every `return` above would have been the
+        obvious edit and is the one that leaves a branch uninstrumented on the
+        next change; a test walks all six exits.
+        """
+        if recorder is not None:
+            try:
+                recorder(result)
+            except Exception:  # noqa: BLE001 - instrumentation never costs an answer
+                pass
+        return result
+
     tool = registry.get(name)
     if tool is None:
-        return ToolResult(tool=str(name), args=dict(args or {}),
-                          error="no such tool")
+        return _record(ToolResult(tool=str(name), args=dict(args or {}),
+                                  error="no such tool"))
     clean, err = validate(tool, args)
     if err:
-        return ToolResult(tool=tool.name, args=dict(args or {}), error=err)
+        return _record(ToolResult(tool=tool.name, args=dict(args or {}),
+                                  error=err))
     if tool.fn is None:
-        return ToolResult(tool=tool.name, args=clean,
-                          error="tool is declared but not implemented")
+        return _record(ToolResult(tool=tool.name, args=clean,
+                                  error="tool is declared but not implemented"))
     try:
         res = tool.fn(ctx, clean)
     except Exception as exc:  # noqa: BLE001
-        return ToolResult(tool=tool.name, args=clean,
-                          error=f"{type(exc).__name__}: {exc}")
+        return _record(ToolResult(tool=tool.name, args=clean,
+                                  error=f"{type(exc).__name__}: {exc}"))
     if not isinstance(res, ToolResult):
-        return ToolResult(tool=tool.name, args=clean,
-                          error="tool returned a malformed result")
-    return res
+        return _record(ToolResult(tool=tool.name, args=clean,
+                                  error="tool returned a malformed result"))
+    return _record(res)
 
 
 def _run_plan(registry: Registry, calls: Sequence[Tuple[str, Dict[str, Any]]],
-              ctx: Context, *, limit: int = 4) -> List[ToolResult]:
+              ctx: Context, *, limit: int = 4,
+              recorder=None) -> List[ToolResult]:
     """Run a routed plan in order, bounded. The cap is not arbitrary: each call
     costs the reader wall-clock time while they wait, and a model that asks for
     nine tools has usually misunderstood the question rather than decomposed it."""
     out: List[ToolResult] = []
     for name, args in list(calls)[:max(1, int(limit))]:
-        out.append(_run(registry, name, args, ctx))
+        out.append(_run(registry, name, args, ctx, recorder))
     return out
 
 
 def run(name: str, args: Dict[str, Any], ctx: Context,
-        *, registry: Optional[Registry] = None) -> ToolResult:
+        *, registry: Optional[Registry] = None, recorder=None) -> ToolResult:
     """Execute one tool from `registry`, or from the default one."""
-    return _run(registry if registry is not None else _REGISTRY, name, args, ctx)
+    return _run(registry if registry is not None else _REGISTRY, name, args,
+                ctx, recorder)
 
 
 def run_plan(calls: Sequence[Tuple[str, Dict[str, Any]]], ctx: Context,
              *, limit: int = 4,
-             registry: Optional[Registry] = None) -> List[ToolResult]:
+             registry: Optional[Registry] = None,
+             recorder=None) -> List[ToolResult]:
     """Run a routed plan against `registry`, or against the default one."""
     return _run_plan(registry if registry is not None else _REGISTRY,
-                     calls, ctx, limit=limit)
+                     calls, ctx, limit=limit, recorder=recorder)
 
 
 def facts_of(results: Sequence[ToolResult]) -> List[Fact]:

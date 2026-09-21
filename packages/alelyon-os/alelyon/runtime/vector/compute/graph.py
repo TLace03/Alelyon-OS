@@ -22,6 +22,23 @@ crucially, **no uncertainty propagation**. This is the honest first framework:
     variance back to its sources (first-order share) so a caller can say *which
     input drives the uncertainty*.
 
+  • `add_joint_inputs()` — sources that are NOT independent of each other.
+    `add_input` sources are drawn INDEPENDENTLY, which is correct only when they
+    are independent in fact. For a sum the true variance is `sum(var) +
+    2*sum(cov)`; drawing independently omits the covariance term entirely, so
+    the intervals come out too NARROW — anticonservative, the one direction an
+    uncertainty interval must never fail in. The omitted term grows O(k²)
+    against the retained O(k), so the error DEEPENS with graph depth rather than
+    staying constant. Measured on real data in two independent research lanes:
+    at nominal 90%, observed coverage fell to 0.7187 at depth 24 and 0.6080 at
+    depth 28, with sources only MILDLY correlated (mean pairwise r ≈ +0.21) —
+    ordinary correlation is enough, this is not a pathology of unusually coupled
+    inputs. A decorrelation control that preserved every marginal exactly
+    restored nominal coverage at every depth, isolating the cause. Registering
+    correlated sources through `add_joint_inputs` draws them from PAIRED
+    observations with one shared row index, which preserves their joint
+    structure exactly and non-parametrically.
+
 Node `fn`s MUST be elementwise / sample-axis-agnostic — the SAME callable runs
 on scalars (evaluate) and on (n,) arrays (propagate). Sums, products, weighted
 combinations, `np.maximum`, `np.where` all qualify. A node may also return a bare
@@ -41,7 +58,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 from alelyon.runtime.vector.compute.types import (
-    Constant, Distribution, GraphResult, NodeResult,
+    Constant, Distribution, Empirical, GraphResult, NodeResult,
 )
 
 
@@ -69,9 +86,56 @@ class ComputationGraph:
 
     def __init__(self) -> None:
         self._nodes: Dict[str, _Node] = {}
+        # Sources that covary, registered via add_joint_inputs: (names, (m,k)).
+        # Held on the graph rather than in a Distribution because the
+        # `Distribution` protocol is per-source by construction — sample(rng, n)
+        # cannot express a dependence between two of them.
+        self._joint_blocks: List[tuple] = []
         self._order: List[str] = []        # insertion order, for stable output
 
     # ── construction ──────────────────────────────────────────────────────────
+    def add_joint_inputs(self, names: Sequence[str],
+                         observations) -> "ComputationGraph":
+        """Register k sources that COVARY, from (m, k) paired observations.
+
+        `add_input` draws each source independently, which silently omits the
+        covariance term and produces intervals that are too narrow (module
+        docstring). This registers a BLOCK: at propagate time one row index of
+        length n is drawn for the whole block and every member is indexed with
+        it, so each draw is a real observed row and every pairwise dependence —
+        linear or not — survives exactly. No correlation matrix is estimated and
+        no copula is assumed; the joint structure IS the data.
+
+        Each member also gets an `Empirical` marginal over its own column, so
+        `evaluate()` and the per-source summaries are unchanged. Rows containing
+        a non-finite value are REFUSED rather than dropped: dropping them would
+        silently change the joint distribution being sampled, which is the
+        failure this method exists to prevent.
+        """
+        cols = list(names)
+        if len(cols) < 2:
+            raise ComputeGraphError(
+                "add_joint_inputs needs at least 2 names; a single source has no "
+                "joint structure to preserve — use add_input")
+        obs = np.asarray(observations, dtype=float)
+        if obs.ndim != 2 or obs.shape[1] != len(cols):
+            raise ComputeGraphError(
+                f"observations must be (m, {len(cols)}) for names {cols}; got "
+                f"shape {obs.shape}")
+        if obs.shape[0] < 2:
+            raise ComputeGraphError(
+                "add_joint_inputs needs at least 2 observed rows to resample")
+        if not np.all(np.isfinite(obs)):
+            bad = int(np.count_nonzero(~np.isfinite(obs)))
+            raise ComputeGraphError(
+                f"observations contain {bad} non-finite value(s). They are "
+                f"refused rather than dropped: dropping rows would change the "
+                f"joint distribution being sampled without saying so")
+        for j, nm in enumerate(cols):
+            self.add_input(nm, Empirical(tuple(obs[:, j])))
+        self._joint_blocks.append((cols, obs))
+        return self
+
     def add_input(self, name: str, dist: Distribution) -> "ComputationGraph":
         """A source node carrying an uncertain value. Accepts any `Distribution`;
         a bare float is promoted to a `Constant`."""
@@ -190,7 +254,17 @@ class ComputationGraph:
     def propagate(self, n_samples: int = 4000, *, seed: Optional[int] = None,
                   simulator=None, keep: Optional[Sequence[str]] = None,
                   attribute: Optional[Sequence[str]] = None) -> GraphResult:
-        """Push `n_samples` joint draws through the DAG and summarise every node.
+        """Push `n_samples` draws through the DAG and summarise every node.
+
+        Each draw is joint across the TOPOLOGY — one row of source values is
+        propagated through the whole graph together, so a node sees a coherent
+        set of inputs. It is NOT joint across the SOURCES: every `add_input`
+        source is drawn independently of every other. That is correct when the
+        sources are independent and WRONG when they are not — omitting the
+        covariance term makes intervals too narrow, and the error grows with
+        depth (module docstring has the measured numbers). Sources that covary
+        must be registered with `add_joint_inputs`, which shares one draw index
+        across the block; this method then uses that block's paired rows.
 
         `simulator` — reuse an existing `MonteCarloSimulator` (its RNG is the
         kernel); otherwise one is built from `seed`. `keep` — node names whose
@@ -215,9 +289,22 @@ class ComputationGraph:
         rng = simulator.rng if simulator is not None else np.random.default_rng(seed)
 
         draws: Dict[str, np.ndarray] = {}
+
+        # JOINT BLOCKS FIRST. One row index for the whole block, shared by every
+        # member — that shared index IS the mechanism: it makes each draw a real
+        # observed row, so the covariance term the independent path omits is
+        # carried exactly, without estimating a correlation matrix or assuming a
+        # copula. Drawn before the topological loop so the loop can skip them.
+        for _blk_names, _blk_obs in self._joint_blocks:
+            _idx = rng.integers(0, _blk_obs.shape[0], n)
+            for _j, _nm in enumerate(_blk_names):
+                draws[_nm] = _blk_obs[_idx, _j]
+
         for name in order:
             node = self._nodes[name]
             if node.is_source:
+                if name in draws:      # already drawn, jointly, above
+                    continue
                 s = np.asarray(node.dist.sample(rng, n), dtype=float)
                 if s.shape != (n,):
                     raise ComputeGraphError(

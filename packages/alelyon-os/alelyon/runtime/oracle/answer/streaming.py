@@ -261,22 +261,58 @@ def decode_anthropic_event(event: str, data: str) -> Tuple[str, bool]:
 
 
 # ── the shared loop ──────────────────────────────────────────────────────────
+def _over_budget() -> str:
+    """The one wording for a stream that hit the cap.
+
+    Written once because it was written twice and the two had to stay in step
+    while only one of them was ever true: before the slice above, `_pump`
+    admitted an entire oversized fragment and then reported that the answer
+    "was cut off". Now the sentence is a fact at both sites.
+    """
+    return (f"the answer reached the {MAX_STREAM_CHARS:,}-character limit and "
+            f"was cut off there")
+
+
 def _pump(response, decode, sink: StreamSink,
-          cancel: CancelCheck) -> StreamResult:
+          cancel: CancelCheck, recorder=None) -> StreamResult:
     """Drive one decoded-line iterator into the sink.
 
     `decode` maps a raw line to `(fragment, done)`. The accumulator is the
     return value; the sink is best-effort, and a sink that raises must not cost
     the text already received — the caller still has a complete answer to save.
+
+    `recorder` is an optional `transcript.stream.Recorder`. It is fed every
+    wire line, in order, BEFORE decoding — which is the whole point: the
+    assembled text is what this function returns and what a transcript built
+    on the return value would commit, and the chunk boundaries it is built
+    from are load-bearing state for three consumers here (the incremental
+    `ThinkFilter`, the `MAX_STREAM_CHARS` budget, and the per-chunk `cancel`
+    poll). Absent a recorder this costs one `is None` test per line.
     """
     parts: list[str] = []
     total = 0
     for raw in response:
+        if recorder is not None:
+            recorder.line(raw if isinstance(raw, bytes)
+                          else str(raw).encode("utf-8", "replace"))
         if cancel is not None and cancel():
             return StreamResult("".join(parts), False, cancelled=True)
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         fragment, done = decode(line)
         if fragment:
+            # Slice to the remaining allowance BEFORE appending. The guard used
+            # to admit a whole fragment and then notice, which made it a floor
+            # rather than a bound: measured at a 50-character budget, one delta
+            # of 200,000 characters delivered all 200,000, while 300 deltas of
+            # one character correctly delivered 50. It worked exactly when the
+            # server was already sending small pieces and was defeated by the
+            # case it was written for. It also reported "was cut off" in both,
+            # so a caller inspecting `error` could not tell a real truncation
+            # from a full delivery.
+            fragment = fragment[:max(0, MAX_STREAM_CHARS - total)]
+            if not fragment:
+                return StreamResult("".join(parts), False,
+                                    error=_over_budget())
             parts.append(fragment)
             total += len(fragment)
             try:
@@ -284,10 +320,8 @@ def _pump(response, decode, sink: StreamSink,
             except Exception:  # noqa: BLE001 — the consumer's problem, not the text's
                 pass
             if total >= MAX_STREAM_CHARS:
-                return StreamResult(
-                    "".join(parts), False,
-                    error=f"the answer passed {MAX_STREAM_CHARS:,} characters "
-                          f"and was cut off")
+                return StreamResult("".join(parts), False,
+                                    error=_over_budget())
         if done:
             return StreamResult("".join(parts), True)
     # The iterator ended without the format's end marker. That is a dropped
@@ -297,8 +331,14 @@ def _pump(response, decode, sink: StreamSink,
 
 
 def _sse_pump(response, decode_pair, sink: StreamSink,
-              cancel: CancelCheck) -> StreamResult:
-    """`_pump` for the two SSE formats, whose unit is an event, not a line."""
+              cancel: CancelCheck, recorder=None) -> StreamResult:
+    """`_pump` for the two SSE formats, whose unit is an event, not a line.
+
+    `recorder` is fed the raw lines rather than the assembled events, for the
+    reason given on `_pump`: an event sequence reconstructed from the decoded
+    fragments is a record of what this function made of the stream, not of
+    what arrived.
+    """
     parts: list[str] = []
     total = 0
 
@@ -306,11 +346,19 @@ def _sse_pump(response, decode_pair, sink: StreamSink,
         for raw in response:
             if cancel is not None and cancel():
                 return
+            if recorder is not None:
+                recorder.line(raw if isinstance(raw, bytes)
+                              else str(raw).encode("utf-8", "replace"))
             yield raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
 
     for event, data in sse_events(_lines()):
         fragment, done = decode_pair(event, data)
         if fragment:
+            # Same bound as `_pump`, for the same reason. See the note there.
+            fragment = fragment[:max(0, MAX_STREAM_CHARS - total)]
+            if not fragment:
+                return StreamResult("".join(parts), False,
+                                    error=_over_budget())
             parts.append(fragment)
             total += len(fragment)
             try:
@@ -318,10 +366,8 @@ def _sse_pump(response, decode_pair, sink: StreamSink,
             except Exception:  # noqa: BLE001
                 pass
             if total >= MAX_STREAM_CHARS:
-                return StreamResult(
-                    "".join(parts), False,
-                    error=f"the answer passed {MAX_STREAM_CHARS:,} characters "
-                          f"and was cut off")
+                return StreamResult("".join(parts), False,
+                                    error=_over_budget())
         if done:
             return StreamResult("".join(parts), True)
     if cancel is not None and cancel():
@@ -332,10 +378,28 @@ def _sse_pump(response, decode_pair, sink: StreamSink,
 
 def _open(url: str, body: dict, headers: dict, timeout: float):
     import urllib.request
+    from alelyon.runtime.oracle.answer.providers import oracle_urlopen
 
     request = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"), headers=headers)
-    return urllib.request.urlopen(request, timeout=timeout)
+    return oracle_urlopen(request, timeout=timeout)
+
+
+def _record_open(recorder, response) -> None:
+    """Tell a recorder what the response was, before any body is read.
+
+    Reads `.status` and `.headers` off the response object the transport
+    already has, rather than from inside `_open`: `_open` owns the opener and
+    the redirect policy, which another lane is changing, and instrumentation
+    has no business in that seam.
+    """
+    if recorder is None:
+        return
+    try:
+        headers = dict(getattr(response, "headers", None) or {})
+    except Exception:  # noqa: BLE001 - a header map that will not iterate is a gap
+        headers = {}
+    recorder.opened(status=getattr(response, "status", None), headers=headers)
 
 
 def _failed(exc: Exception) -> StreamResult:
@@ -346,7 +410,8 @@ def _failed(exc: Exception) -> StreamResult:
 # ── the three backends ───────────────────────────────────────────────────────
 def ollama_stream(base_url: str = "http://localhost:11434",
                   model: str = "qwen3-coder:30b", *, temperature: float = 0.1,
-                  timeout: float = 300.0, max_tokens: Optional[int] = None):
+                  timeout: float = 300.0, max_tokens: Optional[int] = None,
+                  recorder=None):
     """A streaming counterpart to `providers.ollama_llm`.
 
     Shares its URL normalisation deliberately: two functions deriving the same
@@ -367,7 +432,9 @@ def ollama_stream(base_url: str = "http://localhost:11434",
         try:
             with _open(endpoint, body, {"Content-Type": "application/json"},
                        timeout) as response:
-                return _pump(response, decode_ollama_line, sink, cancel)
+                _record_open(recorder, response)
+                return _pump(response, decode_ollama_line, sink, cancel,
+                             recorder)
         except Exception as exc:  # noqa: BLE001
             return _failed(exc)
 
@@ -378,7 +445,7 @@ def openai_compatible_stream(base_url: str, model: str, *, api_key: str = "",
                              api_key_name: str = "", temperature: float = 0.1,
                              timeout: float = 300.0,
                              max_tokens: Optional[int] = None,
-                             organization: str = ""):
+                             organization: str = "", recorder=None):
     """A streaming counterpart to `providers.openai_compatible_llm`.
 
     The key is resolved at call time for the same reason it is there: a key
@@ -411,18 +478,19 @@ def openai_compatible_stream(base_url: str, model: str, *, api_key: str = "",
             headers["OpenAI-Organization"] = organization
         try:
             with _open(endpoint, body, headers, timeout) as response:
+                _record_open(recorder, response)
                 return _sse_pump(response,
                                  lambda _event, data: decode_openai_event(data),
-                                 sink, cancel)
+                                 sink, cancel, recorder)
         except Exception as exc:  # noqa: BLE001
             return _failed(exc)
 
     return _stream
 
 
-def anthropic_stream(model: str = "claude-sonnet-4-5-20250929", *,
+def anthropic_stream(model: str = "claude-sonnet-5", *,
                      max_tokens: int = 1200, temperature: float = 0.1,
-                     timeout: float = 90.0):
+                     timeout: float = 90.0, recorder=None):
     """A streaming counterpart to `providers.anthropic_llm`.
 
     Reaches the network only with a configured key, and returns a stated reason
@@ -449,7 +517,9 @@ def anthropic_stream(model: str = "claude-sonnet-4-5-20250929", *,
                    "anthropic-version": _ANTHROPIC_VERSION}
         try:
             with _open(_ANTHROPIC_URL, body, headers, timeout) as response:
-                return _sse_pump(response, decode_anthropic_event, sink, cancel)
+                _record_open(recorder, response)
+                return _sse_pump(response, decode_anthropic_event, sink,
+                                 cancel, recorder)
         except Exception as exc:  # noqa: BLE001
             return _failed(exc)
 
