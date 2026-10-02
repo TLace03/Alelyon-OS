@@ -79,6 +79,7 @@ from __future__ import annotations
 import os
 import sys
 import sys as _sys
+import tempfile
 import types as _types
 from pathlib import Path
 
@@ -106,9 +107,87 @@ _GIT_TIMEOUT = 30.0
 #: platform convention, so the answer is where that platform's users look.
 _APP_DIR = "Alelyon"
 
+#: Where packaged or installed code keeps per-user state when an AI coding agent
+#: started the process (W5, docs/audits/2026-10-01-appdata-redirection.md). The
+#: same name, markers and folder ids as `runtime_env.AGENT_STATE_DIR_NAME`,
+#: `AGENT_MARKERS` and its known-folder lookup, spelled here because this module
+#: cannot import the packaging layer; tests/platform/test_agent_state_isolation.py
+#: holds the two to one answer.
+_AGENT_STATE_DIR = "alelyon-agent-state"
+_FOLDERID_LOCAL_APPDATA = "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}"
+_FOLDERID_ROAMING_APPDATA = "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}"
+
 
 def _is_installed(path: Path) -> bool:
     return any(part in _INSTALL_MARKERS for part in path.parts)
+
+
+def _packaged_like() -> bool:
+    """Frozen, forced into packaged rules, or installed from a wheel: the cases in
+    which this module's per-user directory is the process's own state home."""
+    return (bool(getattr(sys, "frozen", False)) or _forced_packaged()
+            or _is_installed(Path(__file__).resolve()))
+
+
+def _agent_session() -> bool:
+    """True when an AI coding agent started this process (`CLAUDECODE`, `AI_AGENT`)."""
+    if (os.environ.get("CLAUDECODE") or "").strip().lower() in _TRUTHY:
+        return True
+    return bool((os.environ.get("AI_AGENT") or "").strip())
+
+
+def _known_appdata_folders() -> tuple:
+    """The user's real LocalAppData and RoamingAppData, as Windows reports them.
+
+    Asked of the shell rather than read from the environment, which is what a
+    test or a caller points elsewhere. Empty off Windows or when the shell cannot
+    answer.
+    """
+    if sys.platform != "win32":
+        return ()
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+        get = ctypes.windll.shell32.SHGetKnownFolderPath
+        get.argtypes = [ctypes.POINTER(_GUID), wintypes.DWORD, wintypes.HANDLE,
+                        ctypes.POINTER(ctypes.c_void_p)]
+        get.restype = ctypes.c_long
+        free = ctypes.windll.ole32.CoTaskMemFree
+        free.argtypes = [ctypes.c_void_p]
+        found = []
+        for folder in (_FOLDERID_LOCAL_APPDATA, _FOLDERID_ROAMING_APPDATA):
+            guid = _GUID.from_buffer_copy(uuid.UUID(folder).bytes_le)
+            raw = ctypes.c_void_p()
+            if get(ctypes.byref(guid), 0, None, ctypes.byref(raw)) == 0 and raw.value:
+                try:
+                    found.append(ctypes.wstring_at(raw.value))
+                finally:
+                    free(raw)
+        return tuple(found)
+    except Exception:                                              # noqa: BLE001
+        # "Cannot tell", which the caller reads as "assume it is the user's data".
+        return ()
+
+
+def _is_users_real_appdata(base: Path) -> bool:
+    """Whether `base` is one of the user's own AppData folders; yes when unknown,
+    because the guard this feeds must not be switched off by not knowing."""
+    known = _known_appdata_folders()
+    if not known:
+        return True
+    target = os.path.normcase(os.path.normpath(str(base)))
+    return any(target == os.path.normcase(os.path.normpath(k)) for k in known)
+
+
+def _agent_state_dir() -> Path:
+    """The per-user directory packaged or installed code uses under an AI coding agent."""
+    return Path(tempfile.gettempdir()) / _AGENT_STATE_DIR / _APP_DIR
 
 
 def _user_state_dir() -> Path:
@@ -118,12 +197,22 @@ def _user_state_dir() -> Path:
     those platforms has a documented location, and putting state somewhere else
     means the user cannot find it, back it up, or clear it by the means their
     system already gives them.
+
+    Except for an agent's run (W5). When packaged or installed code runs in a
+    process an AI coding agent started, the user's REAL AppData is replaced by
+    `_agent_state_dir()`: that run's state is not the user's, and inside the Claude
+    desktop app a file it creates under AppData lands in the app's private store,
+    where it later hides the user's own file from every run inside the app
+    (measured 2026-10-01). An `%LOCALAPPDATA%` already pointed elsewhere is left
+    alone, and so is a source checkout, whose callers of this directory share it
+    with the user's own programs on purpose.
     """
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if base:
-            return Path(base) / _APP_DIR
-        return Path.home() / "AppData" / "Local" / _APP_DIR
+        base_path = Path(base) if base else Path.home() / "AppData" / "Local"
+        if _packaged_like() and _agent_session() and _is_users_real_appdata(base_path):
+            return _agent_state_dir()
+        return base_path / _APP_DIR
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / _APP_DIR
     xdg = os.environ.get("XDG_DATA_HOME")
