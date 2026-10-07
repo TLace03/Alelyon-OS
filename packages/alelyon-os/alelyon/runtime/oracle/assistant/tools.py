@@ -251,6 +251,39 @@ def _args_str(args: Dict[str, Any]) -> str:
     return "(" + ", ".join(f"{k}={v}" for k, v in args.items()) + ")"
 
 
+# ── what a tool may reach ───────────────────────────────────────────────────
+#: Reads only state held on this machine (a file, a database, this machine's own
+#: model runtime) and makes no request to any other address. A tool that asks a
+#: runtime refuses by itself unless that runtime is this machine's.
+REACH_LOCAL = "local"
+#: Reads market data through `Context.data_service` and nothing else outside the
+#: machine. In a turn that stays local the host's default service is not used:
+#: the tool reads what this machine already stores and fetches nothing
+#: (`StoredDataService`).
+REACH_STORED = "stored"
+#: May make a request of its own to another machine. A turn that stays local
+#: does not run it.
+REACH_NETWORK = "network"
+REACHES = (REACH_LOCAL, REACH_STORED, REACH_NETWORK)
+
+#: Said by a stored-data tool that found nothing, in a turn that stays local.
+STORED_ONLY_NOTE = (
+    "This turn stays on this machine, so market data is read only from what is "
+    "already stored here and is not fetched; choose Cloud to fetch it")
+
+
+def stays_local_refusal(tool: "Tool") -> str:
+    """Why a turn that stays on this machine did not run `tool`.
+
+    Names the way out (Cloud) and says nothing was sent, which is true because
+    the refusal is made before the tool is called.
+    """
+    what = tool.reaches or "another machine"
+    return (f"This turn stays on this machine, and {tool.name} would send a "
+            f"request to {what}, so it was not run and nothing was sent. "
+            f"Choose Cloud to use it")
+
+
 # ── tool declaration ─────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Param:
@@ -271,6 +304,15 @@ class Tool:
     #: owned by the domain — "Book Risk", "Model Morphometry", "" for a tool
     #: with no screen behind it.
     surface: str = ""
+    #: Where this tool may reach, as a CLOSED vocabulary (`REACHES`). A turn
+    #: that promised to stay on this machine (`Context.stays_local`) runs a
+    #: tool only if it declares it keeps that promise, so the default is the
+    #: unsafe one: a tool nobody classified is refused there, never run.
+    reach: str = REACH_NETWORK
+    #: For a NETWORK tool: what it asks for and of whom, as the clause a refusal
+    #: says ("an options-data provider"). Shown to the reader, so it names no
+    #: address and no key.
+    reaches: str = ""
 
     def signature(self) -> str:
         if not self.params:
@@ -307,6 +349,27 @@ class Context:
             return None
         return v if v > 0 else None
 
+    @property
+    def stays_local(self) -> bool:
+        """Whether this turn promised to stay on this machine.
+
+        Read from the language model the host handed in as `extras["llm"]`:
+        True only for a chain built `local_only` (Local and Auto, in Lattice
+        and in the Financial Markets analyst), so the promise has one source and a host composes no second flag that
+        could disagree with the chain. The registry enforces it for every tool:
+        one that declares `REACH_NETWORK` (and one that declares nothing) is not
+        run in such a turn (`_run`), and a tool that reads market data reads it
+        through `desks.market.turn_data_service`, because a turn that keeps the
+        model here and sends a ticker, a series id or a model name elsewhere has
+        not kept its promise. False when there is no such model, which is also
+        the state of a host that composes no chain of its own.
+
+        A host that wraps the chain in another object must forward
+        `local_only`; a wrapper that hides it reads as "no promise", and the
+        tools then behave as they do for Cloud.
+        """
+        return getattr(self.extras.get("llm"), "local_only", False) is True
+
 
 # ── the registry ─────────────────────────────────────────────────────────────
 #: Substrings that would make a tool name read like an action. A read-only tool
@@ -319,6 +382,12 @@ _FORBIDDEN_NAME_PARTS = ("place", "submit", "cancel", "send_order", "execute",
 
 class ToolNameRefused(ValueError):
     """A tool name that reads as an action was refused at registration."""
+
+
+class ToolReachRefused(ValueError):
+    """A tool that declares a reach outside `REACHES` was refused at
+    registration: the vocabulary is closed because a turn that stays on this
+    machine decides what to run from it."""
 
 
 class Registry:
@@ -346,6 +415,10 @@ class Registry:
                 f"tool {name!r} reads as an action. The tool layer is read-only "
                 f"by construction; a tool that can change something does not "
                 f"belong behind a language model.")
+        if tool.reach not in REACHES:
+            raise ToolReachRefused(
+                f"tool {name!r} declares reach {tool.reach!r}; it must be one "
+                f"of {', '.join(REACHES)}.")
         self._tools[name] = tool
         return tool
 
@@ -490,6 +563,15 @@ def _run(registry: Registry, name: str, args: Dict[str, Any],
     if tool.fn is None:
         return _record(ToolResult(tool=tool.name, args=clean,
                                   error="tool is declared but not implemented"))
+    if (tool.reach == REACH_NETWORK
+            and getattr(ctx, "stays_local", False) is True):
+        # The turn promised that nothing leaves this machine, and this tool may
+        # make a request of its own. Refused here, before `fn` runs, so no
+        # lookup and no connection happen and no tool has to remember to ask.
+        # (`getattr`: a caller may pass no context at all, and a context that
+        # cannot say makes no promise.)
+        return _record(ToolResult(tool=tool.name, args=clean,
+                                  unavailable=stays_local_refusal(tool)))
     try:
         res = tool.fn(ctx, clean)
     except Exception as exc:  # noqa: BLE001

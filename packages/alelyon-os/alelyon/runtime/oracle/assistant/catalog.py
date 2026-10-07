@@ -5,11 +5,11 @@ them says so plainly: vendors rename and retire models, so every built-in name
 is a starting point the user is expected to edit. That was the honest position
 while the only alternative was a hard-coded list that would itself go stale.
 
-Both server families in the registry can simply be asked:
-
-* **Ollama** publishes its installed models at `GET /api/tags`.
-* **The OpenAI-compatible world** — vLLM, LM Studio, llama.cpp's server, and
-  the hosted labs — publishes what it serves at `GET /v1/models`.
+A configured server can simply be asked: the OpenAI-compatible world — vLLM,
+LM Studio, llama.cpp's server, and the hosted labs — publishes what it serves
+at `GET /v1/models`. The platform's own llama.cpp server needs no asking: its
+models are the GGUF files in the models folder (`local_model.installed_models`,
+ADR-0041). Ollama's `GET /api/tags` was read here until ADR-0041 retired it.
 
 A stale name therefore becomes self-healing: the surface offering a model list
 offers what the server said it has, not what a file remembered.
@@ -41,7 +41,7 @@ MAX_LISTING_BYTES = 4_194_304
 MAX_LISTED_MODELS = 2_000
 
 #: A hex digest long enough that nobody names a model after one by accident.
-#: Ollama's own blob rows carry sha256, so 40 admits sha1-shaped addresses too
+#: Ollama's blob rows carried sha256, so 40 admits sha1-shaped addresses too
 #: without reaching down to anything a person would type.
 _MIN_DIGEST_CHARS = 40
 _DIGEST_RE = re.compile(
@@ -77,8 +77,8 @@ class ListedModel:
     """One name a server claims to serve."""
 
     name: str
-    #: Bytes on disk, when the server reported a size (Ollama does). None is
-    #: absent, not zero.
+    #: Bytes on disk, when the server reported a size. None is absent, not
+    #: zero.
     size_bytes: Optional[int] = None
     #: The server's own modification stamp, verbatim, when it gave one.
     modified: str = ""
@@ -96,10 +96,11 @@ class CatalogReading:
 
     models: Tuple[ListedModel, ...]
     refusal: str = ""
-    #: Rows the server published that are not models — content digests today.
-    #: Carried rather than discarded silently: a listing that drops rows
-    #: without saying so cannot be reconciled against `ollama list`, and the
-    #: reader is left to wonder whether the tool or the server lost them.
+    #: Rows the server published that are not models (content digests, which
+    #: Ollama's listing carried). Carried rather than discarded silently: a
+    #: listing that drops rows without saying so cannot be reconciled against
+    #: the server's own, and the reader is left to wonder whether the tool or
+    #: the server lost them.
     dropped: Tuple[str, ...] = ()
 
     @property
@@ -127,25 +128,6 @@ def _read_json(url: str, *, headers: Optional[dict] = None,
         return None, "the server's answer was not JSON"
 
 
-def _int_or_none(value) -> Optional[int]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return int(value)
-
-
-def ollama_models_url(base_url: str) -> str:
-    """The `/api/tags` endpoint for a configured Ollama base URL.
-
-    Derived from the same normalisation the chat transport uses, so the two
-    can never disagree about which server "the configured one" is.
-    """
-    from alelyon.runtime.oracle.answer.providers import normalize_ollama_chat_url
-
-    chat_endpoint = normalize_ollama_chat_url(base_url)
-    # …/api/chat -> …/api/tags, by construction of the normaliser.
-    return chat_endpoint[: -len("/chat")] + "/tags"
-
-
 def openai_models_url(base_url: str) -> str:
     """The `/v1/models` endpoint beside a configured chat endpoint."""
     from alelyon.runtime.oracle.answer.providers import normalize_openai_chat_url
@@ -153,38 +135,8 @@ def openai_models_url(base_url: str) -> str:
     chat_endpoint = normalize_openai_chat_url(base_url)
     if not chat_endpoint:
         return ""
-    # …/chat/completions -> …/models, again by construction.
+    # …/chat/completions -> …/models, by construction of the normaliser.
     return chat_endpoint[: -len("/chat/completions")] + "/models"
-
-
-def ollama_installed_models(base_url: str = "", *,
-                            timeout: float = DEFAULT_TIMEOUT) -> CatalogReading:
-    """What this Ollama server has pulled, or a named refusal."""
-    import os
-
-    base = base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
-    raw, refusal = _read_json(ollama_models_url(base), timeout=timeout)
-    if refusal:
-        return CatalogReading(models=(), refusal=refusal)
-    rows = raw.get("models") if isinstance(raw, dict) else None
-    if not isinstance(rows, list):
-        return CatalogReading(models=(),
-                              refusal="the server's answer had no model list")
-    out: list[ListedModel] = []
-    dropped: list[str] = []
-    for row in rows[:MAX_LISTED_MODELS]:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or row.get("model") or "").strip()
-        if not name:
-            continue
-        if is_content_digest(name):
-            dropped.append(name)
-            continue
-        out.append(ListedModel(name=name,
-                               size_bytes=_int_or_none(row.get("size")),
-                               modified=str(row.get("modified_at") or "")))
-    return CatalogReading(models=tuple(out), dropped=tuple(dropped))
 
 
 def openai_listed_models(base_url: str, *, api_key_name: str = "",

@@ -166,10 +166,12 @@ def _cmd_models(args, paint: _Paint) -> int:
     if not options:
         print("Nothing can answer.")
         print()
-        print("Workspace needs a model. The usual local option is Ollama:")
-        print("    ollama serve")
-        print("    ollama pull qwen2.5:7b")
-        print("and then set OLLAMA_MODEL if you want a different one.")
+        print("Workspace needs a model. The local option is the platform's own")
+        print("llama.cpp server (ADR-0041): put a GGUF file in ~/.alelyon/models,")
+        print("then choose it and check that it constrains output:")
+        print("    python -m alelyon.runtime.oracle.assistant.llama_server models")
+        print("    python -m alelyon.runtime.oracle.assistant.llama_server select <model>")
+        print("    python -m alelyon.runtime.oracle.assistant.llama_server probe")
         return 1
     print(f"{len(options)} provider(s), in the order they would be tried:")
     print()

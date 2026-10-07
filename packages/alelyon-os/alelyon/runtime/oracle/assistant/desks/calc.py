@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from alelyon.runtime.oracle.assistant.tools import (
-    Context, Fact, Param, Tool, ToolResult,
+    REACH_STORED, STORED_ONLY_NOTE, Context, Fact, Param, Tool, ToolResult,
 )
 
 
@@ -47,8 +47,16 @@ def _calc(ctx: Context, args: Dict[str, Any]) -> ToolResult:
                                       "the calculation")
     ds = ctx.data_service
     if ds is None:
-        from alelyon.runtime.atlas.data.service import data_service
-        ds = data_service()
+        if ctx.stays_local:
+            # A Local or Auto turn promised that nothing leaves this machine,
+            # and the ticker or series id this program reads comes from the
+            # user's question. Read what this machine already holds; fetch
+            # nothing. (A host that injects its own service owns its reach.)
+            from alelyon.runtime.atlas.data.service import StoredDataService
+            ds = StoredDataService()
+        else:
+            from alelyon.runtime.atlas.data.service import data_service
+            ds = data_service()
 
     from alelyon.runtime.oracle.answer.engine import answer as verified_answer
     va = verified_answer(question, data_service=ds, llm_fn=llm)
@@ -57,8 +65,11 @@ def _calc(ctx: Context, args: Dict[str, Any]) -> ToolResult:
         # Report the refusal as the answer. The engine declined because the
         # question needs data its safe vocabulary cannot express; substituting
         # an approximation here would defeat the whole design.
-        return ToolResult("verified_calc", args,
-                          unavailable=(va.error or "the calculation was refused"))
+        reason = va.error or "the calculation was refused"
+        if ctx.stays_local and any(missing in reason for missing in (
+                "no price history", "no series data")):
+            reason += ". " + STORED_ONLY_NOTE
+        return ToolResult("verified_calc", args, unavailable=reason)
 
     facts: List[Fact] = []
     src = ", ".join(va.sources) if va.sources else ""
@@ -97,4 +108,6 @@ def install(registry) -> None:
         "shows",
         params=(Param("question", "str", True,
                       "the question, in plain English, exactly as asked"),),
-        fn=_calc, surface="Verified Answer"))
+        # STORED: in a turn that stays on this machine `_calc` reads a
+        # `StoredDataService` itself (above), so it is run there.
+        fn=_calc, surface="Verified Answer", reach=REACH_STORED))

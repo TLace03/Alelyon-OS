@@ -1,7 +1,9 @@
 """The Certified Answer Engine — verified, decision-grade natural-language analytics.
 
-    from alelyon.runtime.oracle.answer import answer, ollama_llm
-    va = answer("3-month correlation of SPY and TLT", data_service=ds, llm_fn=ollama_llm())
+    from alelyon.runtime.oracle.answer import answer
+    from alelyon.runtime.oracle.assistant.providers import llamacpp_provider
+    va = answer("3-month correlation of SPY and TLT", data_service=ds,
+                llm_fn=llamacpp_provider())
     # va.value (computed by the interpreter, not the LLM), va.dsl, va.sources,
     # va.certificate (calibrated interval), or va.refused=True with va.error.
 
@@ -15,10 +17,8 @@ from alelyon.runtime.oracle.answer.engine import (
     Certificate, VerifiedAnswer, answer, build_prompt, certify, clean_dsl,
     grammar, sources_of,
 )
-from alelyon.runtime.oracle.answer.providers import ollama_llm
 
 __all__ = [
     "answer", "VerifiedAnswer", "Certificate",
     "build_prompt", "grammar", "clean_dsl", "sources_of", "certify",
-    "ollama_llm",
 ]

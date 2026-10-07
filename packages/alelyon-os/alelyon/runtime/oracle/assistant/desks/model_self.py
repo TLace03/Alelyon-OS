@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from alelyon.runtime.oracle.assistant.tools import (
-    Context, Fact, Param, Tool, ToolResult,
+    REACH_LOCAL, Context, Fact, Param, Tool, ToolResult,
 )
 
 _TOOL = "model_anatomy"
@@ -67,6 +67,11 @@ def _anatomy(ctx: Context, args: Dict[str, Any]) -> ToolResult:
         return ToolResult(_TOOL, args,
                           unavailable="no model is selected on this machine")
 
+    # No request is made here, for any turn: `LM.show` reads the model's GGUF
+    # header from the models folder (ADR-0041), and a name the model chose from
+    # the conversation matches a file there exactly or not at all. So a Local
+    # or Auto turn (`ctx.stays_local`) needs no check of its own: the server
+    # this tool once asked, which could be another machine, is retired.
     payload = LM.show(model)
     if payload is None:
         # A stated reason, not an empty fact list. "The server is not running"
@@ -262,4 +267,6 @@ def install(registry) -> None:
         "or architecture, rather than answering from memory",
         params=(Param("model", "str", False,
                       "model name, or omit for the one currently selected"),),
-        fn=_anatomy, surface="Model Morphometry"))
+        # LOCAL because `_anatomy` reads a file on this machine and makes no
+        # request (`local_model.show` reads the GGUF header, ADR-0041).
+        fn=_anatomy, surface="Model Morphometry", reach=REACH_LOCAL))

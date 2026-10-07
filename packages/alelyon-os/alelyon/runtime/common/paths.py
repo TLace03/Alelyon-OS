@@ -191,12 +191,38 @@ def _agent_state_dir() -> Path:
 
 
 def _user_state_dir() -> Path:
+    """The per-user state directory this process uses.
+
+    Frozen, forced into packaged rules or installed from a wheel: the platform's
+    application-data directory, `_platform_state_dir()`. That is where an end user
+    looks, and it is unchanged.
+
+    A SOURCE checkout: `~/.alelyon` (W4, docs/audits/2026-10-01-appdata-redirection.md).
+    A checkout's callers of this directory are the selected-repository stores,
+    the view cache and hand-off state. They share it with the owner's own
+    programs, such as the Lattice app run from source, and with every agent
+    session's fleet tooling. Inside the Claude desktop app, those sessions see
+    `%LOCALAPPDATA%` through the app's private store. MEASURED 2026-10-01: the
+    selected-path store's main file stayed real while its WAL and index landed in
+    the store, so writers inside and outside the app open one database with two
+    different WAL indexes (what that does to the store is UNMEASURED; the audit's
+    §7). The home directory is not redirected, so `~/.alelyon` is one folder for
+    all of them, beside `~/.alelyon/ci_gates` and the other machine state.
+    """
+    if _packaged_like():
+        return _platform_state_dir()
+    return Path.home() / ".alelyon"
+
+
+def _platform_state_dir() -> Path:
     """The platform's per-user application-data directory for this package.
 
     Deliberately NOT a dot-directory in `$HOME` on Windows or macOS: each of
     those platforms has a documented location, and putting state somewhere else
     means the user cannot find it, back it up, or clear it by the means their
-    system already gives them.
+    system already gives them. Packaged and installed code keep their state here.
+    A source checkout used it too until W4, so it is also where a checkout's
+    superseded stores are looked for.
 
     Except for an agent's run (W5). When packaged or installed code runs in a
     process an AI coding agent started, the user's REAL AppData is replaced by
@@ -204,8 +230,7 @@ def _user_state_dir() -> Path:
     desktop app a file it creates under AppData lands in the app's private store,
     where it later hides the user's own file from every run inside the app
     (measured 2026-10-01). An `%LOCALAPPDATA%` already pointed elsewhere is left
-    alone, and so is a source checkout, whose callers of this directory share it
-    with the user's own programs on purpose.
+    alone.
     """
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
@@ -224,9 +249,12 @@ def _user_state_dir() -> Path:
 def user_state_home() -> Path:
     """The per-user state home — `globals/` component INCLUDED.
 
-    `_user_state_dir()` is the platform directory; this is the state home inside
-    it, and the difference between the two is exactly one component and one
-    divergent database. A caller that needs per-user state in a SOURCE checkout
+    `~/.alelyon/globals` in a source checkout (W4), the platform directory's
+    `globals/` when packaged or installed (see `_user_state_dir()`).
+
+    `_user_state_dir()` is the directory; this is the state home inside it, and
+    the difference between the two is exactly one component and one divergent
+    database. A caller that needs per-user state in a SOURCE checkout
     cannot use `globals_dir()` (which anchors on the checkout) and so reached for
     `_user_state_dir()` instead — landing one component above every other branch
     of `_resolve()`. Measured on this workstation 2026-08-11, that produced two

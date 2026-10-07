@@ -27,7 +27,7 @@ with two constraints compiled into the grammar:
     Every number in the answer therefore comes through a `figure` slot.
 
 **Two guarantees, and they are not the same one.** When the backend compiles the
-schema into a grammar (llama.cpp/Ollama do), the constraint is structural and a
+schema into a grammar (llama.cpp's server does), the constraint is structural and a
 fabricated figure is literally unrepresentable. When a backend merely *suggests*
 the schema, `validate()` still rejects any reply with a digit in prose or an
 unknown figure. So the honest claim is: **structurally impossible where the

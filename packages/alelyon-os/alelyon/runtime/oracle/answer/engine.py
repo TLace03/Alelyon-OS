@@ -17,8 +17,8 @@ uncompressed data) — Fisher-z for correlation, standard error for a mean — w
 CFRC compression term (`alelyon.runtime.vector.codec`) added only when computing over a
 compressed store.
 
-`llm_fn` is injected (an Ollama caller in production, a stub in tests), so the whole
-engine is Qt-free and offline-testable.
+`llm_fn` is injected (the managed llama.cpp server or a hosted model in
+production, a stub in tests), so the whole engine is Qt-free and offline-testable.
 """
 from __future__ import annotations
 

@@ -785,8 +785,9 @@ def selected_repository_state_root() -> Path:
     module.  It deliberately delegates to the long-standing private seam so
     existing hermetic tests and compatibility callers keep one state-location
     policy: an explicit ``ALELYON_HOME`` wins, while a source checkout otherwise
-    uses the platform user-state home instead of writing selected-project state
-    back into that checkout's ``globals/`` directory.
+    uses the per-user state home (``~/.alelyon/globals`` since W4) instead of
+    writing selected-project state back into that checkout's ``globals/``
+    directory.
 
     The returned path is only arithmetic.  Calling this function creates no
     directory or file.
@@ -794,16 +795,31 @@ def selected_repository_state_root() -> Path:
     return _selected_repository_state_root()
 
 
-def _superseded_selected_repository_state_root() -> Path | None:
-    """Where this function used to answer, when that is a DIFFERENT directory.
+def _superseded_selected_repository_state_roots() -> tuple[Path, ...]:
+    """Where this function used to answer, newest move first.
 
-    ``None`` when the two coincide, which is the ``ALELYON_HOME`` branch: it
-    already carried the ``globals/`` component and did not move.
+    It has moved twice:
+
+    * 2026-10 (W4, docs/audits/2026-10-01-appdata-redirection.md): a source
+      checkout's root left the platform directory's ``globals/`` for
+      ``~/.alelyon/globals``. The Claude desktop app redirects AppData for every
+      agent session inside it, so those sessions and the owner's own programs
+      outside it shared the store's main file but not its WAL and index
+      (measured 2026-10-01). Packaged and installed code did not move.
+    * 2026-08-11: the root gained its ``globals/`` component, leaving the
+      platform directory itself behind.
+
+    Empty under ``ALELYON_HOME``, which already carried the ``globals/``
+    component and has not moved. A root that coincides with the current one is
+    filtered out by the caller.
     """
     from alelyon.runtime.common import paths
     if os.environ.get("ALELYON_HOME"):
-        return None
-    return Path(paths._user_state_dir())
+        return ()
+    platform = Path(paths._platform_state_dir())
+    if paths._packaged_like():
+        return (platform,)
+    return (platform / "globals", platform)
 
 
 #: Files this module used to keep at the superseded root. Named rather than
@@ -813,42 +829,43 @@ _SELECTED_STATE_NAMES = ("fleet_repository_paths.sqlite3", "fleet_repositories")
 
 
 def superseded_selected_state() -> tuple[Path, ...]:
-    """Selected-repository stores at the OLD root that still exist on disk.
+    """Selected-repository stores at an OLD root that still exist on disk.
 
     A named, visible degraded state rather than a silent adoption. When this
     returns a non-empty tuple, those files hold coordination history that this
-    build no longer reads and will never read: resolution moved by one
-    ``globals/`` component so that it stops producing two answers on one machine.
+    build no longer reads and will never read. Resolution moved by one
+    ``globals/`` component so that it stops producing two answers on one
+    machine, and in a source checkout it then moved out of AppData (see
+    :func:`_superseded_selected_repository_state_roots`). Newest move first.
 
     It is deliberately NOT a repair. Reading the old store would adopt one side
     of a divergence nobody has adjudicated; deleting it would destroy the other
     side of it; merging them is a state migration and an owner decision under
     AGENTS.md §6. So this reports, and an operator decides.
+    ``tools/merge_selected_path_context.py`` is the instrument for that decision.
 
-    Returns an empty tuple both when nothing was left behind and when the old
+    Returns an empty tuple both when nothing was left behind and when an old
     root IS the new one. Those are the same fact for a caller — there is nothing
     stranded — which is why they are not distinguished here.
     """
-    old = _superseded_selected_repository_state_root()
-    if old is None:
-        return ()
     new = _selected_repository_state_root()
-    try:
-        if old.resolve() == new.resolve():
-            return ()
-    except OSError:
-        return ()
     stranded: list[Path] = []
-    for name in _SELECTED_STATE_NAMES:
-        candidate = old / name
+    for old in _superseded_selected_repository_state_roots():
         try:
-            if candidate.exists():
-                stranded.append(candidate)
+            if old.resolve() == new.resolve():
+                continue
         except OSError:
-            # An unreadable candidate is not evidence of absence, and saying
-            # "nothing stranded" on a failed stat is the one answer that would
-            # be worse than saying nothing.
-            stranded.append(candidate)
+            continue
+        for name in _SELECTED_STATE_NAMES:
+            candidate = old / name
+            try:
+                if candidate.exists():
+                    stranded.append(candidate)
+            except OSError:
+                # An unreadable candidate is not evidence of absence, and saying
+                # "nothing stranded" on a failed stat is the one answer that
+                # would be worse than saying nothing.
+                stranded.append(candidate)
     return tuple(stranded)
 
 
