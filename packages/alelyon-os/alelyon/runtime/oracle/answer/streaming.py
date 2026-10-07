@@ -19,13 +19,16 @@ end-of-stream marker distinguishes them, so it is read and reported rather than
 assumed. A caller that shows a truncated answer as a complete one is publishing
 the model's first half as its conclusion.
 
-Three formats, three decoders, one loop:
+Two formats, two decoders, one loop:
 
-* **Ollama** — newline-delimited JSON, one object per fragment, `done: true` last.
 * **OpenAI-compatible** — Server-Sent Events, `choices[0].delta.content`,
-  terminated by the literal `data: [DONE]`.
+  terminated by the literal `data: [DONE]`. The platform's own llama.cpp
+  server (ADR-0041) speaks this one.
 * **Anthropic** — Server-Sent Events, `content_block_delta` fragments,
   terminated by `message_stop`.
+
+Ollama's newline-delimited JSON was a third format until ADR-0041 retired
+Ollama; its decoder and line pump went with it.
 
 The decoders are pure functions over already-decoded lines, so the parsing —
 which is where wire formats actually break — is testable without a socket.
@@ -149,33 +152,6 @@ class ThinkFilter:
 
 
 # ── pure decoders ────────────────────────────────────────────────────────────
-def decode_ollama_line(line: str) -> Tuple[str, bool]:
-    """`(fragment, done)` for one NDJSON line of an Ollama chat stream.
-
-    An unparseable line yields `("", False)` rather than raising. Ollama emits
-    keep-alive blanks, and a strict parser here would turn one into a failed
-    answer.
-    """
-    text = (line or "").strip()
-    if not text:
-        return "", False
-    try:
-        obj = json.loads(text)
-    except Exception:  # noqa: BLE001
-        return "", False
-    if not isinstance(obj, dict):
-        return "", False
-    done = bool(obj.get("done"))
-    message = obj.get("message")
-    fragment = ""
-    if isinstance(message, dict):
-        fragment = str(message.get("content") or "")
-    if not fragment:
-        # `/api/generate` shape, accepted because some deployments proxy it.
-        fragment = str(obj.get("response") or "")
-    return fragment, done
-
-
 def sse_events(lines: Iterable[str]) -> Iterator[Tuple[str, str]]:
     """`(event, data)` pairs from Server-Sent Events lines.
 
@@ -265,40 +241,46 @@ def _over_budget() -> str:
     """The one wording for a stream that hit the cap.
 
     Written once because it was written twice and the two had to stay in step
-    while only one of them was ever true: before the slice above, `_pump`
-    admitted an entire oversized fragment and then reported that the answer
-    "was cut off". Now the sentence is a fact at both sites.
+    while only one of them was ever true: before the slice in `_sse_pump`, the
+    line pump that served Ollama's format admitted an entire oversized fragment
+    and then reported that the answer "was cut off". Now the sentence is a fact
+    at both sites in `_sse_pump`.
     """
     return (f"the answer reached the {MAX_STREAM_CHARS:,}-character limit and "
             f"was cut off there")
 
 
-def _pump(response, decode, sink: StreamSink,
-          cancel: CancelCheck, recorder=None) -> StreamResult:
-    """Drive one decoded-line iterator into the sink.
+def _sse_pump(response, decode_pair, sink: StreamSink,
+              cancel: CancelCheck, recorder=None) -> StreamResult:
+    """Drive one SSE response into the sink, event by event.
 
-    `decode` maps a raw line to `(fragment, done)`. The accumulator is the
-    return value; the sink is best-effort, and a sink that raises must not cost
-    the text already received — the caller still has a complete answer to save.
+    `decode_pair` maps an `(event, data)` pair to `(fragment, done)`. The
+    accumulator is the return value; the sink is best-effort, and a sink that
+    raises must not cost the text already received — the caller still has a
+    complete answer to save.
 
-    `recorder` is an optional `transcript.stream.Recorder`. It is fed every
-    wire line, in order, BEFORE decoding — which is the whole point: the
-    assembled text is what this function returns and what a transcript built
-    on the return value would commit, and the chunk boundaries it is built
-    from are load-bearing state for three consumers here (the incremental
+    `recorder` is an optional `transcript.stream.Recorder`. It is fed every raw
+    wire line, in order, BEFORE decoding, rather than the assembled events: an
+    event sequence reconstructed from the decoded fragments is a record of what
+    this function made of the stream, not of what arrived. The chunk boundaries
+    are load-bearing state for three consumers here (the incremental
     `ThinkFilter`, the `MAX_STREAM_CHARS` budget, and the per-chunk `cancel`
     poll). Absent a recorder this costs one `is None` test per line.
     """
     parts: list[str] = []
     total = 0
-    for raw in response:
-        if recorder is not None:
-            recorder.line(raw if isinstance(raw, bytes)
-                          else str(raw).encode("utf-8", "replace"))
-        if cancel is not None and cancel():
-            return StreamResult("".join(parts), False, cancelled=True)
-        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-        fragment, done = decode(line)
+
+    def _lines():
+        for raw in response:
+            if cancel is not None and cancel():
+                return
+            if recorder is not None:
+                recorder.line(raw if isinstance(raw, bytes)
+                              else str(raw).encode("utf-8", "replace"))
+            yield raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+
+    for event, data in sse_events(_lines()):
+        fragment, done = decode_pair(event, data)
         if fragment:
             # Slice to the remaining allowance BEFORE appending. The guard used
             # to admit a whole fragment and then notice, which made it a floor
@@ -317,52 +299,6 @@ def _pump(response, decode, sink: StreamSink,
             total += len(fragment)
             try:
                 sink(fragment)
-            except Exception:  # noqa: BLE001 — the consumer's problem, not the text's
-                pass
-            if total >= MAX_STREAM_CHARS:
-                return StreamResult("".join(parts), False,
-                                    error=_over_budget())
-        if done:
-            return StreamResult("".join(parts), True)
-    # The iterator ended without the format's end marker. That is a dropped
-    # connection, not a short answer, and saying so is the point of this module.
-    return StreamResult("".join(parts), False,
-                        error="the model's connection closed before it finished")
-
-
-def _sse_pump(response, decode_pair, sink: StreamSink,
-              cancel: CancelCheck, recorder=None) -> StreamResult:
-    """`_pump` for the two SSE formats, whose unit is an event, not a line.
-
-    `recorder` is fed the raw lines rather than the assembled events, for the
-    reason given on `_pump`: an event sequence reconstructed from the decoded
-    fragments is a record of what this function made of the stream, not of
-    what arrived.
-    """
-    parts: list[str] = []
-    total = 0
-
-    def _lines():
-        for raw in response:
-            if cancel is not None and cancel():
-                return
-            if recorder is not None:
-                recorder.line(raw if isinstance(raw, bytes)
-                              else str(raw).encode("utf-8", "replace"))
-            yield raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-
-    for event, data in sse_events(_lines()):
-        fragment, done = decode_pair(event, data)
-        if fragment:
-            # Same bound as `_pump`, for the same reason. See the note there.
-            fragment = fragment[:max(0, MAX_STREAM_CHARS - total)]
-            if not fragment:
-                return StreamResult("".join(parts), False,
-                                    error=_over_budget())
-            parts.append(fragment)
-            total += len(fragment)
-            try:
-                sink(fragment)
             except Exception:  # noqa: BLE001
                 pass
             if total >= MAX_STREAM_CHARS:
@@ -372,6 +308,8 @@ def _sse_pump(response, decode_pair, sink: StreamSink,
             return StreamResult("".join(parts), True)
     if cancel is not None and cancel():
         return StreamResult("".join(parts), False, cancelled=True)
+    # The events ended without the format's end marker. That is a dropped
+    # connection, not a short answer, and saying so is the point of this module.
     return StreamResult("".join(parts), False,
                         error="the model's connection closed before it finished")
 
@@ -407,40 +345,7 @@ def _failed(exc: Exception) -> StreamResult:
                                          f"({type(exc).__name__})")
 
 
-# ── the three backends ───────────────────────────────────────────────────────
-def ollama_stream(base_url: str = "http://localhost:11434",
-                  model: str = "qwen3-coder:30b", *, temperature: float = 0.1,
-                  timeout: float = 300.0, max_tokens: Optional[int] = None,
-                  recorder=None):
-    """A streaming counterpart to `providers.ollama_llm`.
-
-    Shares its URL normalisation deliberately: two functions deriving the same
-    endpoint independently is how one of them ends up posting to
-    `/api/chat/api/chat`.
-    """
-    from alelyon.runtime.oracle.answer.providers import normalize_ollama_chat_url
-
-    endpoint = normalize_ollama_chat_url(base_url)
-
-    def _stream(prompt: str, sink: StreamSink,
-                cancel: CancelCheck = None) -> StreamResult:
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max(1, int(max_tokens))
-        body = {"model": model, "stream": True, "options": options,
-                "messages": [{"role": "user", "content": prompt}]}
-        try:
-            with _open(endpoint, body, {"Content-Type": "application/json"},
-                       timeout) as response:
-                _record_open(recorder, response)
-                return _pump(response, decode_ollama_line, sink, cancel,
-                             recorder)
-        except Exception as exc:  # noqa: BLE001
-            return _failed(exc)
-
-    return _stream
-
-
+# ── the two backends ────────────────────────────────────────────────────────
 def openai_compatible_stream(base_url: str, model: str, *, api_key: str = "",
                              api_key_name: str = "", temperature: float = 0.1,
                              timeout: float = 300.0,

@@ -23,21 +23,15 @@ _log = logging.getLogger(__name__)
 
 from alelyon.runtime.oracle.answer.chat import (
     ChatFn, ChatMessage, ChatReply, ChatStreamFn, anthropic_chat,
-    anthropic_chat_stream, flatten_messages, ollama_chat, ollama_chat_stream,
-    openai_chat, openai_chat_stream,
+    anthropic_chat_stream, flatten_messages, openai_chat, openai_chat_stream,
 )
 from alelyon.runtime.oracle.answer.providers import (
-    anthropic_llm, have_anthropic_key, ollama_llm, openai_compatible_llm,
+    anthropic_llm, have_anthropic_key, openai_compatible_llm,
 )
 from alelyon.runtime.oracle.answer.streaming import (
     CancelCheck, StreamResult, StreamSink, anthropic_stream,
-    ollama_stream, openai_compatible_stream,
+    openai_compatible_stream,
 )
-from alelyon.runtime.oracle.assistant import local_model as LM
-
-# Compatibility alias.  ``local_model`` owns both the shipped default and the
-# persisted/env-selected runtime model; do not introduce a second literal here.
-DEFAULT_OLLAMA_MODEL = LM.DEFAULT_MODEL
 
 
 #: The first transformers release that does not execute attacker-selected
@@ -301,6 +295,24 @@ class Provider:
     #: transcript must be able to state.
     chat_fn: Optional[ChatFn] = None
     chat_stream_fn: Optional[ChatStreamFn] = None
+    #: Whether the backend can answer now, asked without sending anything and
+    #: without starting anything. Absent means the composition that built the
+    #: provider already decided (a registry endpoint is offered only when it is
+    #: `ready()`, the in-process model only when `hf_is_usable()`). The managed
+    #: llama.cpp server sets it: a server with no binary or no GGUF file cannot
+    #: answer, and Auto must say so instead of trying (`ready_local`).
+    ready_fn: Optional[Callable[[], bool]] = None
+
+    @property
+    def ready(self) -> bool:
+        """Can this provider answer without a download or a remote call?
+        Never raises: a check that fails is "not ready"."""
+        if self.ready_fn is None:
+            return True
+        try:
+            return bool(self.ready_fn())
+        except Exception:  # noqa: BLE001 - an unreadable check is "not ready"
+            return False
 
     def __call__(self, prompt: str, schema=None) -> str:
         # A provider without a grammar seam must REFUSE a constrained request,
@@ -420,17 +432,143 @@ class Provider:
         return ChatReply(text, True, native=False)
 
 
-def ollama_provider(model: str = "", base_url: str = "") -> Provider:
-    # An explicit argument describes a deliberately separate composition.  The
-    # no-argument Local/Auto provider follows the same selection as ModelBar and
-    # the built-in registry endpoint.
-    model = str(model or "").strip() or LM.selected_model()
-    base = str(base_url or "").strip() or LM.base_url()
-    return Provider(name=f"ollama:{model}", fn=ollama_llm(base, model, temperature=0.2),
-                    local=True, grammar=True,
-                    stream_fn=ollama_stream(base, model, temperature=0.2),
-                    chat_fn=ollama_chat(base, model, temperature=0.2),
-                    chat_stream_fn=ollama_chat_stream(base, model, temperature=0.2))
+def retired_provider(name: str, reason: str, *, local: bool = True) -> Provider:
+    """A provider that refuses every call and says why. Used for a saved
+    endpoint whose backend is retired (Ollama, ADR-0041): the row still loads,
+    and anything that asks it gets the reason instead of a silent empty answer.
+
+    Nothing is ever sent, so `local` cannot leak anything; it carries the
+    endpoint's own judgement (`ModelEndpoint.local`) so that a provider and its
+    endpoint never disagree about where the row pointed."""
+    def _fn(prompt: str, schema=None) -> str:
+        del prompt, schema
+        return ""
+
+    def _stream(prompt: str, sink: StreamSink,
+                cancel: CancelCheck = None) -> StreamResult:
+        del prompt, sink, cancel
+        return StreamResult("", False, error=reason)
+
+    def _chat(messages) -> ChatReply:
+        del messages
+        return ChatReply("", False, error=reason)
+
+    def _chat_stream(messages, sink: StreamSink,
+                     cancel: CancelCheck = None) -> ChatReply:
+        del messages, sink, cancel
+        return ChatReply("", False, error=reason)
+
+    return Provider(name=name, fn=_fn, local=local, grammar=False,
+                    stream_fn=_stream, chat_fn=_chat, chat_stream_fn=_chat_stream)
+
+
+def llamacpp_provider(model: str = "", *, timeout: float = 300.0) -> Provider:
+    """The platform's own llama.cpp server (ADR-0041).
+
+    Local by construction: this process starts the server on 127.0.0.1 and it
+    answers only to this launch's token. Nothing is started when the provider is
+    built; the first call starts the server (or reuses the running one), so
+    assembling a provider list never loads a model.
+
+    A grammar is claimed only when ``llama_server.recorded_grammar`` holds a
+    probe that measured one for this binary and model (``python -m
+    alelyon.runtime.oracle.assistant.llama_server probe``). Without that record
+    a constrained request is refused, as it is for every provider without a
+    grammar, and ``constrain.validate`` re-checks whatever a grammar produced.
+    A failure has each seam's usual shape: "" from ``fn``, a failed
+    ``StreamResult`` or ``ChatReply`` that names the reason.
+    """
+    from alelyon.runtime.oracle.assistant import llama_server as LS  # noqa: PLC0415
+
+    name = str(model or "").strip() or LS.selected_model()
+    grammar = bool(name) and LS.recorded_grammar(name)
+
+    def _server():
+        return LS.manager().ensure(name)
+
+    def _unavailable(exc: Exception) -> str:
+        return f"the local model is unavailable: {exc}"
+
+    def _ready() -> bool:
+        # Disk only: a binary to run and the model's GGUF file. Starting the
+        # server is the first call's job, never a readiness check's.
+        if LS.find_binary() is None:
+            return False
+        try:
+            LS.resolve_model(name)
+        except (LS.LlamaServerError, OSError):
+            return False
+        return True
+
+    def _fn(prompt: str, schema=None) -> str:
+        try:
+            server = _server()
+        except LS.LlamaServerError as exc:
+            _log.warning("%s", _unavailable(exc))
+            return ""
+        if schema is not None:
+            if not grammar:
+                return ""
+            try:
+                body = LS.post_json(server, "/v1/chat/completions",
+                                    LS.constrained_payload(server.alias, prompt,
+                                                           schema, temperature=0.2),
+                                    timeout=timeout)
+                return str(body["choices"][0]["message"]["content"] or "")
+            except Exception:  # noqa: BLE001 - "" is this seam's failure contract
+                return ""
+        server.begin()
+        try:
+            return openai_compatible_llm(server.api_base, server.alias,
+                                         api_key=server.token, temperature=0.2,
+                                         timeout=timeout)(prompt)
+        finally:
+            server.end()
+
+    def _stream(prompt: str, sink: StreamSink,
+                cancel: CancelCheck = None) -> StreamResult:
+        try:
+            server = _server()
+        except LS.LlamaServerError as exc:
+            return StreamResult("", False, error=_unavailable(exc))
+        server.begin()
+        try:
+            return openai_compatible_stream(server.api_base, server.alias,
+                                            api_key=server.token, temperature=0.2,
+                                            timeout=timeout)(prompt, sink, cancel)
+        finally:
+            server.end()
+
+    def _chat(messages) -> ChatReply:
+        try:
+            server = _server()
+        except LS.LlamaServerError as exc:
+            return ChatReply("", False, error=_unavailable(exc))
+        server.begin()
+        try:
+            return openai_chat(server.api_base, server.alias, api_key=server.token,
+                               temperature=0.2, timeout=timeout)(messages)
+        finally:
+            server.end()
+
+    def _chat_stream(messages, sink: StreamSink,
+                     cancel: CancelCheck = None) -> ChatReply:
+        try:
+            server = _server()
+        except LS.LlamaServerError as exc:
+            return ChatReply("", False, error=_unavailable(exc))
+        server.begin()
+        try:
+            return openai_chat_stream(server.api_base, server.alias,
+                                      api_key=server.token, temperature=0.2,
+                                      timeout=timeout)(messages, sink, cancel)
+        finally:
+            server.end()
+
+    return Provider(name=f"llamacpp:{name or '(no model selected)'}", fn=_fn,
+                    local=True, grammar=grammar, stream_fn=_stream,
+                    chat_fn=_chat, chat_stream_fn=_chat_stream,
+                    ready_fn=_ready)
 
 
 def hf_llm(model_dir: str = "", *, temperature: float = 0.1,
@@ -627,10 +765,10 @@ def hf_is_usable() -> bool:
 def default_local_provider(
         *, hf_chat_factory: Optional[HFChatFactory] = None) -> Provider:
     """Select the configured local backend, preferring Hugging Face when it is
-    configured AND loadable."""
+    configured AND loadable; otherwise the managed llama.cpp server (ADR-0041)."""
     if hf_is_usable():
         return hf_provider(hf_chat_factory=hf_chat_factory)
-    return ollama_provider()
+    return llamacpp_provider()
 
 
 def anthropic_provider(model: str = "") -> Provider:
@@ -644,18 +782,26 @@ def anthropic_provider(model: str = "") -> Provider:
 def endpoint_provider(endpoint) -> Provider:
     """Build a `Provider` from a `model_config.ModelEndpoint`.
 
-    `local` comes from the endpoint's URL-derived property, never from its
-    label. `Chain.mark_private()` trusts that flag to keep desk and book context
-    off a machine that is not this one; deriving it from a user-supplied name
-    would let an endpoint called "Local Qwen" point anywhere.
+    `local` comes from the address the client will actually call (and, for a
+    saved Ollama row, the model it asked for), never from the endpoint's label.
+    `Chain.mark_private()` trusts that flag to keep desk and book context off a
+    machine that is not this one; deriving it from a user-supplied name would let
+    an endpoint called "Local Qwen" point anywhere. The managed llama.cpp server
+    is local by construction (`llamacpp_provider`).
 
-    Only Ollama advertises a grammar: it compiles a JSON Schema into a llama.cpp
-    GBNF sampler grammar. An OpenAI-compatible server constrains by
-    `response_format`, which is a request, not a sampler restriction.
+    Only the managed llama.cpp server can advertise a grammar, and only after a
+    recorded probe measured one (`llamacpp_provider`). An OpenAI-compatible
+    server constrains by `response_format`, which is a request, not a sampler
+    restriction. A saved Ollama row is retired (ADR-0041) and refuses.
     """
     from alelyon.runtime.oracle.assistant import model_config as MC
 
     endpoint = MC.runtime_endpoint(endpoint)
+    if endpoint.kind == MC.KIND_LLAMACPP:
+        managed = llamacpp_provider(endpoint.model)
+        managed.name = f"{endpoint.id}:{endpoint.model}"
+        return managed
+    local = bool(endpoint.local)
     if endpoint.kind == MC.KIND_ANTHROPIC:
         key_name = endpoint.api_key_name or "ANTHROPIC_API_KEY"
         fn = anthropic_llm(endpoint.model)
@@ -665,14 +811,13 @@ def endpoint_provider(endpoint) -> Provider:
                                                api_key_name=key_name)
         grammar = False
     elif endpoint.kind == MC.KIND_OLLAMA:
-        base = (endpoint.base_url or os.environ.get("OLLAMA_BASE_URL")
-                or "http://localhost:11434")
-        fn = ollama_llm(base, endpoint.model, temperature=0.2)
-        stream_fn = ollama_stream(base, endpoint.model, temperature=0.2)
-        chat_fn = ollama_chat(base, endpoint.model, temperature=0.2)
-        chat_stream_fn = ollama_chat_stream(base, endpoint.model,
-                                            temperature=0.2)
-        grammar = True
+        # Retired (ADR-0041): nothing is sent anywhere. `local` is still the
+        # row's own judgement (`MC.ollama_is_local` on the address its client
+        # would have called), so the provider and its endpoint agree.
+        return retired_provider(
+            f"{endpoint.id}:{endpoint.model}",
+            "Ollama is retired (ADR-0041); choose the managed llama.cpp entry",
+            local=local)
     else:
         fn = openai_compatible_llm(
             endpoint.base_url, endpoint.model,
@@ -688,7 +833,7 @@ def endpoint_provider(endpoint) -> Provider:
             api_key_name=endpoint.api_key_name, temperature=0.2)
         grammar = False
     return Provider(name=f"{endpoint.id}:{endpoint.model}", fn=fn,
-                    local=bool(endpoint.local), grammar=grammar,
+                    local=local, grammar=grammar,
                     stream_fn=stream_fn, chat_fn=chat_fn,
                     chat_stream_fn=chat_stream_fn)
 
@@ -720,10 +865,104 @@ def available(*, hf_chat_factory: Optional[HFChatFactory] = None) -> List[Provid
     except Exception:  # noqa: BLE001 - configuration never breaks the assistant
         pass
 
-    out.append(ollama_provider())
+    out.append(llamacpp_provider())
     if have_anthropic_key():
         out.append(anthropic_provider())
     return out
+
+
+def only_local(providers) -> List[Provider]:
+    """The providers that run on this machine, in the order given.
+
+    Strict on purpose: a provider counts only when its ``local`` is exactly
+    ``True``. That flag is derived from the address a client will call
+    (`model_config.is_local_url`; the managed llama.cpp server is local by
+    construction, ADR-0041), so anything that is not a plain True, including a
+    value some future caller forgot to set, is read as "not this machine".
+    """
+    return [p for p in providers if p.local is True]
+
+
+def ready_local(providers) -> List[Provider]:
+    """Auto's candidates: the providers on this machine (`only_local`) that can
+    answer now (`Provider.ready`), in the order given.
+
+    Readiness is asked of the disk, never of a server: the managed llama.cpp
+    server is ready when its binary is installed and the model's GGUF file is in
+    the models folder, and nothing is started to find out. An empty result is
+    Auto's refusal (`AUTO_NO_LOCAL_MODEL`), made before any client is called.
+    """
+    return [p for p in only_local(providers) if p.ready]
+
+
+def _shown(text: object, limit: int = 80) -> str:
+    """Bound a name for a refusal message. Names are never secrets, but they
+    are operator-supplied and unbounded."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _why_not_local(provider: Provider) -> str:
+    """One clause saying why `provider` is not on this machine.
+
+    Generic on purpose: `provider.local` is derived from the address its client
+    calls, and that address is not repeated here, because a refusal is shown on
+    screen and saved into the conversation, and an address can carry a
+    credential.
+    """
+    del provider
+    return "the address it calls is not this machine"
+
+
+#: How a model on this machine gets ready under ADR-0041: the managed llama.cpp
+#: server runs a GGUF file from the models folder (`llama_server.models_dir()`,
+#: `~/.alelyon/models` unless `ALELYON_MODELS_DIR` names another) chosen as the
+#: Local model. Shared by Local's refusal and Auto's, so they never disagree.
+LOCAL_MODEL_HOW = (
+    "To get a model ready here, put its GGUF file in the models folder "
+    "(~/.alelyon/models), choose it as the Local model, and install "
+    "llama.cpp's server.")
+
+
+def local_refusal(provider: Provider, *, has_model_list: bool = True) -> str:
+    """Why a Local turn may not use `provider`, or "" when it may.
+
+    Local's promise is that nothing leaves the machine, and `provider.local` is
+    the one fact that says where a provider's client calls. A Local turn that
+    would use a provider for which that is not True is refused BEFORE any
+    client is called, so the refusal is not a failed attempt: nothing was sent.
+    The message names the way out, and prints no address and no key.
+
+    Since ADR-0041 the providers Local is built from (the managed llama.cpp
+    server, or the in-process model) are local by construction, so this refuses
+    only a composition that hands Local something else. It stays the one rule.
+
+    `has_model_list` is whether the surface offers a list of models to choose
+    from by name. The Lattice chats do; the Financial Markets analyst's picker
+    holds only Auto, Local and Cloud, and a way out that names a list the reader
+    cannot see is not a way out, so it passes False.
+    """
+    if provider.local is True:
+        return ""
+    way_out = (" Or pick the model you want from the list by name."
+               if has_model_list else "")
+    return (f"Local keeps the conversation on this machine, and the model it "
+            f"would use ({_shown(provider.name)}) is not on this machine: "
+            f"{_why_not_local(provider)}. Nothing was sent. "
+            f"{LOCAL_MODEL_HOW}{way_out}")
+
+
+#: What Auto says when no provider on this machine is ready for it.
+AUTO_NO_LOCAL_MODEL = (
+    "Auto stays on this machine, and no model on this machine is ready, so "
+    f"nothing was sent. {LOCAL_MODEL_HOW} To use a cloud model, choose Cloud "
+    "explicitly.")
+
+#: Appended to a local-only chain's failure note, in place of the cloud
+#: fallback hint the other chains give.
+LOCAL_ONLY_FAILURE = (
+    "Auto and Local stay on this machine. To use a cloud model, choose Cloud "
+    "explicitly.")
 
 
 class Chain:
@@ -745,14 +984,42 @@ class Chain:
         # visible choice opts OUT, and the opt-out is greppable at the site
         # that made the promise.
         local_only_after_private: bool = True,
+        # OFF by default, so every existing composition is unchanged. A chain
+        # built with it never calls a provider whose `local` is not True, in
+        # `__call__`, `stream` and `chat`, whatever the question contains.
+        # Local and Auto are built this way: their promise is that nothing
+        # leaves the machine, and it must not depend on the context.
+        local_only: bool = False,
     ):
         self.providers = list(providers) if providers is not None else available()
         self.used: str = ""
         self.attempts: List[str] = []
         self._sticky = bool(sticky)
         self._local_only_after_private = bool(local_only_after_private)
+        self._local_only = bool(local_only)
         self._private = False
         self._selected: Optional[Provider] = None
+
+    @property
+    def local_only(self) -> bool:
+        """True when this chain was built to keep the turn on this machine.
+
+        The chain is the one place that knows, so a tool step reads this rather
+        than each host re-deriving it: a Local or Auto turn's tools must not
+        reach the network either (`tools.Context.stays_local`).
+        """
+        return self._local_only
+
+    def _candidates(self) -> List[Provider]:
+        """The providers one call may try: the sticky choice once there is
+        one, else all, narrowed to this machine's by whichever rule applies."""
+        candidates = ([self._selected] if self._sticky and self._selected
+                      else self.providers)
+        if self._local_only:
+            return only_local(candidates)
+        if self._private and self._local_only_after_private:
+            return [p for p in candidates if p.local]
+        return candidates
 
     def mark_private(self) -> None:
         """Prevent an Auto chain from spilling desk/book context to cloud.
@@ -770,9 +1037,7 @@ class Chain:
 
     def __call__(self, prompt: str, schema=None) -> str:
         self.attempts = []
-        candidates = [self._selected] if self._sticky and self._selected else self.providers
-        if self._private and self._local_only_after_private:
-            candidates = [p for p in candidates if p.local]
+        candidates = self._candidates()
         for p in candidates:
             if schema is not None and not p.supports_grammar:
                 continue          # cannot enforce; do not pretend to
@@ -812,9 +1077,7 @@ class Chain:
         try somebody else.
         """
         self.attempts = []
-        candidates = [self._selected] if self._sticky and self._selected else self.providers
-        if self._private and self._local_only_after_private:
-            candidates = [p for p in candidates if p.local]
+        candidates = self._candidates()
         last = StreamResult("", False, error="no provider was available")
         for provider in candidates:
             if cancel is not None and cancel():
@@ -849,9 +1112,7 @@ class Chain:
         both shapes. A cancellation stops the chain outright.
         """
         self.attempts = []
-        candidates = [self._selected] if self._sticky and self._selected else self.providers
-        if self._private and self._local_only_after_private:
-            candidates = [p for p in candidates if p.local]
+        candidates = self._candidates()
         last = ChatReply("", False, error="no provider was available")
         for provider in candidates:
             if cancel is not None and cancel():
@@ -873,12 +1134,26 @@ class Chain:
 
     @property
     def failure_note(self) -> str:
-        if self._private and self._local_only_after_private and not self.used:
+        if (self._private and self._local_only_after_private
+                and not self._local_only and not self.used):
+            # A chain that may fall back to a cloud model for a public question
+            # and did not for this private one. A `local_only` chain never
+            # falls back for any question, so this sentence would tell the
+            # reader that a question without a book would have gone to the
+            # cloud; it takes the local-only wording below instead.
             return ("the local model did not answer; cloud fallback was not "
                     "attempted because this question contains private desk or "
                     "book context")
+        if self._local_only and not self.used and not self.attempts:
+            # Nothing this chain may call was left to try.
+            return AUTO_NO_LOCAL_MODEL
         if self.used or not self.attempts:
             return ""
         tried = ", ".join(self.attempts)
+        if self._local_only:
+            # No cloud fallback exists here, so the hint the other chains
+            # give ("set ANTHROPIC_API_KEY") would be false.
+            return (f"no model answered (tried: {tried}). Start the "
+                    f"configured local model. {LOCAL_ONLY_FAILURE}")
         return (f"no model answered (tried: {tried}). Start the configured "
                 f"local model, or set ANTHROPIC_API_KEY for the cloud fallback.")

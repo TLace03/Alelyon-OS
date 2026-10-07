@@ -12,8 +12,8 @@ exactly the situations that matter:
                               the launcher was started before an installer amended
                               PATH, the child cannot see the amendment either.
     a fresh install           installers on Windows routinely amend PATH for *new*
-                              shells only. Ollama, the GitHub CLI and rustup all
-                              do. The program is on disk and unreachable by name.
+                              shells only. The GitHub CLI and rustup both do.
+                              The program is on disk and unreachable by name.
     a service or scheduler    Task Scheduler and Windows services start with a
                               minimal environment by design.
 
@@ -157,11 +157,6 @@ _WINDOWS: Dict[str, Tuple[str, ...]] = {
         # winget installs land under a versioned Packages directory.
         r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\GitHub.cli*\gh.exe",
     ),
-    "ollama": (
-        r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe",
-        r"%ProgramFiles%\Ollama\ollama.exe",
-        r"%USERPROFILE%\scoop\shims\ollama.exe",
-    ),
     "cargo": (
         r"%CARGO_HOME%\bin\cargo.exe",
         r"%USERPROFILE%\.cargo\bin\cargo.exe",
@@ -233,8 +228,6 @@ _DARWIN: Dict[str, Tuple[str, ...]] = {
             "/Library/Developer/CommandLineTools/usr/bin/git"),
     "bash": ("/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"),
     "gh": ("/opt/homebrew/bin/gh", "/usr/local/bin/gh"),
-    "ollama": ("/opt/homebrew/bin/ollama", "/usr/local/bin/ollama",
-               "/Applications/Ollama.app/Contents/Resources/ollama"),
     "cargo": ("$CARGO_HOME/bin/cargo", "$HOME/.cargo/bin/cargo"),
     "rustc": ("$CARGO_HOME/bin/rustc", "$HOME/.cargo/bin/rustc"),
     "maturin": ("$HOME/.cargo/bin/maturin", "/opt/homebrew/bin/maturin"),
@@ -248,7 +241,6 @@ _POSIX: Dict[str, Tuple[str, ...]] = {
     "git": ("/usr/bin/git", "/usr/local/bin/git"),
     "gh": ("/usr/bin/gh", "/usr/local/bin/gh", "/snap/bin/gh"),
     "bash": ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"),
-    "ollama": ("/usr/local/bin/ollama", "/usr/bin/ollama"),
     "cargo": ("$CARGO_HOME/bin/cargo", "$HOME/.cargo/bin/cargo"),
     "rustc": ("$CARGO_HOME/bin/rustc", "$HOME/.cargo/bin/rustc"),
     "maturin": ("$HOME/.cargo/bin/maturin", "/usr/local/bin/maturin"),

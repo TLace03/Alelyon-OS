@@ -1,8 +1,9 @@
 """LLM providers for the Answer Engine — each returns an `llm_fn(prompt) -> str`
-the engine can inject. Same seam as `panel/chat_panel.py`: local Ollama by default
-(keyless), a Claude drop-in when `ANTHROPIC_API_KEY` is set. Kept tiny and
-dependency-light; network failure degrades to an empty string so the engine simply
-refuses rather than crashing."""
+the engine can inject: any OpenAI-compatible server (the platform's own llama.cpp
+server among them, through `assistant.providers.llamacpp_provider`, ADR-0041), and
+a Claude drop-in when `ANTHROPIC_API_KEY` is set. Kept tiny and dependency-light;
+network failure degrades to an empty string so the engine simply refuses rather
+than crashing."""
 from __future__ import annotations
 
 import json
@@ -74,65 +75,44 @@ class _CredentialRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, target)
 
 
-def oracle_urlopen(request: urllib.request.Request, *, timeout: float):
-    """Open one Oracle request without forwarding credentials cross-origin.
+def is_loopback_url(url: str) -> bool:
+    """Is `url`'s host this machine's loopback (127.0.0.0/8, ::1, localhost)?"""
+    import ipaddress  # noqa: PLC0415
+    from urllib.parse import urlsplit  # noqa: PLC0415
 
-    Keyless requests retain urllib's existing behavior.  Credential-bearing
-    requests get a request-local opener whose redirect handler refuses before
+    try:
+        host = (urlsplit(str(url)).hostname or "").strip("[]").lower()
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def oracle_urlopen(request: urllib.request.Request, *, timeout: float):
+    """Open one Oracle request without forwarding credentials cross-origin,
+    and without sending a loopback request through a proxy.
+
+    A loopback request travels directly to loopback. urllib otherwise honours
+    an inherited `HTTP_PROXY` even for 127.0.0.1 when `NO_PROXY` does not name
+    it, which would hand a private prompt (and the managed llama.cpp server's
+    launch token, ADR-0041) to whatever host the proxy is. The SDK client
+    applies the same rule (`platform/sdk/client.py`).
+
+    Credential-bearing requests also get a redirect handler that refuses before
     a secret header could cross an origin boundary.
     """
-    if not _request_has_credentials(request):
+    handlers = []
+    if is_loopback_url(request.full_url):
+        handlers.append(urllib.request.ProxyHandler({}))
+    if _request_has_credentials(request):
+        handlers.append(_CredentialRedirectHandler())
+    if not handlers:
         return urllib.request.urlopen(request, timeout=timeout)
-    opener = urllib.request.build_opener(_CredentialRedirectHandler())
-    return opener.open(request, timeout=timeout)
-
-
-def normalize_ollama_chat_url(base_url: str) -> str:
-    """Return one exact Ollama ``/api/chat`` endpoint.
-
-    Runtime configuration historically mixed server roots, ``/api`` roots,
-    and the full chat endpoint.  Appending blindly turns the configured default
-    into ``/api/chat/api/chat`` and makes a healthy local server look offline.
-    """
-    base = str(base_url or "http://localhost:11434").strip().rstrip("/")
-    if base.endswith("/api/chat"):
-        return base
-    if base.endswith("/api"):
-        return base + "/chat"
-    return base + "/api/chat"
-
-
-def ollama_llm(base_url: str = "http://localhost:11434",
-               model: str = "qwen3-coder:30b", *, temperature: float = 0.1,
-               timeout: float = 300.0,
-               max_tokens: int | None = None) -> Callable[[str], str]:
-    """A local-Ollama author function. qwen3-coder authored 16/16 valid DSL
-    programs first-try in the de-risk harness; temperature is low for determinism."""
-    endpoint = normalize_ollama_chat_url(base_url)
-
-    def _fn(prompt: str, schema=None) -> str:
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max(1, int(max_tokens))
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
-                   "stream": False, "options": options}
-        if schema is not None:
-            # Ollama compiles a JSON Schema into a llama.cpp GBNF grammar and
-            # constrains sampling to it. This is the difference between asking
-            # for a shape and being unable to emit anything else — the whole
-            # basis of `assistant.constrain`.
-            payload["format"] = schema
-        try:
-            req = urllib.request.Request(endpoint,
-                                         data=json.dumps(payload).encode("utf-8"),
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return (data.get("message", {}) or {}).get("content", "") or data.get("response", "")
-        except Exception:  # noqa: BLE001
-            return ""      # engine will refuse honestly
-
-    return _fn
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
 
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -143,8 +123,8 @@ def anthropic_llm(model: str = "claude-sonnet-5", *,
                   max_tokens: int = 1200, temperature: float = 0.1,
                   timeout: float = 90.0) -> Callable[[str], str]:
     """The cloud drop-in, used when `ANTHROPIC_API_KEY` is present. Same
-    contract as `ollama_llm`: a network failure returns "" so the caller refuses
-    honestly rather than raising into a GUI thread.
+    contract as `openai_compatible_llm`: a network failure returns "" so the
+    caller refuses honestly rather than raising into a GUI thread.
 
     Note the identical seam is already in `atlas.fundamentals.guidance`; both
     exist because that one returns Optional[str] for its own provider chain.
@@ -192,7 +172,7 @@ def have_anthropic_key() -> bool:
 # ── OpenAI-compatible: one wire format, many backends ────────────────────────
 #
 # `/v1/chat/completions` is the de-facto interface. vLLM, TGI, llama.cpp's
-# server, LM Studio, Ollama's compatibility shim, OpenAI, Groq, Together,
+# server, LM Studio, OpenAI, Groq, Together,
 # Fireworks, DeepSeek, Mistral, xAI and OpenRouter all speak it. One function
 # therefore covers "my own fine-tuned weights served locally" and "a frontier
 # lab" — the difference is a base URL and whether a key is attached, not a new
@@ -207,8 +187,7 @@ def normalize_openai_chat_url(base_url: str) -> str:
     Accepts a server root, a `/v1` root, or the full endpoint, because every
     one of those is what some backend's own documentation prints. Appending
     blindly produced `/v1/chat/completions/v1/chat/completions` and made a
-    healthy server look unreachable — the same defect
-    `normalize_ollama_chat_url` exists to prevent.
+    healthy server look unreachable.
     """
     base = str(base_url or "").strip().rstrip("/")
     if not base:
@@ -238,8 +217,8 @@ def openai_compatible_llm(
     takes effect without a restart — and so the key is never held in a closure
     any longer than the request that uses it.
 
-    Contract matches `ollama_llm`: any failure returns "" so the caller refuses
-    honestly instead of raising into a GUI thread.
+    Contract matches `anthropic_llm`: any failure returns "" so the caller
+    refuses honestly instead of raising into a GUI thread.
 
     No grammar seam. The OpenAI wire format constrains via `response_format` /
     tool schemas, not a sampler grammar, and `assistant.constrain` depends on

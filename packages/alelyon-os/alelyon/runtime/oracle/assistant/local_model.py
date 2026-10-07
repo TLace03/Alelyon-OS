@@ -1,113 +1,67 @@
 """The local model, managed from inside the app.
 
-The AI Analyst assumed Ollama was already running with the right model pulled.
-When it was not — which is every fresh machine, and any machine after a reboot —
-the only symptom was an answer that never arrived, and the fix required leaving
-the application to run shell commands. For a feature meant to be *available on
-demand*, "start a server first" is not on demand.
+Since ADR-0041 the local model is the platform's own llama.cpp server
+(`llama_server`), not Ollama. This module keeps the small surface the app was
+built around (probe, list, show, select, start) so the model bar, the Lattice
+panels and the Lattice service ask the same questions they always asked; the
+answers now come from files and from the managed server.
 
-This module makes the model's state a first-class thing the app can see and act
-on. It is deliberately thin: probe, start, list, pull, select. It is not a model
-manager and should not become one.
+**Three states, three different sentences.** Collapsing them is how "the
+analyst is broken" gets reported for unrelated causes:
 
-**Four states, four different sentences.** Collapsing them is how "the analyst
-is broken" gets reported for four unrelated causes:
+    OFFLINE     no llama-server is installed            → install a llama.cpp build
+    NO_MODEL    the selected model is no file here      → put a GGUF in the folder
+    READY       a server binary and the model's file    → ask away
+    ERROR       the server failed to start or answer    → retry, and read why
 
-    OFFLINE     the Ollama server is not reachable       → start it
-    NO_MODEL    the server is up; the model is not pulled → download it
-    READY       server up, model present                  → ask away
-    ERROR       the server answered something unusable    → show what it said
+READY does not mean a server is running. The server starts on the first
+question and stops when idle, so READY means "a question will be answered".
 
-**Nothing here starts a download on its own.** A model is gigabytes over
-someone's connection, possibly metered. `ensure_running` will start a server
-that is already installed, because that is instant and local; pulling weights is
-always an explicit act with a visible size.
+**Nothing here downloads anything.** A model is a GGUF file someone puts in
+`~/.alelyon/models`; fetching weights is an explicit, owner-approved act
+(ADR-0041), never a button that starts a transfer.
 """
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
-import sys
 import threading
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from alelyon.runtime.common import toolpath
+from alelyon.runtime.oracle.assistant import gguf_header
+from alelyon.runtime.oracle.assistant import llama_server as LS
 
-# One source of truth for the built-in Ollama integration.  Provider and
-# endpoint-registry adapters may alias this constant for compatibility, but
-# runtime selection always goes through ``selected_model()`` below.
-DEFAULT_MODEL = "qwen3-coder:30b"
-DEFAULT_BASE = "http://localhost:11434"
+#: There is no default model name: a model is a file, and naming one that is not
+#: on the machine is how a fresh install used to point at a 17 GB download.
+DEFAULT_MODEL = ""
 MAX_MODEL_NAME_CHARS = 4_096
 MAX_MODEL_PREF_BYTES = 8_192
+
+#: Where a saved Ollama row with no URL of its own pointed when `OLLAMA_BASE_URL`
+#: was unset. Ollama is retired (ADR-0041) and nothing here calls it.
+OLLAMA_DEFAULT_BASE = "http://localhost:11434"
+
+#: The selected model is runtime state, not a GUI preference: the API server,
+#: any headless caller and the native Lattice (`lattice-core/src/local_model.rs`)
+#: read it too, so it lives in `<globals>/analyst_model.json`. ``None`` keeps
+#: Runtime paths unbound until the preference is actually requested; tests and
+#: `tools/lattice_native_parity.py` point it at a temporary file.
+_PREF_PATH: Optional[Path] = None
 
 STATE_OFFLINE = "offline"
 STATE_NO_MODEL = "no_model"
 STATE_READY = "ready"
 STATE_ERROR = "error"
 
-_PROBE_TIMEOUT = 2.0        # a UI probe must never hang the panel
-_START_GRACE = 12.0         # how long a freshly-spawned server gets to listen
-
-#: How long to spend deciding whether anything is listening at all, per address.
-#:
-#: This is NOT the same budget as `_PROBE_TIMEOUT`, and the distinction is the
-#: whole point. `_PROBE_TIMEOUT` bounds one HTTP request; a probe makes two of
-#: them, and `socket.create_connection` applies its timeout PER ADDRESS returned
-#: by `getaddrinfo`. `localhost` resolves to both `::1` and `127.0.0.1` on
-#: Windows, so the honest arithmetic on a machine with no Ollama was
-#: 2.0s x 2 addresses x 2 requests = 8 seconds — measured, on the UI thread,
-#: inside `MainWindow.__init__`. That was the hang on a fresh install.
-#:
-#: A server on loopback either answers a TCP connect in single-digit
-#: milliseconds or is not there. 0.35s is generous for that question and cannot
-#: accumulate, because `_server_listening()` stops at the first success.
-_CONNECT_TIMEOUT = 0.35
-
-#: How many addresses one loopback host costs. `localhost` resolves to both
-#: `::1` and `127.0.0.1`, and both `socket.create_connection` and `urlopen`
-#: apply their timeout per address, so every budget below is paid this many
-#: times. Named rather than written as a bare `2` because it is the multiplier
-#: that made the arithmetic above wrong the first time.
-_ADDRESSES_PER_HOST = 2
-
-#: Worst-case wall time of one `probe()` call, in seconds: the listen gate plus
-#: the two HTTP requests, each paid per address. Currently 8.7s.
-#:
-#: Public because a caller that has to *join* a probe running on a thread needs
-#: this budget and must not re-derive it. A `QThread` still running when it is
-#: destroyed aborts the process (0xC0000409), so a join bound that sits below
-#: the real worst case is not a slow join — it is the crash. Widening either
-#: timeout above widens this with it.
-PROBE_WORST_CASE = (_CONNECT_TIMEOUT + 2 * _PROBE_TIMEOUT) * _ADDRESSES_PER_HOST
+#: Worst-case wall time of one `probe()`: a folder scan and a few `stat` calls,
+#: no network. A caller that joins a probe running on a thread uses this bound;
+#: a `QThread` still running when it is destroyed aborts the process, so the
+#: bound is generous rather than tight.
+PROBE_WORST_CASE = 2.0
 
 _LOCK = threading.Lock()
-
-
-def base_url() -> str:
-    return (os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE).rstrip("/")
-
-
-# The chosen model is runtime state, not a GUI preference: the API server and
-# any headless caller need it too, so it cannot live in QSettings. ``None``
-# keeps Runtime paths unbound until the preference is actually requested;
-# deployment entry points import provider modules before they bootstrap paths.
-_PREF_PATH: Optional[Path] = None
-
-
-def _pref_path() -> Path:
-    if _PREF_PATH is not None:
-        return Path(_PREF_PATH)
-    from alelyon.runtime.common.paths import GLOBALS_DIR  # noqa: PLC0415
-
-    return Path(GLOBALS_DIR) / "analyst_model.json"
 
 
 def _normalise_model_name(value: object) -> str:
@@ -124,46 +78,60 @@ def _normalise_model_name(value: object) -> str:
     return value
 
 
+def base_url() -> str:
+    """The address a saved Ollama row with no URL of its own would have called:
+    `OLLAMA_BASE_URL` (trailing `/` removed), else the default loopback daemon.
+
+    Ollama is retired (ADR-0041) and nothing calls this address. It is read only
+    to judge such a row's locality (`model_config.ollama_is_local`), so a row
+    that pointed off this machine is never reported as local. As before, the
+    variable is not trimmed: spaces are an address no request can use.
+    """
+    return (os.environ.get("OLLAMA_BASE_URL") or OLLAMA_DEFAULT_BASE).rstrip("/")
+
+
+def _pref_path() -> Path:
+    if _PREF_PATH is not None:
+        return Path(_PREF_PATH)
+    from alelyon.runtime.common.paths import GLOBALS_DIR  # noqa: PLC0415
+
+    return Path(GLOBALS_DIR) / "analyst_model.json"
+
+
 def selected_model() -> str:
-    """The model the analyst will use. Env wins, so a machine can override
-    without touching stored state."""
-    env = _normalise_model_name(os.environ.get("OLLAMA_MODEL"))
-    if env:
-        return env
+    """The model Local uses: a GGUF file name in the models folder, or "".
+
+    Read from `analyst_model.json`, at most `MAX_MODEL_PREF_BYTES` of it; a file
+    that is larger, unreadable or malformed means "no preference". There is no
+    default and no environment override: `OLLAMA_MODEL` named an Ollama tag, and
+    a default named a download (ADR-0041). A name left from Ollama is returned
+    as it is, so the model bar can say it is not a file here.
+    """
     try:
         with _pref_path().open("rb") as source:
             encoded = source.read(MAX_MODEL_PREF_BYTES + 1)
         if len(encoded) > MAX_MODEL_PREF_BYTES:
             return DEFAULT_MODEL
         raw = json.loads(encoded)
-        v = _normalise_model_name(
-            raw.get("model", "") if type(raw) is dict else ""
-        )
-    except Exception:  # noqa: BLE001
-        v = ""
-    return v or DEFAULT_MODEL
+        name = _normalise_model_name(raw.get("model", "") if type(raw) is dict else "")
+    except Exception:  # noqa: BLE001 - an unreadable preference is no preference
+        name = ""
+    return name or DEFAULT_MODEL
 
 
-def set_selected_model(name: str) -> bool:
+def record_selected_model(name: str) -> bool:
+    """Persist `name` as the selected model without checking for its file.
+    False when it cannot be persisted. `set_selected_model` is the checked
+    entry point; `llama_server.select_model` calls this after resolving."""
     name = _normalise_model_name(name)
     if not name:
         return False
-    # A content address is not a model, and persisting one would leave the
-    # analyst pointed at something no server can serve until somebody noticed.
-    # Refused here as well as filtered from the listing, because the listing is
-    # not the only way a name reaches this function.
-    from .catalog import is_content_digest  # noqa: PLC0415
-
-    if is_content_digest(name):
-        return False
     try:
-        payload = json.dumps(
-            {"model": name}, ensure_ascii=False
-        ).encode("utf-8")
+        payload = json.dumps({"model": name}, ensure_ascii=False).encode("utf-8")
     except (TypeError, UnicodeEncodeError):
         return False
     # Anything accepted for persistence must be readable through the exact
-    # bounded reader used by ``selected_model`` on the next call/start.
+    # bounded reader `selected_model` uses on the next call.
     if len(payload) > MAX_MODEL_PREF_BYTES:
         return False
     try:
@@ -174,8 +142,20 @@ def set_selected_model(name: str) -> bool:
             tmp.write_bytes(payload)
             tmp.replace(pref)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - a preference write never breaks the panel
         return False
+
+
+def set_selected_model(name: str) -> bool:
+    """Choose the model Local uses. Refuses a name that is no file here."""
+    name = _normalise_model_name(name)
+    if not name:
+        return False
+    try:
+        found = LS.resolve_model(name)
+    except Exception:  # noqa: BLE001 - LS.ModelNotFound, or a folder that cannot be read
+        return False
+    return record_selected_model(found.name)
 
 
 @dataclass
@@ -196,249 +176,101 @@ class ModelState:
         if self.state == STATE_READY:
             return f"{self.model} ready"
         if self.state == STATE_NO_MODEL:
-            return f"{self.model} is not downloaded on this machine"
+            if self.model:
+                return f"{self.model} is not in {LS.models_dir()}"
+            return f"no model chosen: put a GGUF file in {LS.models_dir()}"
         if self.state == STATE_ERROR:
-            return f"the local model server returned an error: {self.detail}"
-        return "the local model server is not running"
+            return f"the local model server failed: {self.detail}"
+        return "llama.cpp's server is not installed on this machine"
 
     def action(self) -> str:
-        return {STATE_READY: "", STATE_NO_MODEL: "download",
-                STATE_ERROR: "restart", STATE_OFFLINE: "start"}.get(self.state, "")
+        """The one button the model bar may offer. Only a failed server has one:
+        a model is chosen in the list and installed by putting a file in place."""
+        return "restart" if self.state == STATE_ERROR else ""
 
 
-def _server_listening(timeout: float = _CONNECT_TIMEOUT) -> bool:
-    """Is anything accepting connections at `base_url()`? Cheap and bounded.
+def installed_models(timeout: float = 0.0) -> Optional[List[str]]:
+    """GGUF models in the models folder. Never None: the folder always answers.
 
-    A short-circuit in front of the HTTP calls. "Nothing is listening" is the
-    common case on any machine that does not run a local model, and answering it
-    with a TCP connect costs milliseconds instead of the multi-second accumulation
-    described on `_CONNECT_TIMEOUT`.
-
-    Returns True on the first address that accepts. Any resolution or connection
-    failure is False — this decides whether to bother, never whether a result is
-    valid.
+    `timeout` is accepted for the callers that pass one; a scan does not wait.
     """
-    import socket
-    from urllib.parse import urlsplit
-
-    parts = urlsplit(base_url())
-    host = parts.hostname or "localhost"
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    del timeout
     try:
-        addrs = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        return [model.name for model in LS.list_models()]
     except OSError:
-        return False
-    for family, socktype, proto, _canon, sockaddr in addrs:
-        try:
-            with socket.socket(family, socktype, proto) as sock:
-                sock.settimeout(timeout)
-                sock.connect(sockaddr)
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def _get(path: str, timeout: float = _PROBE_TIMEOUT):
-    req = urllib.request.Request(base_url() + path)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def installed_models(timeout: float = _PROBE_TIMEOUT) -> Optional[List[str]]:
-    """Model names on this machine, or None when the server is unreachable.
-
-    None and [] are different answers: None is "cannot tell", [] is "the server
-    is up and has nothing", and only the second is the user's problem to fix.
-
-    Rows whose name is a content address are not models and are dropped.
-    Measured on this workstation 2026-08-22, ``/api/tags`` published three
-    ``blobs:sha256-<64 hex>`` rows beside the five real models, and every view
-    listing this offered them as models a user could select. The rule lives in
-    `catalog.is_content_digest` rather than here because this endpoint is
-    parsed in two places, and a filter written twice is the second copy that
-    goes stale.
-    """
-    try:
-        data = _get("/api/tags", timeout)
-    except Exception:  # noqa: BLE001
         return None
-    # Imported inside the function on purpose: a module-level edge here is on
-    # the pre-bootstrap path that AIRC-RT-RED-01 is about, and this rule is
-    # needed only when a listing is actually being read.
-    from .catalog import is_content_digest  # noqa: PLC0415
-
-    out = []
-    for m in (data.get("models") or []):
-        name = str(m.get("name") or m.get("model") or "").strip()
-        if name and not is_content_digest(name):
-            out.append(name)
-    return sorted(out)
 
 
 def show(model: str = "", timeout: float = 6.0) -> Optional[dict]:
-    """The server's own description of a model, or None when it cannot be had.
+    """The model's description, read from its GGUF header, in the shape
+    `/api/show` had: `model`, `details`, `model_info` and `tensors`.
 
-    This is the input to model morphometry: the architecture fields and, on a
-    server new enough to publish it, the tensor inventory. Returned raw and
-    unmerged — interpreting it belongs to
-    `alelyon.runtime.vector.lattice.morphometry`, which is pure and testable
-    without a server.
-
-    None means "cannot tell", never "the model has no structure". The gate below
-    is the same one `probe()` uses: on a machine with no server, two HTTP
-    requests to `localhost` cost seconds, and this is called from a view.
-
-    The timeout is longer than `_PROBE_TIMEOUT` on purpose — a show for a 30B
-    model serialises a few thousand tensor records, which is more work than a
-    version string — but it is still bounded, and callers run it off the UI
-    thread.
+    None means "cannot tell" (no such file, or a header this reader refuses),
+    never "the model has no structure".
     """
-    model = str(model or "").strip() or selected_model()
-    if not _server_listening():
-        return None
-    body = json.dumps({"model": model}).encode("utf-8")
-    req = urllib.request.Request(base_url() + "/api/show", data=body,
-                                 headers={"Content-Type": "application/json"})
+    del timeout
+    name = str(model or "").strip() or selected_model()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 - a missing description is an ordinary state
+        found = LS.resolve_model(name)
+        return gguf_header.read_header(found.path).show_payload(found.name)
+    except (LS.LlamaServerError, gguf_header.GGUFError, OSError):
         return None
-    return data if isinstance(data, dict) else None
 
 
-def _matches(installed: List[str], want: str) -> bool:
-    """Ollama reports `qwen3-coder:30b`; a user may have configured
-    `qwen3-coder`. Treat a missing tag as :latest, the way the CLI does."""
-    want = want.strip()
-    if want in installed:
-        return True
-    if ":" not in want:
-        return f"{want}:latest" in installed
-    return False
-
-
-def probe() -> ModelState:
-    """Current state. Never raises, never blocks longer than the timeout.
-
-    Refuses before the HTTP layer when nothing is listening. Without that gate
-    the two requests below cost 8 seconds on a machine with no local model
-    server — see `_CONNECT_TIMEOUT`.
-    """
-    want = selected_model()
-    if not _server_listening():
-        return ModelState(STATE_OFFLINE, want, [],
-                          "nothing is listening at " + base_url())
-    version = ""
-    try:
-        version = str((_get("/api/version") or {}).get("version", "") or "")
-    except Exception:  # noqa: BLE001
-        pass
-    names = installed_models()
-    if names is None:
-        return ModelState(STATE_OFFLINE, want, [], "no response from " + base_url())
-    if _matches(names, want):
-        return ModelState(STATE_READY, want, names, "", version)
-    return ModelState(STATE_NO_MODEL, want, names,
-                      f"{len(names)} other model(s) installed", version)
-
-
-# ── starting the server ──────────────────────────────────────────────────────
-def ollama_binary() -> Optional[str]:
-    """Ollama's own installer amends PATH for *new* shells only, so a GUI already
-    running when the user installed it -- the exact moment they then press
-    'Start' -- cannot see it by name. Resolve against the disk instead."""
-    return toolpath.which("ollama")
+def server_binary() -> Optional[str]:
+    """The llama-server this machine would run, or None."""
+    binary = LS.find_binary()
+    return str(binary) if binary is not None else None
 
 
 def is_installed() -> bool:
-    return ollama_binary() is not None
+    return server_binary() is not None
 
 
-def ensure_running(wait: float = _START_GRACE) -> ModelState:
-    """Start the server if it is installed and not listening, then re-probe.
-
-    Only ever starts a server that is already on the machine. If Ollama is not
-    installed this says so and stops — silently downloading a runtime would be a
-    far larger act than the user asked for by clicking 'Start'.
-    """
-    st = probe()
-    if st.state != STATE_OFFLINE:
-        return st
-    exe = ollama_binary()
-    if exe is None:
-        return ModelState(STATE_OFFLINE, st.model, [],
-                          "Ollama could not be found on this machine. Install "
-                          "it from ollama.com, then press Start again. "
-                          + toolpath.find("ollama").reason())
+def probe() -> ModelState:
+    """Current state. Never raises; touches the disk only, never the network."""
+    want = selected_model()
     try:
-        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if sys.platform == "win32":
-            # Detached, no console window: the server outlives this GUI, which
-            # is the point — restarting the app must not kill the model.
-            kwargs["creationflags"] = (subprocess.CREATE_NO_WINDOW
-                                       | subprocess.DETACHED_PROCESS)
-        else:
-            kwargs["start_new_session"] = True
-        subprocess.Popen([exe, "serve"], **kwargs)
-    except Exception as exc:  # noqa: BLE001
-        return ModelState(STATE_ERROR, st.model, [],
-                          f"could not start Ollama: {exc}")
-
-    deadline = time.time() + max(1.0, float(wait))
-    while time.time() < deadline:
-        time.sleep(0.5)
-        st = probe()
-        if st.state != STATE_OFFLINE:
-            return st
-    return ModelState(STATE_OFFLINE, st.model, [],
-                      f"started Ollama but it did not begin listening within "
-                      f"{wait:.0f}s")
+        names = installed_models() or []
+    except Exception:  # noqa: BLE001
+        names = []
+    if not is_installed():
+        return ModelState(STATE_OFFLINE, want, names,
+                          f"no llama-server: set {LS.BINARY_ENV} or install a "
+                          f"llama.cpp build into {LS.llama_dir()}")
+    current = LS.manager().current
+    if want and want in names:
+        version = "running" if current is not None and current.running else ""
+        return ModelState(STATE_READY, want, names, "", version)
+    detail = (f"{len(names)} model(s) in {LS.models_dir()}" if names
+              else f"no GGUF files in {LS.models_dir()}")
+    return ModelState(STATE_NO_MODEL, want, names, detail)
 
 
-# ── pulling a model ──────────────────────────────────────────────────────────
+def ensure_running(wait: float = LS.START_TIMEOUT_S) -> ModelState:
+    """Start (or restart) the server for the selected model, then re-probe."""
+    st = probe()
+    if st.state in (STATE_OFFLINE, STATE_NO_MODEL):
+        return st
+    try:
+        LS.manager().ensure(st.model)
+    except LS.LlamaServerError as exc:
+        return ModelState(STATE_ERROR, st.model, st.installed, str(exc))
+    return probe()
+
+
 def pull(model: str, on_progress: Optional[Callable[[str, float], None]] = None,
          should_stop: Optional[Callable[[], bool]] = None) -> tuple:
-    """Download a model, streaming progress. Returns (ok, message).
+    """Refused: models are files (ADR-0041). Returns (False, what to do instead)."""
+    del model, on_progress, should_stop
+    return False, (f"models are files now: put a GGUF file in {LS.models_dir()} "
+                   "and choose it in the list")
 
-    `on_progress(status, fraction)` is called as the server reports; fraction is
-    -1.0 when the server gives a status with no byte counts, which is most of
-    the run. Reporting -1 rather than 0 keeps a progress bar from sitting at
-    zero through a ten-minute download and looking stalled.
-    """
-    model = str(model or "").strip() or selected_model()
-    body = json.dumps({"model": model, "stream": True}).encode("utf-8")
-    req = urllib.request.Request(base_url() + "/api/pull", data=body,
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            for raw in resp:
-                if should_stop is not None and should_stop():
-                    return False, "cancelled"
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if msg.get("error"):
-                    return False, str(msg["error"])
-                status = str(msg.get("status", "") or "")
-                total = float(msg.get("total") or 0.0)
-                done = float(msg.get("completed") or 0.0)
-                frac = (done / total) if total > 0 else -1.0
-                if on_progress is not None:
-                    on_progress(status, frac)
-                if status.lower() == "success":
-                    return True, f"{model} downloaded"
-    except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}: {exc.reason}"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {exc}"
-    # The stream ended without a success line — check rather than assume.
-    names = installed_models()
-    if names is not None and _matches(names, model):
-        return True, f"{model} downloaded"
-    return False, "the download ended without confirming success"
+
+__all__ = [
+    "DEFAULT_MODEL", "MAX_MODEL_NAME_CHARS", "MAX_MODEL_PREF_BYTES", "ModelState",
+    "OLLAMA_DEFAULT_BASE", "PROBE_WORST_CASE", "STATE_ERROR", "STATE_NO_MODEL",
+    "STATE_OFFLINE", "STATE_READY", "base_url", "ensure_running",
+    "installed_models", "is_installed", "probe", "pull", "record_selected_model",
+    "selected_model", "server_binary", "set_selected_model", "show",
+]

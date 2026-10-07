@@ -41,10 +41,17 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
+#: RETIRED by ADR-0041 (no Ollama, for anything). Still a known kind so a saved
+#: registry that holds an Ollama row loads instead of breaking; such a row is
+#: never `ready()`, so nothing ever routes a question to it.
 KIND_OLLAMA = "ollama"
 KIND_OPENAI = "openai-compatible"
 KIND_ANTHROPIC = "anthropic"
-KINDS = (KIND_OLLAMA, KIND_OPENAI, KIND_ANTHROPIC)
+#: The platform-managed llama.cpp server (ADR-0041, `llama_server`): started on
+#: demand on 127.0.0.1 with a launch token; `model` names a GGUF file in
+#: `~/.alelyon/models`. It has no URL or key of its own to configure.
+KIND_LLAMACPP = "llamacpp"
+KINDS = (KIND_OLLAMA, KIND_OPENAI, KIND_ANTHROPIC, KIND_LLAMACPP)
 
 #: An api_key_name must look like an environment variable, because that is what
 #: it becomes. Refusing anything else keeps a crafted name out of the env file.
@@ -122,6 +129,45 @@ def is_local_url(url: str) -> bool:
         return False
 
 
+def is_ollama_cloud_model(model: str) -> bool:
+    """Is this Ollama model served by a remote service, through the local daemon?
+
+    Recent Ollama versions forward a model whose tag is ``cloud`` or ends in
+    ``-cloud`` (``gpt-oss:120b-cloud``, ``qwen3-coder:480b-cloud``, ``foo:cloud``)
+    from the daemon on this machine to a hosted service. The address a client
+    calls is then loopback and the prompt still leaves the machine, so such a
+    name is never local, whatever the address. Matching ignores case. The tag is
+    what follows the last ``:`` of the last path segment; a name with no tag
+    (``llama3``, ``my-cloud``) is not a cloud model.
+    """
+    name = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    if ":" not in name:
+        return False
+    tag = name.rsplit(":", 1)[1]
+    return tag == "cloud" or tag.endswith("-cloud")
+
+
+def ollama_is_local(base_url: str, model: str) -> bool:
+    """Would an Ollama client using this address and model stay on this machine?
+
+    The one rule, used by every place that decides an Ollama provider's
+    ``local``: the URL the client will actually call is loopback
+    (:func:`is_local_url`) AND the model is not one the daemon serves remotely
+    (:func:`is_ollama_cloud_model`). An empty ``base_url`` means the server the
+    client falls back to, ``OLLAMA_BASE_URL`` or the default loopback server, so
+    that is the address judged. ``local_model`` is read here, not at import, so
+    this module stays free of the edge.
+    """
+    if is_ollama_cloud_model(model):
+        return False
+    address = str(base_url or "").strip()
+    if not address:
+        from alelyon.runtime.oracle.assistant import local_model  # noqa: PLC0415
+
+        address = local_model.base_url()
+    return is_local_url(address)
+
+
 @dataclass
 class ModelEndpoint:
     """One reachable model."""
@@ -155,6 +201,9 @@ class ModelEndpoint:
             raise ValueError("endpoint key name is invalid")
         if self.kind == KIND_OPENAI and not self.base_url:
             raise ValueError("OpenAI-compatible endpoints require a base URL")
+        if self.kind == KIND_LLAMACPP and (self.base_url or self.api_key_name):
+            raise ValueError("the managed llama.cpp server takes no URL or key; "
+                             "the platform starts it and holds its launch token")
         if self.base_url:
             raw_url = self.base_url.strip()
             try:
@@ -183,14 +232,23 @@ class ModelEndpoint:
 
     @property
     def local(self) -> bool:
-        """Whether this endpoint is on this machine — decided by URL.
+        """Whether this endpoint is on this machine — decided by the address its
+        client will call, never by its label.
 
-        Ollama with no explicit URL means the default loopback server.
+        The managed llama.cpp server is local by construction: this process
+        starts it on 127.0.0.1. A saved Ollama row (retired, ADR-0041: it never
+        answers) is judged as its client would have been: with no URL of its own
+        it meant ``OLLAMA_BASE_URL``, or the default loopback server when that is
+        unset, so it is local exactly when that address is; and an Ollama model
+        the daemon serves remotely (``*-cloud``) is not local whatever the
+        address (:func:`ollama_is_local`).
         """
         if self.kind == KIND_ANTHROPIC:
             return False
-        if self.kind == KIND_OLLAMA and not self.base_url:
+        if self.kind == KIND_LLAMACPP:
             return True
+        if self.kind == KIND_OLLAMA:
+            return ollama_is_local(self.base_url, self.model)
         return is_local_url(self.base_url)
 
     @property
@@ -208,15 +266,26 @@ class ModelEndpoint:
             return False
 
     def ready(self) -> bool:
+        if self.kind == KIND_OLLAMA:
+            return False                       # retired, ADR-0041
+        if self.kind == KIND_LLAMACPP:
+            # Enabled is enough: with no model selected the provider answers
+            # every call with "no model is selected", which tells the user what
+            # to do, instead of the chain skipping local without a word.
+            return self.enabled
         has_target = self.kind != KIND_OPENAI or bool(self.base_url.strip())
         return bool(self.enabled and self.model and has_target and self.has_key())
 
     def status(self) -> str:
         """One sentence a user can act on."""
+        if self.kind == KIND_OLLAMA:
+            return "Ollama is retired (ADR-0041); use llama.cpp"
         if not self.enabled:
             return "disabled"
         if self.kind == KIND_OPENAI and not self.base_url.strip():
             return "no server URL set"
+        if self.kind == KIND_LLAMACPP and not self.model:
+            return "no model selected (put a GGUF file in ~/.alelyon/models)"
         if not self.model:
             return "no model name set"
         if self.needs_key and not self.has_key():
@@ -301,9 +370,11 @@ class ModelConfigLoadReport:
 def _builtins() -> List[ModelEndpoint]:
     return [
         ModelEndpoint(
-            id="ollama-local", label="Ollama (this machine)", kind=KIND_OLLAMA,
-            base_url="", model="qwen3-coder:30b", builtin=True,
-            note="Keyless. Runs entirely on this computer.",
+            id="llamacpp-local", label="llama.cpp (this machine, managed)",
+            kind=KIND_LLAMACPP, base_url="", model="", builtin=True,
+            note="Keyless. Runs entirely on this computer: Alelyon starts "
+                 "llama.cpp's server when it is needed, with a GGUF model from "
+                 "~/.alelyon/models.",
         ),
         ModelEndpoint(
             id="local-openai", label="Local server (vLLM / TGI / llama.cpp / LM Studio)",
@@ -320,11 +391,12 @@ def _builtins() -> List[ModelEndpoint]:
                  "Leave the model blank and pick from what the server lists.",
         ),
         ModelEndpoint(
-            id="llamacpp", label="llama.cpp server (this machine)",
+            id="llamacpp", label="llama.cpp server you run yourself (this machine)",
             kind=KIND_OPENAI, base_url="http://localhost:8080/v1", model="",
             enabled=False, builtin=True,
-            note="llama-server on its default port. Keyless. Most builds "
-                 "serve one model and ignore the model field.",
+            note="A llama-server you started yourself, on its default port. "
+                 "Most builds serve one model and ignore the model field. "
+                 "The managed entry above needs no server of your own.",
         ),
         ModelEndpoint(
             id="anthropic", label="Anthropic", kind=KIND_ANTHROPIC,
@@ -580,10 +652,12 @@ def get(endpoint_id: str) -> Optional[ModelEndpoint]:
 def runtime_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
     """Project Runtime-owned state onto a persisted endpoint.
 
-    The built-in local Ollama row is a catalogue/configuration record. Its
-    active model belongs to ``local_model`` because ModelBar, headless callers,
-    and the implicit provider fallback all need the same selection. Custom
-    Ollama endpoints remain explicit and are returned unchanged.
+    The built-in managed llama.cpp row is a catalogue/configuration record. Its
+    active model is the analyst's model preference (``local_model.
+    selected_model``: a GGUF file name, read from ``analyst_model.json``)
+    because ModelBar, headless callers, the implicit provider fallback and the
+    native Lattice all need the same selection. Other endpoints are returned
+    unchanged.
 
     This function is intentionally separate from :func:`load_with_report` so a
     bounded/injected registry observation never reads owner preference state or
@@ -592,13 +666,13 @@ def runtime_endpoint(endpoint: ModelEndpoint) -> ModelEndpoint:
     if type(endpoint) is not ModelEndpoint:
         raise TypeError("endpoint must be an exact ModelEndpoint")
     if (
-        endpoint.id == "ollama-local"
-        and endpoint.kind == KIND_OLLAMA
+        endpoint.id == "llamacpp-local"
+        and endpoint.kind == KIND_LLAMACPP
         and endpoint.builtin
     ):
-        from alelyon.runtime.oracle.assistant import local_model as LM  # noqa: PLC0415
+        from alelyon.runtime.oracle.assistant import llama_server as LS  # noqa: PLC0415
 
-        return replace(endpoint, model=LM.selected_model())
+        return replace(endpoint, model=LS.selected_model())
     return endpoint
 
 

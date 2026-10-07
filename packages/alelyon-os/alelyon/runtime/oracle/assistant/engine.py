@@ -1,8 +1,8 @@
-"""Route â†’ execute â†’ narrate â†’ check. Lattice's answer path.
+"""Route → execute → narrate → check. Lattice's answer path.
 
 The old panel put the question and a seven-line context header straight into a
 local model and printed whatever came back. Asked "where is SPY's gamma flip?"
-it produced a level â€” confidently, in the right format, from nothing. The
+it produced a level — confidently, in the right format, from nothing. The
 Gamma desk was running two tabs away.
 
 This replaces that with four steps:
@@ -12,13 +12,13 @@ This replaces that with four steps:
      never asked for a figure at this stage.
   2. **Execute.** `tools.run_plan` calls the desks deterministically. Same code
      paths the GUI draws from, so the chat cannot disagree with the screen.
-  3. **Narrate.** The model writes prose from the fact sheet â€” the *rendered*
+  3. **Narrate.** The model writes prose from the fact sheet — the *rendered*
      figures, the same strings the panel prints.
   4. **Check.** `grounding.check` verifies every number in the prose came from
      the facts. One repair attempt, then whatever survives is flagged in the UI
      rather than quietly shipped.
 
-Step 4 is what makes steps 1â€“3 worth anything. Handing a model facts makes it
+Step 4 is what makes steps 1–3 worth anything. Handing a model facts makes it
 *more likely* to quote them; nothing about it makes fabrication impossible, and
 the failure looks identical to success. The check is cheap, deterministic, and
 runs on every answer.
@@ -33,7 +33,7 @@ better answer than a confident guess.
 
 `MODE_OPEN` keeps steps 1, 2 and 4 and drops step 3's cage. The desks are still
 queried, the facts still arrive with their own as-of stamps, and the grounding
-check still runs â€” but its report is **advisory**: it says which figures matched
+check still runs — but its report is **advisory**: it says which figures matched
 desk data and which did not, and does not rewrite or suppress the answer. The
 model may reason, explain, do arithmetic, write code and use what it knows. This
 is the mode the standalone Lattice product runs in, where the desks are a source
@@ -48,7 +48,7 @@ Watching it happen
 ------------------
 `ask` takes two optional sinks. `on_stage` reports which of the four steps is
 running; `on_text` receives the narration in fragments as the model writes it.
-Both are advisory â€” the returned answer is byte-identical with or without them â€”
+Both are advisory — the returned answer is byte-identical with or without them —
 and `on_text` is honoured in `MODE_OPEN` only. Grounded prose can still be
 repaired or replaced after step 4, and streaming a figure that step 4 then
 withdraws is worse beside a live book than a blank panel for a minute.
@@ -63,15 +63,16 @@ a `Domain` (`domain.py`). This file used to introduce itself to the router as
 manager"; a general assistant running on it inherited both. The engine now asks
 the domain for those words and never holds one of its own.
 
-`domain` defaults to `GENERAL` â€” an assistant with the certified calculator and
+`domain` defaults to `GENERAL` — an assistant with the certified calculator and
 nothing else. A caller that wants the markets desks must say so, which is the
 point: the market surface is opt-in rather than ambient.
 
 Qt-free and offline-testable: `llm` is any `Callable[[str], str]`. The streaming
-seam is discovered, not required â€” a plain callable simply does not have one.
+seam is discovered, not required — a plain callable simply does not have one.
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 from dataclasses import dataclass, field
@@ -91,7 +92,7 @@ MAX_TOOLS = 4
 __all__ = ["MODE_AUTO", "MODE_GROUNDED", "MODE_OPEN", "MODES",
            "RESOLVED_MODES", "AnalystAnswer", "ask"]
 
-# â”€â”€ progress stages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── progress stages ──────────────────────────────────────────────────────────
 #
 # A closed vocabulary, because the panel maps these to captions and a typo would
 # silently produce a blank status line. The detail string beside each one is
@@ -104,7 +105,7 @@ STAGE_DONE = "done"
 STAGES = (STAGE_ROUTING, STAGE_DESKS, STAGE_WRITING, STAGE_CHECKING, STAGE_DONE)
 
 
-# â”€â”€ step 1: routing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── step 1: routing ──────────────────────────────────────────────────────────
 def _vocab(domain: Optional[Domain]) -> Vocabulary:
     return (domain or GENERAL).vocabulary
 
@@ -158,7 +159,7 @@ def _json_block(text: str) -> Optional[dict]:
 def parse_plan(raw: str, *, domain: Optional[Domain] = None,
                registry: Optional[T.Registry] = None
                ) -> Tuple[List[Tuple[str, Dict[str, Any]]], str]:
-    """(calls, note). Unknown tool names are DROPPED and named in the note â€”
+    """(calls, note). Unknown tool names are DROPPED and named in the note —
     silently ignoring them would leave the reader wondering why their question
     went unanswered.
 
@@ -192,7 +193,7 @@ def parse_plan(raw: str, *, domain: Optional[Domain] = None,
     return calls[:MAX_TOOLS], note
 
 
-# â”€â”€ step 3: narration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── step 3: narration ────────────────────────────────────────────────────────
 def _answer_rules(vocab: Vocabulary) -> str:
     return (
         "Rules:\n"
@@ -239,11 +240,11 @@ def _open_rules(vocab: Vocabulary) -> str:
         f"How to use {vocab.the_data()}:\n"
         f"- The figures above were computed deterministically by this "
         f"machine's own {plural}, from captured data, moments ago. Where they "
-        f"answer the question they are better than your recollection â€” quote "
+        f"answer the question they are better than your recollection — quote "
         f"them exactly as rendered and keep their as-of stamps.\n"
         f"- Never attribute a figure to a {vocab.tool_noun} that did not "
-        f"return it. If you give a number of your own â€” an estimate, a worked "
-        f"calculation, something you know â€” say so plainly in the sentence "
+        f"return it. If you give a number of your own — an estimate, a worked "
+        f"calculation, something you know — say so plainly in the sentence "
         f"that carries it.\n"
         f"- If the {plural} returned nothing relevant, answer anyway from what "
         f"you know, and say which {vocab.tool_noun} would hold the measured "
@@ -303,11 +304,11 @@ def open_answer_prompt(question: str, results: Sequence[T.ToolResult],
 
     The fact block is framed as EVIDENCE rather than as the only permissible
     vocabulary. That is the whole difference from `answer_prompt`: the same
-    facts, the same as-of stamps, the same provenance â€” but the model is being
+    facts, the same as-of stamps, the same provenance — but the model is being
     asked to think with them rather than to recite them.
 
     `persona` overrides the domain's, for a host that wants to introduce the
-    assistant in its own words. Absent one, the domain's persona is used â€” the
+    assistant in its own words. Absent one, the domain's persona is used — the
     engine holds none of its own.
     """
     vocab = _vocab(domain)
@@ -347,7 +348,7 @@ def repair_prompt(question: str, prose: str, bad: Sequence[grounding.Mention],
     )
 
 
-# â”€â”€ result â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── result ───────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class AnalystAnswer:
     question: str
@@ -364,15 +365,15 @@ class AnalystAnswer:
     # which is a check applied afterwards.
     constrained: bool = False
     #: Routed to its desk without asking a model. The facts are identical either
-    #: way â€” this only records that no generation stood between the question and
+    #: way — this only records that no generation stood between the question and
     #: the desk, which is why the answer was immediate.
     deterministic: bool = False
     #: The prose is a rendering of the facts, not model output. Set when no model
-    #: answered â€” the desks still did, and their figures are the answer.
+    #: answered — the desks still did, and their figures are the answer.
     facts_only: bool = False
     #: Which contract produced this answer. See MODE_GROUNDED / MODE_OPEN.
     mode: str = MODE_GROUNDED
-    #: Which domain answered â€” the key, not the object, so a saved transcript
+    #: Which domain answered — the key, not the object, so a saved transcript
     #: keeps it without pickling a callable. Worth recording: the same question
     #: gets a different answer in a domain with a book behind it, and a
     #: transcript that omits which one ran is missing the first thing you would
@@ -380,7 +381,7 @@ class AnalystAnswer:
     domain: str = ""
     #: True when the grounding report is INFORMATION, not a gate. In open mode
     #: the model may legitimately write a figure of its own, so an unsupported
-    #: mention means "this number is the model's, not a desk's" â€” which is worth
+    #: mention means "this number is the model's, not a desk's" — which is worth
     #: showing and is not a defect.
     advisory: bool = False
     #: The backend saw the conversation as a native message array — system
@@ -392,7 +393,7 @@ class AnalystAnswer:
     #: — a backend that reported nothing must not appear to have cost nothing.
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
-    #: The generation stopped before the model finished â€” a dropped connection
+    #: The generation stopped before the model finished — a dropped connection
     #: or a size ceiling. The text is real as far as it goes, and a half answer
     #: presented as a whole one is the model's first thought published as its
     #: conclusion, so this must reach the screen.
@@ -423,13 +424,13 @@ class AnalystAnswer:
 
     @property
     def consulted(self) -> str:
-        """The provenance line. Names only tools that actually returned data â€”
+        """The provenance line. Names only tools that actually returned data —
         a failed call did not inform the answer and must not appear to have."""
         good = [r.tool for r in self.results if r.ok]
         return ", ".join(dict.fromkeys(good))
 
 
-# â”€â”€ the engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── the engine ───────────────────────────────────────────────────────────────
 def facts_of(results):
     return T.facts_of(results)
 
@@ -447,7 +448,7 @@ def _mark_private(llm: Callable[[str], str]) -> None:
 
 def _try_constrained(question, results, history, llm):
     """One constrained attempt. Any failure returns a non-ok reply and the
-    caller falls back â€” a backend that ignored the grammar must never produce
+    caller falls back — a backend that ignored the grammar must never produce
     an answer that gets badged as guaranteed."""
     facts = T.facts_of(results)
     try:
@@ -539,6 +540,39 @@ def _streamer(llm) -> Optional[Callable[..., Any]]:
     return fn if callable(fn) else None
 
 
+def _keeps_a_local_turn_local(fn):
+    """Run `ask` inside `no_outside_requests()` when its turn promised to stay
+    on this machine, and leave every other turn exactly as it was.
+
+    The promise has one source, the chain (`Context.stays_local`, or the `llm`
+    handed in, which is the same chain), so no host composes a second flag. The
+    tools of such a turn are held to it by the registry (`Tool.reach`); this
+    holds the rest of the turn, which the registry cannot see: the router
+    resolves a ticker or a company name through the SEC's ticker list, and that
+    list is requested whenever its cache file is missing or a week old. Inside
+    the block that request is not made; the router reads the cache file as it
+    is.
+
+    The import is deferred and optional: the standalone assistant ships without
+    the markets data layer, and a build with no such layer has no such request.
+    """
+    @functools.wraps(fn)
+    def wrapper(question, *args, **kwargs):
+        stays_local = (
+            getattr(kwargs.get("ctx"), "stays_local", False) is True
+            or getattr(kwargs.get("llm"), "local_only", False) is True)
+        if not stays_local:
+            return fn(question, *args, **kwargs)
+        try:
+            from alelyon.runtime.atlas.edgar.client import no_outside_requests
+        except ImportError:
+            return fn(question, *args, **kwargs)
+        with no_outside_requests():
+            return fn(question, *args, **kwargs)
+    return wrapper
+
+
+@_keeps_a_local_turn_local
 def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
         history: Sequence = (), provider_name: str = "",
         max_tools: int = MAX_TOOLS, repair: bool = True,
@@ -565,7 +599,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
     rather than an omission.** The grounded contract may repair or replace prose
     after a grounding check; streaming it would put an unverified figure on
     screen beside a live book and retract it a second later, which is worse than
-    a pause. Grounded callers still get stage events â€” those describe the work,
+    a pause. Grounded callers still get stage events — those describe the work,
     not the answer.
 
     `cancel` is polled between fragments. A cancelled answer returns the text
@@ -588,7 +622,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
     auto = (mode == MODE_AUTO)
     if auto:
         # First pass, from the question alone. The deterministic router has not
-        # run yet, so this is the domain reading the sentence â€” which is the
+        # run yet, so this is the domain reading the sentence — which is the
         # half a caller cannot supply. It is re-decided once calls are known.
         mode = domain.contract_for(question, ())
 
@@ -610,7 +644,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
     # Context the DOMAIN calls private is private before the first model call.
     # Auto mode may still use cloud for a public conceptual question, but never
     # for a question carrying that state. This is a PRIVACY boundary and holds
-    # in both modes â€” open mode frees what the model may say, not where the
+    # in both modes — open mode frees what the model may say, not where the
     # context may travel. The engine does not know what makes a context private
     # in any particular subject; it asks.
     if domain.private_context(ctx, history):
@@ -618,7 +652,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
 
     # DETERMINISTIC FIRST. In a domain with a router, most questions name their
     # tool unmistakably, and routing them through a generation costs a round
-    # trip the answer does not need â€” on a 30B model that round trip is most of
+    # trip the answer does not need — on a 30B model that round trip is most of
     # the latency that made this look broken. The model still owns anything
     # open-ended: `plan()` returns None there, as it always does in a domain
     # with no router at all, and the LLM path below runs exactly as it did.
@@ -652,7 +686,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
             raw_plan = llm(route_prompt(question, history, domain=domain))
         except Exception as exc:  # noqa: BLE001
             # A model that is down, slow, or missing is an ordinary condition
-            # here â€” it must produce a stated reason, not an exception into the
+            # here — it must produce a stated reason, not an exception into the
             # panel, which is indistinguishable from the app hanging.
             _stage(on_stage, STAGE_DONE, "")
             hint = f" {vocab.offline_hint}" if vocab.offline_hint else ""
@@ -671,7 +705,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
 
     # SECOND PASS, and it may only TIGHTEN. The first pass read the question;
     # this one has the plan, so it catches a market question the sentence test
-    # missed and the model routed anyway â€” "what is my biggest risk" phrased in
+    # missed and the model routed anyway — "what is my biggest risk" phrased in
     # a way no pattern matches, answered by `book_risk`.
     #
     # One direction only. A plan that turned out to name no tool must NOT buy
@@ -685,7 +719,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
             # Streaming is open-mode only, and this is the path where that
             # matters most: fragments may already have been promised to a sink.
             # `stream` is chosen below from `is_open`, which is now False, so
-            # the answer is delivered whole â€” the correct behaviour beside a
+            # the answer is delivered whole — the correct behaviour beside a
             # live book, and the reason `on_text` is advisory rather than a
             # contract.
             on_text = None
@@ -702,7 +736,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
 
     # Prefer the CONSTRAINED path: a figure the desks did not return has no
     # representation in the grammar, so fabrication is prevented rather than
-    # detected. Falls back rather than failing â€” a small model that cannot
+    # detected. Falls back rather than failing — a small model that cannot
     # phrase its answer inside the template should still get to answer, with
     # the after-the-fact check doing the work instead.
     constrained = False
@@ -769,17 +803,17 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
             # facts below, exactly as a dead blocking provider does.
             truncated = bool(prose) and not result.complete and not cancelled
             if not prose and result.error:
-                note = f"{note} Â· {result.error}".strip(" Â·")
+                note = f"{note} · {result.error}".strip(" ·")
         else:
             try:
                 prose = _strip_think((llm(narration) or "").strip())
-            except Exception as exc:  # noqa: BLE001 â€” a dead model must not eat the facts
-                note = (f"{note} Â· narration failed: {type(exc).__name__}").strip(" Â·")
+            except Exception as exc:  # noqa: BLE001 — a dead model must not eat the facts
+                note = (f"{note} · narration failed: {type(exc).__name__}").strip(" ·")
                 prose = ""
     facts_only = False
     if not prose and results:
         # THE FACTS ARE THE ANSWER. A model that is missing, slow, or broken
-        # costs the sentence around the numbers â€” it does not cost the numbers,
+        # costs the sentence around the numbers — it does not cost the numbers,
         # which the desks already returned. Rendering them is a complete reply,
         # and it cannot fabricate, because nothing generated it.
         prose = _facts_only_prose(results)
@@ -808,7 +842,7 @@ def ask(question: str, *, ctx: T.Context, llm: Callable[[str], str],
     report = grounding.check(prose, facts, question=question)
     repaired = False
     # The check still runs on a constrained answer. If it ever fails there, the
-    # constraint leaked â€” a bug in this module, not a model fabricating â€” and
+    # constraint leaked — a bug in this module, not a model fabricating — and
     # the louder that shows up the better.
     if repair and not report.grounded and not constrained:
         second = _strip_think(
@@ -853,7 +887,7 @@ def _stream_narration(stream, prompt: str, on_text, cancel):
 
     try:
         result = stream(prompt, _sink, cancel)
-    except Exception as exc:  # noqa: BLE001 â€” a dead model must not eat the facts
+    except Exception as exc:  # noqa: BLE001 — a dead model must not eat the facts
         return StreamResult("", False, error=f"narration failed: {type(exc).__name__}")
     tail = scratchpad.flush()
     if tail:
@@ -870,7 +904,7 @@ def _facts_only_prose(results: Sequence[T.ToolResult]) -> str:
     Deliberately plain and deliberately not a sentence: this is the fact sheet,
     not an imitation of narration. Each figure carries its own as-of and its own
     uncertainty, so what is missing versus a narrated answer is the connective
-    prose â€” not information.
+    prose — not information.
     """
     lines = ["The tools answered; no model was available to write the summary, "
              "so here are the figures themselves."]
@@ -879,11 +913,11 @@ def _facts_only_prose(results: Sequence[T.ToolResult]) -> str:
             lines.append(f"\n{r.tool}: {r.unavailable}")
             continue
         if r.error:
-            lines.append(f"\n{r.tool}: failed â€” {r.error}")
+            lines.append(f"\n{r.tool}: failed — {r.error}")
             continue
         if not r.facts:
             continue
-        lines.append(f"\n{r.tool}" + (f" Â· {r.source}" if r.source else ""))
+        lines.append(f"\n{r.tool}" + (f" · {r.source}" if r.source else ""))
         for f in r.facts[:14]:
             bar = f.rendered_error()
             asof = f" (as of {f.as_of})" if f.as_of else ""

@@ -1,4 +1,4 @@
-"""Conversation-native transport: the same three wire formats, real messages.
+"""Conversation-native transport: the same two wire formats, real messages.
 
 `providers.py` and `streaming.py` give every backend one shape — a flat prompt
 string in, text out. That is the right contract for the Answer Engine's
@@ -20,7 +20,9 @@ vocabulary. Each wire format receives them in its own native representation:
 * **OpenAI-compatible** — the array as-is, `system` as a message role.
 * **Anthropic** — system content lifted into the top-level `system` parameter,
   which is that API's native representation; user/assistant turns in the array.
-* **Ollama** — the native `/api/chat` messages array, `system` role included.
+
+The platform's own llama.cpp server (ADR-0041) is OpenAI-compatible. Ollama's
+native `/api/chat` was a third format until ADR-0041 retired Ollama.
 
 Token accounting rides along where the wire reports it. `TokenUsage` fields
 are `None` when the backend did not report a count — absent is absent, never
@@ -45,8 +47,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Tuple
 
 from alelyon.runtime.oracle.answer.providers import (
-    _ANTHROPIC_URL, _ANTHROPIC_VERSION, normalize_ollama_chat_url,
-    normalize_openai_chat_url, oracle_urlopen,
+    _ANTHROPIC_URL, _ANTHROPIC_VERSION, normalize_openai_chat_url,
+    oracle_urlopen,
 )
 from alelyon.runtime.oracle.answer.streaming import (
     MAX_STREAM_CHARS, CancelCheck, StreamSink, sse_events,
@@ -243,14 +245,6 @@ def anthropic_usage(obj: dict) -> Optional[TokenUsage]:
         return None
     reading = TokenUsage(prompt_tokens=_int_or_none(usage.get("input_tokens")),
                          completion_tokens=_int_or_none(usage.get("output_tokens")))
-    return reading if reading.measured else None
-
-
-def ollama_usage(obj: dict) -> Optional[TokenUsage]:
-    if not isinstance(obj, dict):
-        return None
-    reading = TokenUsage(prompt_tokens=_int_or_none(obj.get("prompt_eval_count")),
-                         completion_tokens=_int_or_none(obj.get("eval_count")))
     return reading if reading.measured else None
 
 
@@ -550,113 +544,6 @@ def anthropic_chat_stream(model: str, *, max_tokens: int = 1200,
         if cancel is not None and cancel():
             return ChatReply("".join(parts), False, cancelled=True, usage=usage)
         return ChatReply("".join(parts), False, usage=usage,
-                         error="the model's connection closed before it finished")
-
-    return _stream
-
-
-# ── Ollama ───────────────────────────────────────────────────────────────────
-def ollama_chat(base_url: str, model: str, *, temperature: float = 0.1,
-                timeout: float = 300.0,
-                max_tokens: Optional[int] = None) -> ChatFn:
-    """The native `/api/chat`, message array included. Ollama accepts the
-    `system` role inside the array, so no lifting is needed."""
-    endpoint = normalize_ollama_chat_url(base_url)
-
-    def _chat(messages: Sequence[ChatMessage]) -> ChatReply:
-        rows = _rows(_clean(messages))
-        if not rows:
-            return ChatReply("", False, error="the conversation is empty")
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max(1, int(max_tokens))
-        body = {"model": model, "messages": rows, "stream": False,
-                "options": options}
-        try:
-            with _open(endpoint, body, {"Content-Type": "application/json"},
-                       timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            return _unreachable(exc)
-        if not isinstance(data, dict):
-            return ChatReply("", False, error="the model returned nothing")
-        message = data.get("message")
-        text = ""
-        if isinstance(message, dict):
-            text = str(message.get("content") or "")
-        text = (text or str(data.get("response") or "")).strip()
-        if not text:
-            return ChatReply("", False, error="the model returned nothing",
-                             usage=ollama_usage(data))
-        return ChatReply(text, True,
-                         finish_reason=str(data.get("done_reason") or ""),
-                         usage=ollama_usage(data))
-
-    return _chat
-
-
-def ollama_chat_stream(base_url: str, model: str, *, temperature: float = 0.1,
-                       timeout: float = 300.0,
-                       max_tokens: Optional[int] = None) -> ChatStreamFn:
-    """Streaming `/api/chat`. The final `done: true` object carries the counts."""
-    endpoint = normalize_ollama_chat_url(base_url)
-
-    def _stream(messages: Sequence[ChatMessage], sink: StreamSink,
-                cancel: CancelCheck = None) -> ChatReply:
-        rows = _rows(_clean(messages))
-        if not rows:
-            return ChatReply("", False, error="the conversation is empty")
-        options = {"temperature": temperature}
-        if max_tokens is not None:
-            options["num_predict"] = max(1, int(max_tokens))
-        body = {"model": model, "messages": rows, "stream": True,
-                "options": options}
-        parts: list[str] = []
-        total = 0
-        try:
-            with _open(endpoint, body, {"Content-Type": "application/json"},
-                       timeout) as response:
-                for raw in response:
-                    if cancel is not None and cancel():
-                        return ChatReply("".join(parts), False, cancelled=True)
-                    line = (raw.decode("utf-8", "replace")
-                            if isinstance(raw, bytes) else str(raw)).strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if not isinstance(obj, dict):
-                        continue
-                    message = obj.get("message")
-                    fragment = ""
-                    if isinstance(message, dict):
-                        fragment = str(message.get("content") or "")
-                    if not fragment:
-                        fragment = str(obj.get("response") or "")
-                    if fragment:
-                        parts.append(fragment)
-                        total += len(fragment)
-                        try:
-                            sink(fragment)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        if total >= MAX_STREAM_CHARS:
-                            return ChatReply(
-                                "".join(parts), False,
-                                error=f"the answer passed {MAX_STREAM_CHARS:,} "
-                                      f"characters and was cut off")
-                    if obj.get("done"):
-                        return ChatReply(
-                            "".join(parts), True,
-                            finish_reason=str(obj.get("done_reason") or ""),
-                            usage=ollama_usage(obj))
-        except Exception as exc:  # noqa: BLE001
-            return _unreachable(exc)
-        if cancel is not None and cancel():
-            return ChatReply("".join(parts), False, cancelled=True)
-        return ChatReply("".join(parts), False,
                          error="the model's connection closed before it finished")
 
     return _stream

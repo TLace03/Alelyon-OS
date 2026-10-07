@@ -294,13 +294,15 @@ def _cmd_status(args, mesh, bus, session, evidence, space) -> int:
         print()
         print(f"SUPERSEDED - {len(superseded)} selected-repository store(s) sit "
               f"at a state root")
-        print("  this build no longer reads. Resolution used to depend on "
-              "whether bootstrap()")
-        print("  had run in the process, so one machine wrote two of them with "
-              "divergent contents.")
+        print("  this build no longer reads. The root gained a globals/ "
+              "component (2026-08) and,")
+        print("  in a source checkout, moved out of AppData to ~/.alelyon/globals "
+              "(W4, 2026-10).")
         print("  NOT merged, moved or deleted: which one is truth is an owner "
               "decision, and")
         print("  adopting either silently is the failure that produced this.")
+        print("  tools/merge_selected_path_context.py reports the union; "
+              "--apply performs it.")
         for path in superseded:
             try:
                 size = f"{path.stat().st_size:,} B" if path.is_file() else "directory"

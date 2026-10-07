@@ -12,12 +12,46 @@ three months still shows *what the number was and when it was true*. If a figure
 was quoted from a Tuesday close, the record says so forever.
 
 Layout — `globals/analyst_chat/`:
-    index.json      thread list (id, title, timestamps, turn count)
-    <id>.jsonl      one turn per line, append-only
+    index.json          thread list (id, title, timestamps, turn count)
+    <id>.jsonl          one turn per line, append-only
+    evicted/index.json  the threads the cap moved out, each with `evicted_at`
+                        and `file`
+    evicted/<file>      their transcripts, as they were
 
 A directory rather than one file, so a torn write in one thread cannot take the
 others down with it, and deleting a thread is an unlink rather than a rewrite of
 everybody's history.
+
+**The cap archives; only the reader's Delete deletes.** The list holds at most
+`MAX_THREADS` threads. When one more would make it longer, the least recently
+used thread leaves the list, and its transcript is MOVED into `evicted/`, never
+unlinked, under the same lock that writes the index. Nothing here reads
+`evicted/` back: loading, listing and the capped index ignore it. (Until
+2026-10-02 the oldest thread's file was unlinked, and the only record of a
+conversation was gone the moment a new one was started.) `delete_thread` is the
+reader asking for a thread to be gone, and is a real delete.
+
+The archive is written so that it never disagrees with the disk after a failed
+write: an archive row exists only for a transcript that was moved (or for a
+thread that had none), a move that cannot be completed is taken back, and so is
+a move whose thread-index write fails. A crash in the middle can still leave a
+row whose file has not moved yet; the next attempt completes it, and a Delete of
+that thread drops it.
+
+**Reading `evicted/index.json`.** A reader must resolve a transcript only
+through its row's `file`, never by building `<id>.jsonl` from the id:
+  * `file` is the name inside `evicted/`. It is `<id>.jsonl`, or `<id>-2.jsonl`
+    and so on when an earlier archive already holds that name, so ids repeat
+    across rows and `(id, created)` is what identifies a conversation.
+  * `file` is "" for a thread that never had a turn: the row is its whole record.
+  * A row whose file is missing is tolerated, not an error: it is a crash's
+    leftover, or a transcript the reader removed from the directory by hand.
+  * An archive index that cannot be read is moved aside, byte for byte, as
+    `evicted/index.corrupt-<time>.json`, and archiving continues in a fresh
+    `index.json`. The transcripts are untouched, so a reader can still list the
+    directory.
+This applies to every store, not only Lattice's: the markets analyst's and the
+workspace CLI's stores archive past the cap too. Nothing prunes `evicted/`.
 
 **Superseded turns stay in the record.** Regenerating an answer or editing a
 question replaces what follows it on screen, but the lines are not deleted:
@@ -43,15 +77,19 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from alelyon.runtime.common.paths import GLOBALS_DIR
+
+_log = logging.getLogger(__name__)
 
 _DIR = GLOBALS_DIR / "analyst_chat"
 _INDEX = _DIR / "index.json"
@@ -60,9 +98,13 @@ _INDEX = _DIR / "index.json"
 _ROOTS: Dict[str, Any] = {}
 
 # Bounds. Threads are cheap, but an unbounded index turns the picker into a
-# scrolling graveyard and an unbounded thread makes re-open slow.
+# scrolling graveyard and an unbounded thread makes re-open slow. The thread
+# bound limits the LIST: a thread past it is archived under `evicted/`.
 MAX_THREADS = 60
 MAX_TURNS = 400
+
+#: The directory, inside a store, that evicted threads are moved into.
+EVICTED_DIR = "evicted"
 
 # One lock across every store. Contention between two products' chat panels is
 # a few file writes a minute; a lock per store would be four more objects whose
@@ -270,21 +312,277 @@ def _read_index_locked(store: str = "") -> List[Thread]:
     return out
 
 
+def _evicted_dir(store: str = ""):
+    return _root(store) / EVICTED_DIR
+
+
+#: A Windows replace of, or onto, a file another handle has open fails with a
+#: PermissionError that clears in milliseconds, when the other side is a reader
+#: that opens, reads a few kilobytes and closes. The wait is bounded, and the
+#: error is raised after it, so a handle that is held for good still fails.
+_REPLACE_TRIES = 6
+_REPLACE_WAIT_S = 0.02
+
+
+def _replace(src, dst) -> None:
+    """`os.replace`, tried again briefly on a sharing violation."""
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_TRIES - 1:
+                raise
+            time.sleep(_REPLACE_WAIT_S)
+
+
+#: `_read_evicted_index_locked` found a file that is there, was read, and is not
+#: a list of rows. Distinct from None (could not be read) because the two are
+#: handled differently: only a file known to be damaged is set aside.
+_CORRUPT = object()
+
+
+def _read_evicted_index_locked(store: str = ""):
+    """The archive's index rows as stored: a list, `[]` when there is none yet,
+    None when one exists and could not be read just now, or `_CORRUPT` when it
+    was read and is not a list of rows.
+
+    The differences matter. Rewriting an unreadable index from an empty list
+    would erase the only list of what the archive holds, so None means "leave
+    everything alone"; a sharing violation or a permission error is that case,
+    and may clear. `_CORRUPT` is a file that will never be a valid index again.
+    """
+    path = _evicted_dir(store) / "index.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except UnicodeDecodeError:
+        return _CORRUPT
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return _CORRUPT
+    return rows if isinstance(rows, list) else _CORRUPT
+
+
+def _write_evicted_index_locked(rows: list, store: str = "") -> None:
+    """Atomically, like `index.json`: the old archive index or the new one."""
+    index = _evicted_dir(store) / "index.json"
+    tmp = index.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    _replace(tmp, index)
+
+
+def _set_aside_evicted_index_locked(store: str = "") -> bool:
+    """Move a damaged archive index out of the way under a name of its own.
+
+    Not deleted and not rewritten: every byte stays on disk for whoever repairs
+    it, and the next archive starts a fresh `index.json`. Without this an
+    unreadable index stopped the cap for good, because rewriting it from
+    nothing would have erased the list of the archive and the alternative was
+    to archive nothing. The transcripts in `evicted/` are not touched either
+    way. True once the file is out of the way.
+    """
+    directory = _evicted_dir(store)
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(_now()))
+    for n in range(1, 1000):
+        suffix = "" if n == 1 else f"-{n}"
+        target = directory / f"index.corrupt-{stamp}{suffix}.json"
+        if target.exists():
+            continue
+        try:
+            _replace(directory / "index.json", target)
+        except Exception:  # noqa: BLE001
+            return False
+        _log.warning("[history] the archive index in %s was damaged; kept as "
+                     "%s and a new one started", directory, target.name)
+        return True
+    return False
+
+
+def _free_archive_name(thread_id: str, taken: set, directory) -> str:
+    """A file name in `evicted/` that no earlier archive holds or is promised.
+
+    An id can come back (a late save re-creates a thread file that was already
+    archived once), and `os.replace` would overwrite the earlier archive, so the
+    name is chosen to be free: `<id>.jsonl`, then `<id>-2.jsonl`, and so on.
+    """
+    for n in range(1, 10_000):
+        name = f"{thread_id}.jsonl" if n == 1 else f"{thread_id}-{n}.jsonl"
+        if name not in taken and not (directory / name).exists():
+            return name
+    raise OSError("no free archive name")
+
+
+@dataclass
+class _Move:
+    """One archive step, kept so that it can be taken back."""
+    entry: dict
+    added: bool                  # this call added the row (a retry reuses one)
+    source: Any
+    target: Any                  # where the transcript went; None: no transcript
+
+
+def _archive_one_locked(row: Thread, entries: list, store: str,
+                        moves: List[_Move]) -> bool:
+    """Move one evicted thread into `evicted/`. True once it is safely there.
+
+    The archive index row is written BEFORE the move, so a crash between the
+    two leaves an archive row for a file that is still in place; the retry finds
+    the row by (id, created), brings it up to date (the transcript may have
+    grown) and finishes the move. A move that FAILS takes its own row back out,
+    so a row always means "this was moved", apart from that crash window. The
+    thread file is never unlinked and never overwritten.
+    """
+    directory = _evicted_dir(store)
+    source = _thread_path(row.id, store)
+    has_transcript = source is not None and source.exists()
+    entry = next((e for e in entries if isinstance(e, dict)
+                  and e.get("id") == row.id
+                  and e.get("created") == row.created), None)
+    if entry is not None and has_transcript and (
+            not entry.get("file")
+            or (directory / Path(str(entry["file"])).name).exists()):
+        # The earlier archive of this id is complete, and a transcript now
+        # sits at the id again. This one is archived separately.
+        entry = None
+    added = entry is None
+    if added:
+        taken = {str(e.get("file")) for e in entries if isinstance(e, dict)}
+        name = (_free_archive_name(source.stem, taken, directory)
+                if has_transcript else "")
+        entry = {**asdict(row), "evicted_at": _now(), "file": name}
+        entries.append(entry)
+    else:
+        entry.update(title=row.title, updated=row.updated, turns=row.turns,
+                     pinned_provider=row.pinned_provider, evicted_at=_now())
+    try:
+        _write_evicted_index_locked(entries, store)
+    except Exception:  # noqa: BLE001
+        if added:
+            entries[:] = [e for e in entries if e is not entry]
+        raise
+    name = str(entry.get("file") or "")
+    target = directory / Path(name).name if name and has_transcript else None
+    if target is not None:
+        try:
+            if target.exists():
+                raise FileExistsError(str(target))     # never overwrite one
+            _replace(source, target)
+        except Exception:  # noqa: BLE001
+            if added:
+                _forget_rows_locked(entries, [entry], store)
+            raise
+    moves.append(_Move(entry, added, source, target))
+    return True
+
+
+def _forget_rows_locked(entries: list, gone: list, store: str) -> None:
+    """Take rows back out of the archive index. Best effort: the index it
+    writes is only ever shorter, and a failure leaves the rows as they were."""
+    entries[:] = [e for e in entries if not any(e is g for g in gone)]
+    try:
+        _write_evicted_index_locked(entries, store)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _undo_archive_locked(moves: List[_Move], entries: list, store: str) -> None:
+    """Take a batch of archive moves back: transcripts to where they were, the
+    rows this batch added out of the archive. A transcript that cannot be put
+    back keeps its row, because the row is then the only record of where it is.
+    """
+    forget = []
+    for move in reversed(moves):
+        restored = True
+        if move.target is not None:
+            try:
+                if move.target.exists() and not move.source.exists():
+                    _replace(move.target, move.source)
+            except Exception:  # noqa: BLE001
+                restored = False
+        if restored and move.added:
+            forget.append(move.entry)
+    if forget:
+        _forget_rows_locked(entries, forget, store)
+
+
+def _archive_evicted_locked(stale: List[Thread], store: str = ""):
+    """Archive threads the cap moved out. Returns `(kept, undo)`: the threads it
+    could NOT archive, and a callable that takes this batch back.
+
+    A thread that could not be archived stays in the index, past the cap, and
+    is tried again on the next write. A list that is briefly longer than the
+    cap is the cheaper failure: dropping the row would leave the transcript
+    unreachable. The caller runs `undo` when the thread index it then writes
+    cannot be written, so that the archive and the index land together or not
+    at all.
+    """
+    nothing = (lambda: None)
+    if not stale:
+        return [], nothing
+    entries = _read_evicted_index_locked(store)
+    if entries is _CORRUPT:
+        if not _set_aside_evicted_index_locked(store):
+            return list(stale), nothing
+        entries = []
+    if entries is None:
+        return list(stale), nothing
+    try:
+        _evicted_dir(store).mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        return list(stale), nothing
+    kept: List[Thread] = []
+    moves: List[_Move] = []
+    for row in stale:
+        try:
+            if not _archive_one_locked(row, entries, store, moves):
+                kept.append(row)
+        except Exception:  # noqa: BLE001
+            kept.append(row)
+    return kept, (lambda: _undo_archive_locked(moves, entries, store))
+
+
+def _forget_pending_archive_locked(row: Thread, store: str = "") -> None:
+    """Drop the archive rows a crash left for a thread the reader is deleting.
+
+    A pending row is one whose file is not in `evicted/`: the thread was about
+    to be archived and was not. The reader's Delete means the conversation is
+    to be gone, and the row's title is its first question. A row whose file is
+    there is a finished archive and stays, whatever shares its id.
+    """
+    entries = _read_evicted_index_locked(store)
+    if not isinstance(entries, list) or not entries:
+        return
+    directory = _evicted_dir(store)
+    pending = [e for e in entries if isinstance(e, dict)
+               and e.get("id") == row.id and e.get("created") == row.created
+               and e.get("file")
+               and not (directory / Path(str(e["file"])).name).exists()]
+    if pending:
+        _forget_rows_locked(entries, pending, store)
+
+
 def _write_index_locked(rows: List[Thread], store: str = "") -> None:
     index = _index_path(store)
     _root(store).mkdir(parents=True, exist_ok=True)
     rows = sorted(rows, key=lambda t: t.updated, reverse=True)
-    for stale in rows[MAX_THREADS:]:
-        p = _thread_path(stale.id, store)
-        try:
-            if p is not None and p.exists():
-                p.unlink()
-        except Exception:  # noqa: BLE001
-            pass
-    rows = rows[:MAX_THREADS]
-    tmp = index.with_suffix(".tmp")
-    tmp.write_text(json.dumps([asdict(r) for r in rows], indent=1), encoding="utf-8")
-    tmp.replace(index)
+    # Past the cap a thread is archived, not deleted (see the module docstring).
+    # Every caller holds `_store_lock`, so the move and the index write are one
+    # critical section, and a failed index write takes the moves back.
+    over, undo = _archive_evicted_locked(rows[MAX_THREADS:], store)
+    rows = rows[:MAX_THREADS] + over
+    try:
+        tmp = index.with_suffix(".tmp")
+        tmp.write_text(json.dumps([asdict(r) for r in rows], indent=1),
+                       encoding="utf-8")
+        _replace(tmp, index)
+    except Exception:
+        undo()
+        raise
 
 
 def list_threads(store: str = "") -> List[Thread]:
@@ -336,13 +634,45 @@ def pin_provider(thread_id: str, provider: str, store: str = "") -> bool:
     return False
 
 
+def touch(thread_id: str, store: str = "") -> bool:
+    """Count a thread as used now, without adding a turn.
+
+    For work done in a thread that is not a new message: regenerating an answer
+    rewrites what follows a question and then waits for a model, and meanwhile
+    the thread's `updated` is as old as its last message, which is exactly what
+    the cap reads to choose the thread it archives. Without this a thread in
+    the middle of an answer can be the least recently used one. False for an
+    unknown thread, which is not created.
+    """
+    with _store_lock(store):
+        rows = _read_index_locked(store)
+        for r in rows:
+            if r.id == thread_id:
+                r.updated = _now()
+                _write_index_locked(rows, store)
+                return True
+    return False
+
+
 def delete_thread(thread_id: str, store: str = "") -> bool:
+    """The reader's own Delete: a real delete, nothing is archived.
+
+    The one thing kept is a finished archive of an earlier life of the same id.
+    A row the cap left half-written for this thread (file not yet moved) goes
+    with it, because its title is the first question of a chat that is now to be
+    gone.
+    """
     with _store_lock(store):
         rows = _read_index_locked(store)
         keep = [r for r in rows if r.id != thread_id]
         if len(keep) == len(rows):
             return False
         _write_index_locked(keep, store)
+        for gone in (r for r in rows if r.id == thread_id):
+            try:
+                _forget_pending_archive_locked(gone, store)
+            except Exception:  # noqa: BLE001 - a Delete must still delete
+                pass
         p = _thread_path(thread_id, store)
         try:
             if p is not None and p.exists():
@@ -551,6 +881,11 @@ def clear_all(store: str = "") -> bool:
 
     A store name is required to reach anything but the default, so clearing
     Lattice's history cannot take the markets analyst's with it.
+
+    This wipes the listed threads. It does not reach `evicted/`: archived
+    threads are not deleted by anything but the reader's own decision, and no
+    caller yet carries one for them. A "clear history" control that means the
+    archive too must say so and remove `evicted/` itself.
     """
     root, index = _root(store), _index_path(store)
     try:
