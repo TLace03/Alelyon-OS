@@ -527,6 +527,14 @@ def same_directory(left: str, right: str) -> bool:
     if not left or not right:
         return False
     original_left, original_right = str(left), str(right)
+    if original_left == original_right and "\x00" not in original_left:
+        # One string names one directory, so the answer below is already
+        # known. Resolving costs two handle opens, and callers ask this per
+        # transcript line with the same cwd: 2026-10-08, ~145k calls in one
+        # Lattice view walk, ~86 s of worker CPU, which starved the GUI
+        # thread's own file calls. (A symlink loop, which `resolve` refuses
+        # with RuntimeError on Python 3.12, now compares equal to itself.)
+        return True
     try:
         lhs, rhs = Path(left).resolve(), Path(right).resolve()
     except OSError:

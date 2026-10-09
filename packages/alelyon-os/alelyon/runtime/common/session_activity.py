@@ -2180,7 +2180,10 @@ class ActivityIndex:
             if row_cwd is not None and not isinstance(row_cwd, str):
                 raise _TranscriptIdentityRefused(
                     "transcript cwd was not a string")
-            if (row_cwd and scanned_cwd
+            # The same string names the same directory; only a different
+            # spelling is resolved. `same_directory` costs two Path.resolve()
+            # calls, and this runs on every row of every transcript scanned.
+            if (row_cwd and scanned_cwd and row_cwd != scanned_cwd
                     and not same_directory(row_cwd, scanned_cwd)):
                 raise _TranscriptIdentityRefused(
                     "transcript rows disagreed on cwd")
@@ -2236,8 +2239,9 @@ class ActivityIndex:
                 row_cwd = str(record.get("cwd") or "")
                 row_session_id = str(record.get("sessionId") or "")
                 if row_cwd:
-                    if (established_cwd and not same_directory(
-                            row_cwd, established_cwd)):
+                    # Equal strings skip the resolve, as in the prefix check.
+                    if (established_cwd and row_cwd != established_cwd
+                            and not same_directory(row_cwd, established_cwd)):
                         raise _TranscriptIdentityRefused(
                             "transcript rows disagreed on cwd")
                     established_cwd = established_cwd or row_cwd
