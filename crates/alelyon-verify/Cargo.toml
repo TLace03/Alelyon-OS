@@ -1,0 +1,21 @@
+[package]
+name = "alelyon-verify"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Network-free verification primitives for Alelyon Certified Number Envelopes."
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "alelyon_verify"
+path = "src/lib.rs"
+
+# No dependency on a deterministic kernel: replay's numeric substrate is a trait (src/kernel.rs) that
+# a build supplies. The specified substrate is private; a build that links it hands it over.
+[dependencies]
+blake2 = "0.10.6"
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+ryu = "1.0.20"
+serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
+sha2 = "0.10.9"
