@@ -1,0 +1,171 @@
+{
+  "category": "golden",
+  "description": "A FRED series input, anchored through the series scope. Its membership is f64 epoch seconds rather than the int64 the bars path uses, and its value commitment packs the timestamp as <d rather than <q \u2014 a second implementation that reused the bars encoding here would agree with itself and with nothing else. No vector exercised this kind before.",
+  "envelope": {
+    "assumptions": [
+      "resampling PRNG independent of capture PRNG (fresh seed, persisted)",
+      "covers STORAGE QUANTIZATION only \u2014 sampling/provider/model error are separate terms"
+    ],
+    "created": 1000.0,
+    "error_budget": {
+      "model": null,
+      "provider": {
+        "inputs": {},
+        "origins": {},
+        "reason": "this data layer publishes no origin catalogue, so the number of upstreams behind these inputs is unknown",
+        "scope_note": "A corroboration record proves only that sources with DECLARED-DISTINCT upstream origins, sampled under a committed policy, disagreed by at most this much on the rows this answer consumed. It does NOT prove any of them is correct, that the origins are genuinely independent, or that the true value lies within it \u2014 sources that are wrong together agree perfectly, and no statistic computed from k readings constrains their common bias.",
+        "status": "unmeasured",
+        "trust": "signer-attested"
+      },
+      "quantization": {
+        "exact": true,
+        "level": 0.953125,
+        "tier": "linear-exact",
+        "width": 1.1693648538368961e-07
+      },
+      "sampling": null
+    },
+    "inputs": [
+      {
+        "deltas": {
+          "const": 5.125999450683594e-07,
+          "n": 6,
+          "uncertified_idx": []
+        },
+        "digest": "2e8fbeff4515c1e0fbd9d9984bcceb5d2af8d56e07fa8fb84521b82ad849f643",
+        "key": "DGS10",
+        "kind": "series",
+        "n": 6,
+        "transparency": {
+          "column": "value",
+          "leaves": [
+            {
+              "bits": 24,
+              "hi_ts": 1704758400.0,
+              "inclusion_proof": {
+                "index": 0,
+                "leaf_hash": "539cd1710631be3a8f059bfa190ffbfff577b4c19d3a9ee6218f883c0ddea010",
+                "proof": [],
+                "root": "14e08edc67122f843da241a2c8390156c808f90ef8bf8c00dd031c0165565188",
+                "tree_size": 1,
+                "value_digest": "2e8fbeff4515c1e0fbd9d9984bcceb5d2af8d56e07fa8fb84521b82ad849f643"
+              },
+              "lo_ts": 1704153600.0,
+              "n": 6,
+              "payload": "[{\"column\": \"value\", \"n\": 6, \"delta\": 5.125999450683594e-07, \"seed\": 20260729, \"error_var\": 2.189655864034042e-14}, {\"membership\": {\"encoding\": \"f64-epoch-seconds/v0\", \"rows\": [1704153600.0, 1704240000.0, 1704326400.0, 1704412800.0, 1704672000.0, 1704758400.0]}}, {\"value_commitments\": {\"encoding\": \"blake2b-256-row/merkle-v0\", \"columns\": {\"value\": \"026d03ed21593eadccb6372109ba829cf5b6fd9f35050be6349accb02c0ea969\"}}}]",
+              "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "seq": 0,
+              "value_digest": "2e8fbeff4515c1e0fbd9d9984bcceb5d2af8d56e07fa8fb84521b82ad849f643"
+            }
+          ],
+          "scope": [
+            "fred",
+            "DGS10"
+          ],
+          "sth": {
+            "head_leaf": "539cd1710631be3a8f059bfa190ffbfff577b4c19d3a9ee6218f883c0ddea010",
+            "key_id": "ed25519:ba2655652874c66c",
+            "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+            "root": "14e08edc67122f843da241a2c8390156c808f90ef8bf8c00dd031c0165565188",
+            "scope": [
+              "fred",
+              "DGS10"
+            ],
+            "signature": "ea94f78858608467c558e7c37ab2b5d6ddef5a9b0e8810fff0ab7b79f491d0c098ef065eed633e22da2410d8a024d7e3be78763b5ed256be991ebeda6d83470a",
+            "table": "series",
+            "timestamp": 1000.0,
+            "tree_size": 1,
+            "type": "alelyon.sth/v0"
+          },
+          "table": "series"
+        },
+        "uncertified": 0
+      }
+    ],
+    "kernel": "alelyon-vector/0.1.0",
+    "key_id": "ed25519:ba2655652874c66c",
+    "params": {
+      "K": 63,
+      "alpha": 0.05,
+      "strict": true
+    },
+    "program": "show mean(series(\"DGS10\"))",
+    "program_class": "linear-exact",
+    "program_hash": "b9a0d5bc9b1915892f70555cd5a38ae6f72f6bd4ea4f051ab347ec8857b3e2df",
+    "public_key": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "reason": null,
+    "refused": false,
+    "scalar": 4.183333368457757,
+    "seed": 7,
+    "signature": "0187faf983b50c79f564b1d9b7c67e7f169b717713080bea5b5af1ab7a286aa137ae51e97e5e8e66f88ac259a31472526f68b09666f4b4e2eb5831451041ff0f",
+    "type": "alelyon.cne/v0"
+  },
+  "expect": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": true,
+      "width": true,
+      "witness": null
+    },
+    "ok": true,
+    "reason_classes": [],
+    "width_trust": "transparency-anchored"
+  },
+  "expect_classes": [],
+  "expect_off_substrate": {
+    "checks": {
+      "authenticity": true,
+      "budget": true,
+      "inputs": true,
+      "key_status": null,
+      "program": true,
+      "provider": null,
+      "scalar": true,
+      "tier": true,
+      "transparency": true,
+      "width": null,
+      "witness": null
+    },
+    "ok": false,
+    "reason_classes": [
+      "scalar-tolerance-window",
+      "substrate-mismatch"
+    ],
+    "width_trust": "unverified"
+  },
+  "inputs": {
+    "series|DGS10": {
+      "index": [
+        1704153600.0,
+        1704240000.0,
+        1704326400.0,
+        1704412800.0,
+        1704672000.0,
+        1704758400.0
+      ],
+      "name": "DGS10",
+      "values": [
+        4.100000145266623,
+        4.250000230225271,
+        4.049999790408118,
+        4.300000139404603,
+        4.1799997998001155,
+        4.2200001056418115
+      ]
+    }
+  },
+  "must": "pass",
+  "pins": {
+    "public_key_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "witness_key_hex": null
+  },
+  "slug": "golden-series-anchored",
+  "spec_version": "alelyon.cne-spec/0.3.0"
+}
